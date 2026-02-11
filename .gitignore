@@ -1,0 +1,8 @@
+# .gitignore im Projektordner
+node_modules/
+*.log
+.cache/
+.DS_Store
+*.swp
+*.tmp
+~/.cache/
