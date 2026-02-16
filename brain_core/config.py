@@ -33,12 +33,15 @@ class SomaConfig(BaseSettings):
     # ── MQTT ─────────────────────────────────────────────────────────────
     mqtt_host: str = "localhost"
     mqtt_port: int = 1883
+    mqtt_ws_port: int = 9001
 
     # ── Ollama ───────────────────────────────────────────────────────────
     ollama_host: str = "http://localhost"
     ollama_port: int = 11434
     ollama_heavy_model: str = "llama3:8b"
     ollama_light_model: str = "phi3:mini"
+    ollama_num_parallel: int = 2
+    ollama_max_loaded_models: int = 2
 
     # ── Health Thresholds ────────────────────────────────────────────────
     health_ram_warn_percent: float = 75.0
@@ -56,6 +59,7 @@ class SomaConfig(BaseSettings):
     django_host: str = "0.0.0.0"
     django_port: int = 8200
     django_secret_key: str = "soma-django-secret-change-me-in-production"
+    django_debug: bool = True
 
     @property
     def redis_url(self) -> str:
@@ -78,6 +82,7 @@ class SomaConfig(BaseSettings):
 
     class Config:
         env_file = ".env"
+        extra = "ignore"
         env_file_encoding = "utf-8"
         case_sensitive = False
 

@@ -246,7 +246,7 @@ class NodeCapability(models.Model):
         help_text="Fähigkeit (z.B. 'audio_input', 'display', 'temperature')",
     )
     direction = models.CharField(
-        max_length=4,
+        max_length=6,
         choices=Direction.choices,
         default=Direction.INPUT,
     )

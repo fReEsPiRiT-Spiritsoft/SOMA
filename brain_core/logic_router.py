@@ -201,9 +201,10 @@ class LogicRouter:
             "wärmer", "kälter", "warmer", "cooler",
         ]
         prompt_lower = prompt.lower().strip()
+        words = prompt_lower.split()
         # Kurze Prompts mit Device-Keywords → Nano
-        if len(prompt_lower.split()) <= 6:
-            return any(kw in prompt_lower for kw in nano_keywords)
+        if len(words) <= 6:
+            return any(kw in words for kw in nano_keywords)
         return False
 
     # ── Deferred Reasoning ───────────────────────────────────────────────
