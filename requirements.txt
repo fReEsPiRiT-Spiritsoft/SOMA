@@ -30,6 +30,11 @@ numpy==2.2.*
 scipy==1.15.*
 librosa==0.10.*
 
+# ── Voice Pipeline (STT/TTS/VAD) ───────────────────────────────────────
+faster-whisper>=1.1.0
+webrtcvad-wheels>=2.0.11
+piper-tts>=1.2.0
+
 # ── mDNS / Zero-Config ─────────────────────────────────────────────────
 zeroconf==0.136.*
 
