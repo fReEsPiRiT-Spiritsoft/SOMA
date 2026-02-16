@@ -4,8 +4,6 @@
 # Target: 32GB RAM / 12GB VRAM Debian System
 # ============================================================================
 
-version: "3.9"
-
 services:
   # ── PostgreSQL: SSOT Database ──────────────────────────────────────────
   postgres:

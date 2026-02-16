@@ -76,15 +76,17 @@ async def lifespan(app: FastAPI):
     # 2. Health Monitor starten mit Broadcast-Callback
     async def broadcast_metrics(metrics: SystemMetrics):
         """Pushe Metriken an alle verbundenen WebSocket-Clients."""
-        if ws_connections:
-            data = metrics.model_dump_json()
-            dead = set()
-            for ws in ws_connections:
-                try:
-                    await ws.send_text(data)
-                except Exception:
-                    dead.add(ws)
-            ws_connections -= dead
+        if not ws_connections:
+            return
+        data = metrics.model_dump_json()
+        dead: list[WebSocket] = []
+        for ws in ws_connections:
+            try:
+                await ws.send_text(data)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            ws_connections.discard(ws)
 
     health_monitor._on_metrics = broadcast_metrics
     await health_monitor.start()
