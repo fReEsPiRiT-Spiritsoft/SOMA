@@ -6,3 +6,7 @@ node_modules/
 *.swp
 *.tmp
 ~/.cache/
+.github/copilot-instructions.md
+.gitignore
+
+# Ignoriere Build-Ordner

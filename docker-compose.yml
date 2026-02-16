@@ -1,0 +1,117 @@
+# ============================================================================
+# SOMA-AI: Docker Compose Orchestration
+# Services: PostgreSQL, Mosquitto (MQTT), Redis, Ollama
+# Target: 32GB RAM / 12GB VRAM Debian System
+# ============================================================================
+
+version: "3.9"
+
+services:
+  # ── PostgreSQL: SSOT Database ──────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: soma-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-soma_db}
+      POSTGRES_USER: ${POSTGRES_USER:-soma}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-soma_secret_change_me}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - soma_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-soma}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # ── Redis: Deferred Reasoning Queue & Cache ────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: soma-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --requirepass ${REDIS_PASSWORD:-soma_redis_secret}
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - soma_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-soma_redis_secret}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+
+  # ── Mosquitto: MQTT Broker (Hardware Nervous System) ───────────────────
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: soma-mosquitto
+    restart: unless-stopped
+    ports:
+      - "${MQTT_PORT:-1883}:1883"
+      - "${MQTT_WS_PORT:-9001}:9001"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - soma_mqttdata:/mosquitto/data
+      - soma_mqttlog:/mosquitto/log
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h localhost -p 1883 -t '$$SYS/broker/uptime' -C 1 -W 3 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # ── Ollama: Local LLM Runtime (The Mind) ───────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: soma-ollama
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - soma_ollama_models:/root/.ollama
+    environment:
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-2}
+      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-2}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+        limits:
+          memory: 20G
+
+volumes:
+  soma_pgdata:
+    driver: local
+  soma_redisdata:
+    driver: local
+  soma_mqttdata:
+    driver: local
+  soma_mqttlog:
+    driver: local
+  soma_ollama_models:
+    driver: local
+
+networks:
+  default:
+    name: soma-network
+    driver: bridge

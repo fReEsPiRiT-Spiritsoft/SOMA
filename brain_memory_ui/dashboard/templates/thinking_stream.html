@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>🧠 SOMA – Thinking Stream</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0a0a0a;
+            color: #00ff88;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            overflow: hidden;
+        }
+        #header {
+            padding: 20px;
+            border-bottom: 1px solid #1a1a2e;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        #header h1 {
+            font-size: 1.4rem;
+            color: #00ff88;
+        }
+        #status {
+            display: flex;
+            gap: 20px;
+            font-size: 0.9rem;
+        }
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: #00ff88;
+            animation: pulse 2s infinite;
+        }
+        .dot.warn { background: #ffaa00; }
+        .dot.critical { background: #ff4444; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+        #metrics {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            padding: 20px;
+        }
+        .metric-card {
+            background: #111;
+            border: 1px solid #1a1a2e;
+            border-radius: 8px;
+            padding: 15px;
+        }
+        .metric-card h3 {
+            font-size: 0.75rem;
+            color: #666;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+        .metric-value {
+            font-size: 2rem;
+            font-weight: bold;
+        }
+        #thinking-stream {
+            padding: 20px;
+            height: calc(100vh - 250px);
+            overflow-y: auto;
+        }
+        .thought {
+            padding: 8px 12px;
+            margin-bottom: 4px;
+            border-left: 2px solid #1a1a2e;
+            font-size: 0.85rem;
+            color: #888;
+            animation: fadeIn 0.3s ease;
+        }
+        .thought.info { border-color: #00ff88; color: #aaa; }
+        .thought.warn { border-color: #ffaa00; color: #ffaa00; }
+        .thought.error { border-color: #ff4444; color: #ff4444; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateX(-10px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+    </style>
+</head>
+<body>
+    <div id="header">
+        <h1>🧠 SOMA – Thinking Stream</h1>
+        <div id="status">
+            <div class="status-item"><div class="dot" id="dot-system"></div><span id="load-level">IDLE</span></div>
+            <div class="status-item">Engine: <span id="active-engine">—</span></div>
+            <div class="status-item">Queue: <span id="queue-size">0</span></div>
+        </div>
+    </div>
+    <div id="metrics">
+        <div class="metric-card">
+            <h3>CPU</h3>
+            <div class="metric-value" id="cpu">—%</div>
+        </div>
+        <div class="metric-card">
+            <h3>RAM</h3>
+            <div class="metric-value" id="ram">—%</div>
+        </div>
+        <div class="metric-card">
+            <h3>VRAM</h3>
+            <div class="metric-value" id="vram">—%</div>
+        </div>
+        <div class="metric-card">
+            <h3>Temp</h3>
+            <div class="metric-value" id="temp">—°C</div>
+        </div>
+    </div>
+    <div id="thinking-stream"></div>
+
+    <script>
+        const WS_URL = `ws://${location.hostname}:8100/ws/thinking`;
+        const stream = document.getElementById('thinking-stream');
+        let ws;
+
+        function connect() {
+            ws = new WebSocket(WS_URL);
+            ws.onmessage = (e) => {
+                const data = JSON.parse(e.data);
+                updateMetrics(data);
+            };
+            ws.onclose = () => {
+                addThought('warn', 'WebSocket getrennt – Reconnect in 3s...');
+                setTimeout(connect, 3000);
+            };
+            ws.onerror = () => ws.close();
+        }
+
+        function updateMetrics(m) {
+            document.getElementById('cpu').textContent = m.cpu_percent?.toFixed(1) + '%';
+            document.getElementById('ram').textContent = m.ram_percent?.toFixed(1) + '%';
+            document.getElementById('vram').textContent = m.gpu?.vram_percent?.toFixed(1) + '%' || '—';
+            document.getElementById('temp').textContent = (m.cpu_temp_celsius?.toFixed(0) || '—') + '°C';
+            document.getElementById('load-level').textContent = m.load_level?.toUpperCase() || '—';
+
+            const dot = document.getElementById('dot-system');
+            dot.className = 'dot';
+            if (m.load_level === 'critical') dot.classList.add('critical');
+            else if (m.load_level === 'high') dot.classList.add('warn');
+        }
+
+        function addThought(level, msg) {
+            const el = document.createElement('div');
+            el.className = `thought ${level}`;
+            el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            stream.prepend(el);
+            if (stream.children.length > 200) stream.lastChild.remove();
+        }
+
+        addThought('info', 'SOMA Thinking Stream initialisiert...');
+        connect();
+    </script>
+</body>
+</html>
