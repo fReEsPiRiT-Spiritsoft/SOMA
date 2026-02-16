@@ -28,6 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from brain_core.config import settings
 from brain_core.health_monitor import HealthMonitor
 from brain_core.logic_router import LogicRouter, SomaRequest, SomaResponse
+from brain_core.voice.pipeline import VoicePipeline
 from brain_core.queue_handler import QueueHandler
 from brain_core.presence_manager import PresenceManager
 from brain_core.audio_router import AudioRouter
@@ -55,6 +56,9 @@ logic_router: LogicRouter | None = None
 
 # WebSocket connections für Live-Dashboard
 ws_connections: set[WebSocket] = set()
+
+# Voice Pipeline (Das lebendige Ohr + Mund)
+voice_pipeline: VoicePipeline | None = None
 
 
 # ── Lifespan (Startup / Shutdown) ────────────────────────────────────────
@@ -133,12 +137,29 @@ async def lifespan(app: FastAPI):
     presence_manager._on_presence_change = audio_router.on_presence_change
     logger.info("boot_phase", service="presence_audio_bridge", status="wired")
 
-    logger.info("soma_online", msg="SOMA-AI ist bereit. 🧠")
+    # 7. Voice Pipeline starten (Dauerhaftes Zuhören)
+    global voice_pipeline
+    try:
+        voice_pipeline = VoicePipeline(
+            logic_router=logic_router,
+            audio_device="default",
+            stt_model="small",
+            tts_voice="de_DE-thorsten-high",
+        )
+        await voice_pipeline.start()
+        logger.info("boot_phase", service="voice_pipeline", status="online 🎤")
+    except Exception as exc:
+        logger.error("boot_phase", service="voice_pipeline", status="failed", error=str(exc))
+        voice_pipeline = None
+
+    logger.info("soma_online", msg="SOMA-AI ist bereit. 🧠🎤")
 
     yield  # ── App läuft ──
 
     # ── Shutdown ─────────────────────────────────────────────────────────
     logger.info("soma_shutting_down")
+    if voice_pipeline:
+        await voice_pipeline.stop()
     await health_monitor.stop()
     await queue_handler.disconnect()
     logger.info("soma_offline")
@@ -236,6 +257,36 @@ async def get_deferred_result(request_id: str):
     if result:
         return {"request_id": request_id, "result": result, "status": "completed"}
     return {"request_id": request_id, "result": None, "status": "pending"}
+
+
+# ── Voice Pipeline Endpoints ────────────────────────────────────────────
+
+@app.get("/api/v1/voice")
+async def get_voice_status():
+    """Voice Pipeline Status."""
+    if not voice_pipeline:
+        return {"status": "offline", "reason": "Voice Pipeline nicht gestartet"}
+    return {
+        "status": "online" if voice_pipeline.is_running else "stopped",
+        "stats": voice_pipeline.stats,
+    }
+
+
+@app.get("/api/v1/voice/atmosphere")
+async def get_atmosphere():
+    """Aktuelle Raumatmosphäre und Emotionsdaten."""
+    if not voice_pipeline:
+        return {"status": "offline"}
+    atm = voice_pipeline.emotion.atmosphere
+    return {
+        "mood": atm.mood.value,
+        "valence": atm.avg_valence,
+        "arousal": atm.avg_arousal,
+        "stress": atm.avg_stress,
+        "trend": atm.trend,
+        "argument_likelihood": atm.argument_likelihood,
+        "speakers_detected": atm.speakers_detected,
+    }
 
 
 # ── WebSocket: Live Thinking Stream ─────────────────────────────────────
