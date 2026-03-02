@@ -13,8 +13,8 @@ def api_root(request):
         "version": "1.0.0-genesis",
         "endpoints": {
             "admin": "/admin/",
-            "hardware": "/api/hardware/",
-            "dashboard": "/api/dashboard/",
+            "dashboard": "/dashboard/",
+            "hardware_api": "/api/dashboard/hardware/",
         },
     })
 
@@ -22,5 +22,8 @@ def api_root(request):
 urlpatterns = [
     path("", api_root),
     path("admin/", admin.site.urls),
+    # Dashboard UI (HTML Views)
+    path("dashboard/", include("dashboard.urls")),
+    # API Endpoints  
     path("api/dashboard/", include("dashboard.urls")),
 ]

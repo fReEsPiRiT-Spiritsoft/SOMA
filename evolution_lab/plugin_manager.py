@@ -196,14 +196,108 @@ class PluginManager:
 class PluginGenerator:
     """
     Generiert Plugin-Code via LLM und testet in Sandbox.
+    Vollständiger Flow: Beschreibung → LLM → Syntax-Test → Sandbox → Install → Load
     """
 
-    def __init__(self, manager: PluginManager):
+    def __init__(self, manager: PluginManager, heavy_engine=None):
         self.manager = manager
         self.sandbox_dir = SANDBOX_DIR
         self.sandbox_dir.mkdir(parents=True, exist_ok=True)
+        self._heavy_engine = heavy_engine  # LLM für Code-Generierung
+        self._prompt_template = self._load_prompt_template()
+        # Status-Tracking für Dashboard
+        self.last_generation: dict = {}
 
-    async def generate_and_test(
+    def _load_prompt_template(self) -> str:
+        prompt_path = Path(__file__).parent / "prompts" / "plugin_generator.txt"
+        if prompt_path.exists():
+            return prompt_path.read_text(encoding="utf-8")
+        return "Schreib ein Python-Plugin gemäß SOMA-Plugin-Standard."
+
+    async def generate_from_description(
+        self,
+        name: str,
+        description: str,
+        broadcast_callback=None,
+    ) -> tuple[bool, str, str]:
+        """
+        Kompletter Flow: Beschreibung → LLM → Test → Install → Load
+
+        Args:
+            name: Plugin-Name (snake_case, z.B. 'wetter_ansage')
+            description: Was das Plugin tun soll
+            broadcast_callback: Für Dashboard Live-Updates
+
+        Returns: (success, message, generated_code)
+        """
+        async def _emit(msg: str, tag: str = "EVOLUTION"):
+            logger.info("evolution_step", step=msg)
+            self.last_generation["last_log"] = msg
+            if broadcast_callback:
+                try:
+                    await broadcast_callback("evolution", msg, tag, {"plugin": name})
+                except Exception:
+                    pass
+
+        await _emit(f"🧬 Starte Plugin-Generierung: '{name}'")
+        self.last_generation = {
+            "name": name,
+            "description": description,
+            "status": "generating",
+            "code": "",
+            "error": None,
+        }
+
+        # ── 1. LLM generiert den Code ────────────────────────────────────
+        if not self._heavy_engine:
+            return False, "Kein LLM verfügbar (heavy_engine fehlt)", ""
+
+        await _emit(f"🧠 LLM generiert Code für: {description}")
+
+        system_prompt = self._prompt_template
+        user_prompt = (
+            f"Schreibe ein SOMA-Plugin mit dem Namen '{name}'.\n"
+            f"Funktion: {description}\n\n"
+            f"WICHTIG: Antworte NUR mit dem Python-Code.\n"
+            f"Kein erklärender Text davor oder danach.\n"
+            f"Kein Markdown.\n"
+            f"Nur reiner, lauffähiger Python-Code.\n"
+            f"Beginne direkt mit dem Docstring oder Import."
+        )
+
+        try:
+            raw_code = await self._heavy_engine.generate(
+                prompt=user_prompt,
+                system_prompt=system_prompt,
+                session_id=f"evolution_{name}",
+            )
+        except Exception as exc:
+            msg = f"LLM-Fehler: {exc}"
+            await _emit(f"❌ {msg}")
+            self.last_generation["status"] = "failed"
+            self.last_generation["error"] = msg
+            return False, msg, ""
+
+        # Code aus Markdown-Blöcken extrahieren falls vorhanden
+        code = self._extract_code(raw_code)
+        self.last_generation["code"] = code
+        await _emit(f"✅ Code generiert ({len(code)} Zeichen)")
+
+        # ── 2. Syntax-Test ───────────────────────────────────────────────
+        await _emit("🔍 Syntax-Check...")
+        success, message = await self.test_and_install(name, code)
+
+        if success:
+            self.last_generation["status"] = "installed"
+            await _emit(f"🚀 Plugin '{name}' installiert und geladen!", "EVOLUTION_OK")
+        else:
+            self.last_generation["status"] = "failed"
+            self.last_generation["error"] = message
+            await _emit(f"❌ Fehler: {message}")
+
+        return success, message, code
+
+    async def test_and_install(
         self,
         name: str,
         code: str,
@@ -211,7 +305,8 @@ class PluginGenerator:
         """
         1. Code in Sandbox schreiben
         2. Syntax-Check
-        3. Bei Erfolg: In generated_plugins/ kopieren
+        3. Import-Test in isoliertem Namespace
+        4. Bei Erfolg: In generated_plugins/ installieren + laden
 
         Returns: (success, message)
         """
@@ -229,15 +324,15 @@ class PluginGenerator:
             logger.warning("plugin_syntax_error", name=name, error=msg)
             return False, msg
 
-        # 3. Isolation-Test (import in subprocess)
-        # TODO: Vollständige Sandbox mit RestrictedPython oder Docker
+        # 3. Import-Test in isoliertem Namespace
         try:
-            spec = importlib.util.spec_from_file_location(f"_test_{name}", str(sandbox_path))
+            spec = importlib.util.spec_from_file_location(f"_sandbox_{name}", str(sandbox_path))
             if spec and spec.loader:
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
-                # Cleanup
                 del module
+                # Auch aus sys.modules entfernen
+                sys.modules.pop(f"_sandbox_{name}", None)
         except Exception as exc:
             msg = f"Runtime-Fehler: {exc}"
             logger.warning("plugin_runtime_error", name=name, error=msg)
@@ -245,9 +340,33 @@ class PluginGenerator:
 
         # 4. In generated_plugins/ installieren
         plugin_path.write_text(code, encoding="utf-8")
-        logger.info("plugin_generated", name=name)
+        logger.info("plugin_installed", name=name, path=str(plugin_path))
 
-        return True, f"Plugin '{name}' erfolgreich generiert und installiert."
+        # 5. Direkt laden
+        meta = await self.manager.load_plugin(name)
+        if not meta.is_loaded:
+            return False, f"Installiert aber Lade-Fehler: {meta.error}"
+
+        return True, f"Plugin '{name}' erfolgreich generiert, getestet und geladen."
+
+    @staticmethod
+    def _extract_code(raw: str) -> str:
+        """Extrahiert reinen Python-Code aus LLM-Antwort (entfernt Markdown etc.)."""
+        # ```python ... ``` Blöcke extrahieren
+        import re
+        match = re.search(r"```(?:python)?\n?(.*?)```", raw, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        # Kein Markdown-Block → Direkt zurückgeben, HTML/Text-Prefix entfernen
+        lines = raw.strip().splitlines()
+        code_lines = []
+        in_code = False
+        for line in lines:
+            if line.strip().startswith(("import ", "from ", "async def ", "def ", "#", '"""', "__")):
+                in_code = True
+            if in_code:
+                code_lines.append(line)
+        return "\n".join(code_lines) if code_lines else raw.strip()
 
 
 # ── Exceptions ───────────────────────────────────────────────────────────

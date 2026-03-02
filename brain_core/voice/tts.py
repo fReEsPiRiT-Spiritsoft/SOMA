@@ -216,21 +216,37 @@ class TTSEngine:
         logger.info("tts_spoken", text=text[:60], ms=round(elapsed, 0))
 
     async def _speak_piper(self, text: str, emotion: SpeechEmotion):
-        """Synthese via Piper."""
-        # Piper synthetisiert in einen WAV-Buffer
+        """Synthese via Piper (neue API mit SynthesisConfig)."""
+        from piper.config import SynthesisConfig
+        
+        # SynthesisConfig für emotionale Modulation
+        syn_config = SynthesisConfig(
+            length_scale=1.0 / emotion.speed,   # Piper: length_scale ist invers
+            noise_scale=0.667,                  # Standard-Wert
+            noise_w_scale=0.8,                  # Standard-Wert
+            volume=emotion.volume,
+        )
+        
+        # Audio-Chunks sammeln (AudioChunk hat audio_float_array, nicht audio)
+        audio_chunks = []
+        for chunk in self._piper.synthesize(text, syn_config=syn_config):
+            # Konvertiere float32 → int16 für WAV
+            int16_audio = (chunk.audio_float_array * 32767).astype(np.int16)
+            audio_chunks.append(int16_audio)
+        
+        if not audio_chunks:
+            return
+        
+        # Alle Chunks zusammenfügen
+        all_audio = np.concatenate(audio_chunks)
+        
+        # In WAV-Buffer schreiben
         audio_buffer = io.BytesIO()
-
         with wave.open(audio_buffer, "wb") as wav:
             wav.setnchannels(1)
             wav.setsampwidth(2)
             wav.setframerate(self._piper.config.sample_rate)
-
-            self._piper.synthesize(
-                text,
-                wav,
-                length_scale=1.0 / emotion.speed,   # Piper: length_scale ist invers
-                sentence_silence=0.3,
-            )
+            wav.writeframes(all_audio.tobytes())
 
         audio_buffer.seek(0)
 

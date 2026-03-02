@@ -5,8 +5,21 @@ REST-Endpunkte für das Thinking Stream UI und das Tablet-Face.
 """
 
 from django.http import JsonResponse
+from django.shortcuts import render
 from django.views.decorators.http import require_GET
 from hardware.models import Room, HardwareNode
+
+
+@require_GET
+def dashboard_view(request):
+    """Haupt-Dashboard Template."""
+    return render(request, 'dashboard.html')
+
+
+@require_GET
+def thinking_stream_view(request):
+    """Legacy Thinking Stream Template."""
+    return render(request, 'thinking_stream.html')
 
 
 @require_GET

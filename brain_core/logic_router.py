@@ -27,9 +27,12 @@ Datenfluss:
 from __future__ import annotations
 
 import uuid
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import structlog
+
+if TYPE_CHECKING:
+    from evolution_lab.plugin_manager import PluginManager
 
 from shared.health_schemas import (
     SystemLoadLevel,
@@ -38,6 +41,7 @@ from shared.health_schemas import (
 )
 from brain_core.health_monitor import HealthMonitor
 from brain_core.queue_handler import QueueHandler
+from brain_core.memory import get_memory, SomaMemory, MemoryCategory
 
 logger = structlog.get_logger("soma.logic_router")
 
@@ -80,21 +84,47 @@ DEFERRED_MESSAGES = [
 ]
 
 
+class IntentStats(BaseModel):
+    """Live Intent Statistiken für Dashboard."""
+    nano_count: int = 0
+    heavy_count: int = 0
+    light_count: int = 0
+    deferred_count: int = 0
+    total_requests: int = 0
+    avg_latency_ms: float = 0.0
+    last_engine: str = "none"
+    last_intent: str = "none"
+    last_request_time: Optional[float] = None
+
+
 class LogicRouter:
     """
     Routing-Engine: Verbindet Health-Daten mit Model-Auswahl.
     Hält KEINEN eigenen State – bezieht alles von HealthMonitor + Engines.
+    Integriert Evolution Lab Plugins in Konversation.
     """
 
     def __init__(
         self,
         health_monitor: HealthMonitor,
         queue_handler: QueueHandler,
+        plugin_manager: Optional[object] = None,
     ):
         self.health = health_monitor
         self.queue = queue_handler
+        self.plugin_manager = plugin_manager  # Evolution Lab Integration
+        self.memory = get_memory()  # Persistent Memory System
         self._engines: dict[str, object] = {}
         self._deferred_counter = 0
+        
+        # ── Intent Statistics ────────────────────────────────────────
+        self._stats = IntentStats()
+        self._latencies: list[float] = []  # Rolling window für avg
+
+    @property
+    def stats(self) -> IntentStats:
+        """Live Intent-Statistiken abrufen."""
+        return self._stats
 
     def register_engine(self, name: str, engine: object) -> None:
         """Engine registrieren (heavy, light, nano)."""
@@ -139,15 +169,23 @@ class LogicRouter:
             if not engine:
                 return await self._defer_request(request, load_level)
 
+        # ── Plugin Context Injection ─────────────────────────────────────
+        # Führe relevante Plugins aus und füge Output zum System-Prompt hinzu
+        plugin_context = await self._execute_relevant_plugins(request.prompt)
+        system_prompt = self._build_system_prompt(request) + plugin_context
+
         # ── Generate ─────────────────────────────────────────────────────
         try:
             response_text = await engine.generate(  # type: ignore[attr-defined]
                 prompt=request.prompt,
-                system_prompt=self._build_system_prompt(request),
+                system_prompt=system_prompt,
                 session_id=request.session_id,
             )
 
             latency = (time.monotonic() - start) * 1000
+            
+            # ── Update Stats ────────────────────────────────────────
+            self._update_stats(engine_name, latency, request.prompt)
 
             return SomaResponse(
                 request_id=request.request_id,
@@ -247,9 +285,8 @@ class LogicRouter:
 
     # ── System Prompt Builder ────────────────────────────────────────────
 
-    @staticmethod
-    def _build_system_prompt(request: SomaRequest) -> str:
-        """Bau den System-Prompt basierend auf Kontext."""
+    def _build_system_prompt(self, request: SomaRequest) -> str:
+        """Bau den System-Prompt basierend auf Kontext & verfügbaren Plugins."""
         base = (
             "Du bist Soma, ein freundliches, hocheffizientes Ambient-AI-System. "
             "Du bist nervy-cool, proaktiv und hilfreich. "
@@ -268,4 +305,156 @@ class LogicRouter:
         if request.room_id:
             base += f"\n\nDer Nutzer befindet sich in: {request.room_id}"
 
+        # ── Memory-Integration ───────────────────────────────────────
+        memory_context = self.memory.get_summary_for_prompt()
+        if memory_context:
+            base += f"\n\n{memory_context}"
+
+        # ── Plugin-Integration ───────────────────────────────────────
+        plugin_info = self._get_available_plugins_info()
+        if plugin_info:
+            base += f"\n\n{plugin_info}"
+
         return base
+
+    def _get_available_plugins_info(self) -> str:
+        """Erstelle Plugin-Info für System-Prompt."""
+        if not self.plugin_manager:
+            return ""
+        
+        try:
+            plugins = self.plugin_manager._plugins
+            if not plugins:
+                return ""
+            
+            loaded = [
+                (name, meta) 
+                for name, meta in plugins.items() 
+                if meta.is_loaded and not meta.error
+            ]
+            
+            if not loaded:
+                return ""
+            
+            lines = [
+                "VERFÜGBARE FÄHIGKEITEN (Plugins):",
+                "Du hast Zugriff auf folgende Plugins. Wenn der Nutzer nach etwas fragt, "
+                "das ein Plugin abdeckt, nutze die Information daraus. "
+                "Sage dem Nutzer, dass du die Info aus deinen Fähigkeiten hast.",
+            ]
+            
+            for name, meta in loaded:
+                desc = meta.description or "Keine Beschreibung"
+                lines.append(f"  • {name}: {desc}")
+            
+            return "\n".join(lines)
+            
+        except Exception as e:
+            logger.warning("plugin_info_error", error=str(e))
+            return ""
+
+    async def _execute_relevant_plugins(self, prompt: str) -> str:
+        """
+        Führe relevante Plugins aus basierend auf dem User-Prompt.
+        Gibt Plugin-Output zurück, der in die Antwort einfließt.
+        """
+        if not self.plugin_manager:
+            return ""
+        
+        try:
+            plugins = self.plugin_manager._plugins
+            if not plugins:
+                return ""
+            
+            # Keyword-Mapping für automatische Plugin-Aktivierung
+            keyword_plugins = {
+                # Datum/Uhrzeit
+                ("zeit", "uhrzeit", "spät", "datum", "tag", "monat", "jahr", "wochentag"): 
+                    ["datum_uhrzeit", "datetime", "time", "zeit"],
+                # Wetter (falls Plugin existiert)
+                ("wetter", "temperatur", "regen", "sonne", "warm", "kalt"): 
+                    ["wetter", "weather"],
+                # System
+                ("system", "cpu", "ram", "speicher", "auslastung"): 
+                    ["system_status", "health"],
+            }
+            
+            prompt_lower = prompt.lower()
+            results = []
+            
+            for keywords, plugin_names in keyword_plugins.items():
+                if any(kw in prompt_lower for kw in keywords):
+                    # Versuche passendes Plugin zu finden
+                    for pname in plugin_names:
+                        if pname in plugins and plugins[pname].is_loaded:
+                            try:
+                                result = await self.plugin_manager.execute(pname)
+                                if result:
+                                    results.append(f"[{pname}]: {result}")
+                                    logger.info("plugin_auto_executed", 
+                                               plugin=pname, result_preview=str(result)[:50])
+                                break  # Nur ein Plugin pro Kategorie
+                            except Exception as ex:
+                                logger.warning("plugin_auto_exec_error", 
+                                              plugin=pname, error=str(ex))
+            
+            if results:
+                return "\n\nAKTUELLE INFORMATIONEN AUS DEINEN FÄHIGKEITEN:\n" + "\n".join(results)
+            
+            return ""
+            
+        except Exception as e:
+            logger.warning("plugin_execution_error", error=str(e))
+            return ""
+
+    # ── Statistics ───────────────────────────────────────────────────────
+
+    def _update_stats(
+        self, engine_name: str, latency_ms: float, prompt: str
+    ) -> None:
+        """Update Intent-Statistiken nach erfolgreicher Verarbeitung."""
+        import time
+        
+        self._stats.total_requests += 1
+        self._stats.last_engine = engine_name
+        self._stats.last_request_time = time.time()
+        
+        # Engine counters
+        if engine_name == "nano":
+            self._stats.nano_count += 1
+            self._stats.last_intent = self._detect_intent_type(prompt)
+        elif engine_name == "heavy":
+            self._stats.heavy_count += 1
+            self._stats.last_intent = "llm_query"
+        elif engine_name == "light":
+            self._stats.light_count += 1
+            self._stats.last_intent = "llm_query_light"
+        elif engine_name == "deferred":
+            self._stats.deferred_count += 1
+            self._stats.last_intent = "deferred"
+        
+        # Rolling average latency (letzte 100 Anfragen)
+        self._latencies.append(latency_ms)
+        if len(self._latencies) > 100:
+            self._latencies.pop(0)
+        self._stats.avg_latency_ms = sum(self._latencies) / len(self._latencies)
+
+    @staticmethod
+    def _detect_intent_type(prompt: str) -> str:
+        """Erkenne Intent-Typ für Dashboard-Anzeige."""
+        prompt_lower = prompt.lower()
+        
+        if any(w in prompt_lower for w in ["licht", "lampe", "light", "lamp"]):
+            return "light_control"
+        elif any(w in prompt_lower for w in ["heizung", "temperatur", "heating"]):
+            return "thermostat"
+        elif any(w in prompt_lower for w in ["wetter", "weather"]):
+            return "weather_query"
+        elif any(w in prompt_lower for w in ["zeit", "uhrzeit", "time", "uhr"]):
+            return "time_query"
+        elif any(w in prompt_lower for w in ["musik", "music", "spotify", "radio"]):
+            return "media_control"
+        elif any(w in prompt_lower for w in ["timer", "alarm", "wecker"]):
+            return "timer"
+        else:
+            return "general"

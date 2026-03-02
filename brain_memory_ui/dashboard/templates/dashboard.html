@@ -1,0 +1,1146 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🧠 SOMA – Control Center</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0a0f;
+            --bg-secondary: #12121a;
+            --bg-card: #1a1a25;
+            --border: #2a2a3a;
+            --accent: #00ff88;
+            --accent-dim: #00aa55;
+            --warning: #ffaa00;
+            --danger: #ff4455;
+            --text-primary: #e0e0e0;
+            --text-secondary: #888;
+            --text-muted: #555;
+        }
+        
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-family: 'JetBrains Mono', monospace;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+        
+        /* Header */
+        header {
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            padding: 15px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        .logo h1 {
+            font-size: 1.4rem;
+            font-weight: 600;
+            color: var(--accent);
+        }
+        
+        .logo .version {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            padding: 2px 8px;
+            background: var(--bg-card);
+            border-radius: 10px;
+        }
+        
+        .status-bar {
+            display: flex;
+            gap: 25px;
+            align-items: center;
+        }
+        
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.85rem;
+        }
+        
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--accent);
+            animation: pulse 2s infinite;
+        }
+        
+        .status-dot.warn { background: var(--warning); }
+        .status-dot.critical { background: var(--danger); animation: pulse-fast 0.5s infinite; }
+        .status-dot.offline { background: #444; animation: none; }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(0, 255, 136, 0.4); }
+            50% { opacity: 0.7; box-shadow: 0 0 0 8px rgba(0, 255, 136, 0); }
+        }
+        
+        @keyframes pulse-fast {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+        
+        /* Main Grid */
+        .dashboard {
+            display: grid;
+            grid-template-columns: 1fr 1fr 350px;
+            grid-template-rows: auto auto 1fr;
+            gap: 20px;
+            padding: 20px;
+            max-width: 1800px;
+            margin: 0 auto;
+        }
+        
+        /* Cards */
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+        }
+        
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        .card-title {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .card-badge {
+            font-size: 0.7rem;
+            padding: 3px 8px;
+            border-radius: 10px;
+            background: var(--accent-dim);
+            color: #000;
+        }
+        
+        /* System Metrics */
+        .metrics-row {
+            grid-column: 1 / -1;
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            gap: 15px;
+        }
+        
+        .metric-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 15px;
+            text-align: center;
+        }
+        
+        .metric-label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+        
+        .metric-value {
+            font-size: 1.8rem;
+            font-weight: 600;
+            color: var(--accent);
+        }
+        
+        .metric-value.warn { color: var(--warning); }
+        .metric-value.critical { color: var(--danger); }
+        
+        .metric-bar {
+            height: 4px;
+            background: var(--bg-primary);
+            border-radius: 2px;
+            margin-top: 10px;
+            overflow: hidden;
+        }
+        
+        .metric-bar-fill {
+            height: 100%;
+            background: var(--accent);
+            transition: width 0.3s ease;
+        }
+        
+        .metric-bar-fill.warn { background: var(--warning); }
+        .metric-bar-fill.critical { background: var(--danger); }
+        
+        /* Intent Stats */
+        .intent-stats {
+            grid-column: 1 / 2;
+        }
+        
+        .intent-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        .intent-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 15px;
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            border-left: 3px solid var(--accent);
+        }
+        
+        .intent-item.nano { border-left-color: #00aaff; }
+        .intent-item.heavy { border-left-color: #ff6600; }
+        .intent-item.light { border-left-color: #aa66ff; }
+        
+        .intent-name {
+            font-size: 0.85rem;
+        }
+        
+        .intent-count {
+            font-size: 1.2rem;
+            font-weight: 600;
+        }
+        
+        .intent-recent {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+        }
+        
+        /* Emotion Gauge */
+        .emotion-panel {
+            grid-column: 2 / 3;
+        }
+        
+        .emotion-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+        }
+        
+        .emotion-gauge {
+            text-align: center;
+            padding: 15px;
+            background: var(--bg-secondary);
+            border-radius: 10px;
+        }
+        
+        .gauge-label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin-bottom: 10px;
+        }
+        
+        .gauge-circle {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            margin: 0 auto;
+            position: relative;
+            background: conic-gradient(
+                var(--accent) calc(var(--value) * 1%),
+                var(--bg-primary) 0
+            );
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .gauge-circle::before {
+            content: '';
+            position: absolute;
+            width: 60px;
+            height: 60px;
+            background: var(--bg-secondary);
+            border-radius: 50%;
+        }
+        
+        .gauge-value {
+            position: relative;
+            z-index: 1;
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+        
+        .mood-indicator {
+            grid-column: 1 / -1;
+            padding: 20px;
+            text-align: center;
+            background: var(--bg-secondary);
+            border-radius: 10px;
+        }
+        
+        .mood-emoji {
+            font-size: 3rem;
+            margin-bottom: 10px;
+        }
+        
+        .mood-label {
+            font-size: 1.1rem;
+            color: var(--accent);
+        }
+        
+        .mood-trend {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-top: 5px;
+        }
+        
+        /* Thinking Stream */
+        .thinking-stream {
+            grid-column: 3 / 4;
+            grid-row: 2 / 4;
+            display: flex;
+            flex-direction: column;
+            max-height: calc(100vh - 200px);
+        }
+        
+        .stream-container {
+            flex: 1;
+            overflow-y: auto;
+            padding-right: 5px;
+        }
+        
+        .thought {
+            padding: 10px 12px;
+            margin-bottom: 8px;
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            border-left: 3px solid var(--border);
+            font-size: 0.8rem;
+            animation: slideIn 0.3s ease;
+        }
+        
+        .thought.info { border-left-color: var(--accent); }
+        .thought.stt { border-left-color: #00aaff; }
+        .thought.llm { border-left-color: #ff6600; }
+        .thought.tts { border-left-color: #aa66ff; }
+        .thought.emotion { border-left-color: #ff66aa; }
+        .thought.warn { border-left-color: var(--warning); }
+        .thought.error { border-left-color: var(--danger); }
+        
+        .thought-time {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+        }
+        
+        .thought-content {
+            color: var(--text-primary);
+        }
+        
+        .thought-tag {
+            display: inline-block;
+            font-size: 0.6rem;
+            padding: 2px 6px;
+            background: var(--bg-card);
+            border-radius: 4px;
+            margin-right: 5px;
+            color: var(--text-secondary);
+        }
+        
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(20px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+        
+        /* Voice Visualizer */
+        .voice-panel {
+            grid-column: 1 / 3;
+        }
+        
+        .voice-waveform {
+            height: 100px;
+            background: var(--bg-secondary);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 3px;
+            padding: 20px;
+        }
+        
+        .wave-bar {
+            width: 4px;
+            background: var(--accent);
+            border-radius: 2px;
+            transition: height 0.1s ease;
+        }
+        
+        .voice-stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin-top: 15px;
+        }
+        
+        .voice-stat {
+            text-align: center;
+            padding: 12px;
+            background: var(--bg-secondary);
+            border-radius: 8px;
+        }
+        
+        .voice-stat-value {
+            font-size: 1.3rem;
+            font-weight: 600;
+            color: var(--accent);
+        }
+        
+        .voice-stat-label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+        
+        /* Recent Conversations */
+        .conversations {
+            grid-column: 1 / 3;
+        }
+        
+        .conversation-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        .conversation-item {
+            display: grid;
+            grid-template-columns: auto 1fr auto;
+            gap: 15px;
+            padding: 15px;
+            background: var(--bg-secondary);
+            border-radius: 10px;
+            align-items: center;
+        }
+        
+        .conv-avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: var(--bg-card);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2rem;
+        }
+        
+        .conv-content {
+            overflow: hidden;
+        }
+        
+        .conv-user {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        
+        .conv-soma {
+            font-size: 0.85rem;
+            color: var(--accent);
+            margin-top: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        
+        .conv-time {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+        }
+        
+        /* Connection Status */
+        .connection-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.9);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            gap: 20px;
+            z-index: 1000;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.3s ease;
+        }
+        
+        .connection-overlay.show {
+            opacity: 1;
+            pointer-events: all;
+        }
+        
+        .connection-spinner {
+            width: 50px;
+            height: 50px;
+            border: 3px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Scrollbar */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+        
+        ::-webkit-scrollbar-track {
+            background: var(--bg-secondary);
+        }
+        
+        ::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 3px;
+        }
+        
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--text-muted);
+        }
+        
+        /* Responsive */
+        @media (max-width: 1400px) {
+            .dashboard {
+                grid-template-columns: 1fr 1fr;
+            }
+            .thinking-stream {
+                grid-column: 1 / -1;
+                grid-row: auto;
+                max-height: 400px;
+            }
+            .metrics-row {
+                grid-template-columns: repeat(3, 1fr);
+            }
+        }
+        
+        @media (max-width: 900px) {
+            .dashboard {
+                grid-template-columns: 1fr;
+            }
+            .metrics-row {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="connection-overlay" id="connectionOverlay">
+        <div class="connection-spinner"></div>
+        <div>Verbinde mit SOMA Brain Core...</div>
+    </div>
+
+    <header>
+        <div class="logo">
+            <h1>🧠 SOMA</h1>
+            <span class="version">v1.0.0-genesis</span>
+        </div>
+        <div class="status-bar">
+            <div class="status-item">
+                <div class="status-dot" id="statusDot"></div>
+                <span id="statusText">Verbinde...</span>
+            </div>
+            <div class="status-item">
+                Engine: <strong id="activeEngine">—</strong>
+            </div>
+            <div class="status-item">
+                Queue: <strong id="queueSize">0</strong>
+            </div>
+            <div class="status-item">
+                <span id="uptime">—</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="dashboard">
+        <!-- System Metrics Row -->
+        <div class="metrics-row">
+            <div class="metric-card">
+                <div class="metric-label">CPU</div>
+                <div class="metric-value" id="cpuValue">—%</div>
+                <div class="metric-bar"><div class="metric-bar-fill" id="cpuBar"></div></div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">RAM</div>
+                <div class="metric-value" id="ramValue">—%</div>
+                <div class="metric-bar"><div class="metric-bar-fill" id="ramBar"></div></div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">VRAM</div>
+                <div class="metric-value" id="vramValue">—%</div>
+                <div class="metric-bar"><div class="metric-bar-fill" id="vramBar"></div></div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">GPU Temp</div>
+                <div class="metric-value" id="gpuTempValue">—°C</div>
+                <div class="metric-bar"><div class="metric-bar-fill" id="gpuTempBar"></div></div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">CPU Temp</div>
+                <div class="metric-value" id="cpuTempValue">—°C</div>
+                <div class="metric-bar"><div class="metric-bar-fill" id="cpuTempBar"></div></div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Load Level</div>
+                <div class="metric-value" id="loadLevel">IDLE</div>
+            </div>
+        </div>
+
+        <!-- Intent Stats -->
+        <div class="card intent-stats">
+            <div class="card-header">
+                <span class="card-title">📊 Intent Stats</span>
+                <span class="card-badge" id="totalIntents">0 total</span>
+            </div>
+            <div class="intent-list" id="intentList">
+                <div class="intent-item nano">
+                    <div>
+                        <div class="intent-name">🚀 Nano Intent</div>
+                        <div class="intent-recent">Schnelle Befehle</div>
+                    </div>
+                    <div class="intent-count" id="nanoCount">0</div>
+                </div>
+                <div class="intent-item heavy">
+                    <div>
+                        <div class="intent-name">🧠 Heavy LLM</div>
+                        <div class="intent-recent">Komplexe Anfragen</div>
+                    </div>
+                    <div class="intent-count" id="heavyCount">0</div>
+                </div>
+                <div class="intent-item light">
+                    <div>
+                        <div class="intent-name">⚡ Light Model</div>
+                        <div class="intent-recent">Balanced Mode</div>
+                    </div>
+                    <div class="intent-count" id="lightCount">0</div>
+                </div>
+                <div class="intent-item">
+                    <div>
+                        <div class="intent-name">🎤 STT Segments</div>
+                        <div class="intent-recent">Verarbeitete Audio-Segmente</div>
+                    </div>
+                    <div class="intent-count" id="sttCount">0</div>
+                </div>
+                <div class="intent-item">
+                    <div>
+                        <div class="intent-name">💬 Soma Triggers</div>
+                        <div class="intent-recent">"Soma" erkannt</div>
+                    </div>
+                    <div class="intent-count" id="somaCount">0</div>
+                </div>
+                <div class="intent-item">
+                    <div>
+                        <div class="intent-name">🤝 Interventions</div>
+                        <div class="intent-recent">Proaktive Eingriffe</div>
+                    </div>
+                    <div class="intent-count" id="interventionCount">0</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Emotion Panel -->
+        <div class="card emotion-panel">
+            <div class="card-header">
+                <span class="card-title">💗 Emotion & Atmosphere</span>
+                <span class="card-badge" id="emotionBadge">analyzing</span>
+            </div>
+            <div class="emotion-grid">
+                <div class="emotion-gauge">
+                    <div class="gauge-label">Valence</div>
+                    <div class="gauge-circle" id="valenceGauge" style="--value: 50">
+                        <span class="gauge-value" id="valenceValue">0.0</span>
+                    </div>
+                </div>
+                <div class="emotion-gauge">
+                    <div class="gauge-label">Arousal</div>
+                    <div class="gauge-circle" id="arousalGauge" style="--value: 50">
+                        <span class="gauge-value" id="arousalValue">0.0</span>
+                    </div>
+                </div>
+                <div class="emotion-gauge">
+                    <div class="gauge-label">Stress</div>
+                    <div class="gauge-circle" id="stressGauge" style="--value: 20">
+                        <span class="gauge-value" id="stressValue">0%</span>
+                    </div>
+                </div>
+                <div class="emotion-gauge">
+                    <div class="gauge-label">Argument</div>
+                    <div class="gauge-circle" id="argumentGauge" style="--value: 10">
+                        <span class="gauge-value" id="argumentValue">0%</span>
+                    </div>
+                </div>
+                <div class="mood-indicator">
+                    <div class="mood-emoji" id="moodEmoji">😊</div>
+                    <div class="mood-label" id="moodLabel">Peaceful</div>
+                    <div class="mood-trend" id="moodTrend">Trend: stable</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Voice Panel -->
+        <div class="card voice-panel">
+            <div class="card-header">
+                <span class="card-title">🎤 Voice Pipeline</span>
+                <span class="card-badge" id="voiceStatus">offline</span>
+            </div>
+            <div class="voice-waveform" id="waveform"></div>
+            <div class="voice-stats">
+                <div class="voice-stat">
+                    <div class="voice-stat-value" id="speechRatio">0%</div>
+                    <div class="voice-stat-label">Speech Ratio</div>
+                </div>
+                <div class="voice-stat">
+                    <div class="voice-stat-value" id="ttsQueue">0</div>
+                    <div class="voice-stat-label">TTS Queue</div>
+                </div>
+                <div class="voice-stat">
+                    <div class="voice-stat-value" id="ttsSpeaking">—</div>
+                    <div class="voice-stat-label">Speaking</div>
+                </div>
+                <div class="voice-stat">
+                    <div class="voice-stat-value" id="pipelineUptime">0s</div>
+                    <div class="voice-stat-label">Uptime</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Thinking Stream -->
+        <div class="card thinking-stream">
+            <div class="card-header">
+                <span class="card-title">💭 Thinking Stream</span>
+                <span class="card-badge" id="thoughtCount">0</span>
+            </div>
+            <div class="stream-container" id="streamContainer"></div>
+        </div>
+
+        <!-- Recent Conversations -->
+        <div class="card conversations">
+            <div class="card-header">
+                <span class="card-title">💬 Recent Conversations</span>
+                <span class="card-badge" id="convCount">0</span>
+            </div>
+            <div class="conversation-list" id="conversationList"></div>
+        </div>
+    </main>
+
+    <script>
+        // ═══════════════════════════════════════════════════════════════
+        //  SOMA Dashboard JavaScript
+        // ═══════════════════════════════════════════════════════════════
+
+        const API_BASE = 'http://localhost:8100/api/v1';
+        const WS_URL = 'ws://localhost:8100/ws/thinking';
+
+        let ws = null;
+        let connected = false;
+        let lastUserText = null;  // Track last user utterance for conversations
+        let stats = {
+            nano: 0,
+            heavy: 0,
+            light: 0,
+            stt: 0,
+            soma: 0,
+            interventions: 0,
+            thoughts: 0,
+            conversations: []
+        };
+
+        // ─── Connection Management ────────────────────────────────────
+
+        function showConnectionOverlay(show) {
+            document.getElementById('connectionOverlay').classList.toggle('show', show);
+        }
+
+        function updateConnectionStatus(status, text) {
+            const dot = document.getElementById('statusDot');
+            const statusText = document.getElementById('statusText');
+            
+            dot.className = 'status-dot';
+            if (status === 'connected') {
+                dot.classList.remove('offline', 'warn', 'critical');
+            } else if (status === 'warn') {
+                dot.classList.add('warn');
+            } else if (status === 'critical') {
+                dot.classList.add('critical');
+            } else {
+                dot.classList.add('offline');
+            }
+            
+            statusText.textContent = text;
+        }
+
+        // ─── WebSocket ────────────────────────────────────────────────
+
+        function connectWebSocket() {
+            showConnectionOverlay(true);
+            
+            ws = new WebSocket(WS_URL);
+
+            ws.onopen = () => {
+                connected = true;
+                showConnectionOverlay(false);
+                updateConnectionStatus('connected', 'Online');
+                addThought('info', 'WebSocket verbunden');
+                fetchInitialData();
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    
+                    // Check if this is a thought event from voice pipeline
+                    if (data.type === 'thought') {
+                        addThought(data.thought_type, data.content, data.tag);
+                        
+                        // Track conversations
+                        if (data.extra && data.extra.text && data.extra.soma) {
+                            // User said something with "Soma"
+                            lastUserText = data.extra.text;
+                        }
+                        if (data.extra && data.extra.response) {
+                            // Soma responded
+                            if (lastUserText) {
+                                addConversation(lastUserText, data.extra.response);
+                                lastUserText = null;
+                            }
+                        }
+                        return;
+                    }
+                    
+                    // Otherwise it's metrics data
+                    handleMetricsUpdate(data);
+                } catch (e) {
+                    console.error('Parse error:', e);
+                }
+            };
+
+            ws.onclose = () => {
+                connected = false;
+                updateConnectionStatus('offline', 'Getrennt');
+                addThought('warn', 'WebSocket getrennt - Reconnect in 3s...');
+                setTimeout(connectWebSocket, 3000);
+            };
+
+            ws.onerror = () => {
+                ws.close();
+            };
+        }
+
+        // ─── Data Fetching ────────────────────────────────────────────
+
+        async function fetchInitialData() {
+            try {
+                // Health
+                const health = await fetch(`${API_BASE}/health`).then(r => r.json());
+                handleMetricsUpdate(health.metrics);
+                document.getElementById('queueSize').textContent = health.queued_requests || 0;
+
+                // Voice Status
+                const voice = await fetch(`${API_BASE}/voice`).then(r => r.json());
+                handleVoiceUpdate(voice);
+
+                // Atmosphere
+                const atm = await fetch(`${API_BASE}/voice/atmosphere`).then(r => r.json());
+                handleAtmosphereUpdate(atm);
+
+            } catch (e) {
+                console.error('Fetch error:', e);
+                addThought('error', 'Konnte Daten nicht laden: ' + e.message);
+            }
+        }
+
+        // Poll for voice stats every 2 seconds
+        setInterval(async () => {
+            if (!connected) return;
+            try {
+                const voice = await fetch(`${API_BASE}/voice`).then(r => r.json());
+                handleVoiceUpdate(voice);
+
+                const atm = await fetch(`${API_BASE}/voice/atmosphere`).then(r => r.json());
+                handleAtmosphereUpdate(atm);
+
+                const health = await fetch(`${API_BASE}/health`).then(r => r.json());
+                document.getElementById('queueSize').textContent = health.queued_requests || 0;
+                
+                // Intent Stats (Heavy/Light/Nano) abfragen
+                const intentStats = await fetch(`${API_BASE}/intent/stats`).then(r => r.json());
+                handleIntentStatsUpdate(intentStats);
+            } catch (e) {}
+        }, 2000);
+
+        // ─── Update Handlers ──────────────────────────────────────────
+
+        function handleMetricsUpdate(m) {
+            if (!m) return;
+
+            // CPU
+            updateMetric('cpu', m.cpu_percent, '%');
+            
+            // RAM
+            updateMetric('ram', m.ram_percent, '%');
+            
+            // VRAM
+            if (m.gpu && m.gpu.vram_percent !== undefined) {
+                updateMetric('vram', m.gpu.vram_percent, '%');
+                updateMetric('gpuTemp', m.gpu.temperature_celsius, '°C', 100);
+            }
+            
+            // CPU Temp
+            if (m.cpu_temp_celsius) {
+                updateMetric('cpuTemp', m.cpu_temp_celsius, '°C', 100);
+            }
+
+            // Load Level
+            const loadEl = document.getElementById('loadLevel');
+            loadEl.textContent = (m.load_level || 'idle').toUpperCase();
+            loadEl.className = 'metric-value';
+            if (m.load_level === 'high') loadEl.classList.add('warn');
+            if (m.load_level === 'critical') loadEl.classList.add('critical');
+
+            // Status dot
+            const dot = document.getElementById('statusDot');
+            dot.className = 'status-dot';
+            if (m.load_level === 'critical') dot.classList.add('critical');
+            else if (m.load_level === 'high') dot.classList.add('warn');
+        }
+
+        function updateMetric(id, value, unit, max = 100) {
+            const valueEl = document.getElementById(`${id}Value`);
+            const barEl = document.getElementById(`${id}Bar`);
+            
+            if (value === undefined || value === null) {
+                valueEl.textContent = '—' + unit;
+                if (barEl) barEl.style.width = '0%';
+                return;
+            }
+
+            valueEl.textContent = value.toFixed(1) + unit;
+            
+            const percent = Math.min((value / max) * 100, 100);
+            if (barEl) {
+                barEl.style.width = percent + '%';
+                barEl.className = 'metric-bar-fill';
+                if (percent > 85) barEl.classList.add('critical');
+                else if (percent > 70) barEl.classList.add('warn');
+            }
+
+            valueEl.className = 'metric-value';
+            if (percent > 85) valueEl.classList.add('critical');
+            else if (percent > 70) valueEl.classList.add('warn');
+        }
+
+        function handleIntentStatsUpdate(is) {
+            if (!is) return;
+            
+            // Heavy/Light/Nano counts
+            document.getElementById('nanoCount').textContent = is.nano_count || 0;
+            document.getElementById('heavyCount').textContent = is.heavy_count || 0;
+            document.getElementById('lightCount').textContent = is.light_count || 0;
+            
+            // Update total
+            const total = (is.nano_count || 0) + (is.heavy_count || 0) + (is.light_count || 0) + stats.stt;
+            document.getElementById('totalIntents').textContent = `${total} total`;
+        }
+
+        function handleVoiceUpdate(v) {
+            if (!v || v.status === 'offline') {
+                document.getElementById('voiceStatus').textContent = 'offline';
+                return;
+            }
+
+            document.getElementById('voiceStatus').textContent = v.status;
+
+            const s = v.stats || {};
+            
+            // Update stats
+            stats.stt = s.segments_processed || 0;
+            stats.soma = s.soma_triggers || 0;
+            stats.interventions = s.interventions || 0;
+
+            document.getElementById('sttCount').textContent = stats.stt;
+            document.getElementById('somaCount').textContent = stats.soma;
+            document.getElementById('interventionCount').textContent = stats.interventions;
+            document.getElementById('totalIntents').textContent = `${stats.stt + stats.soma} total`;
+
+            // Voice stats
+            document.getElementById('speechRatio').textContent = 
+                ((s.vad_speech_ratio || 0) * 100).toFixed(0) + '%';
+            document.getElementById('ttsQueue').textContent = s.tts_queue || 0;
+            document.getElementById('ttsSpeaking').textContent = s.tts_speaking ? '🔊 Yes' : '—';
+            
+            if (s.uptime_sec) {
+                const mins = Math.floor(s.uptime_sec / 60);
+                const secs = Math.floor(s.uptime_sec % 60);
+                document.getElementById('pipelineUptime').textContent = `${mins}m ${secs}s`;
+            }
+
+            // Atmosphere from stats
+            if (s.atmosphere) {
+                handleAtmosphereUpdate(s.atmosphere);
+            }
+        }
+
+        function handleAtmosphereUpdate(atm) {
+            if (!atm || atm.status === 'offline') return;
+
+            // Valence (-1 to 1 → 0 to 100)
+            const valence = ((atm.valence || 0) + 1) * 50;
+            document.getElementById('valenceGauge').style.setProperty('--value', valence);
+            document.getElementById('valenceValue').textContent = (atm.valence || 0).toFixed(2);
+
+            // Arousal (0 to 1 → 0 to 100)
+            const arousal = (atm.arousal || 0) * 100;
+            document.getElementById('arousalGauge').style.setProperty('--value', arousal);
+            document.getElementById('arousalValue').textContent = (atm.arousal || 0).toFixed(2);
+
+            // Stress
+            const stress = (atm.stress || 0) * 100;
+            document.getElementById('stressGauge').style.setProperty('--value', stress);
+            document.getElementById('stressValue').textContent = stress.toFixed(0) + '%';
+
+            // Argument
+            const argument = (atm.argument_likelihood || 0) * 100;
+            document.getElementById('argumentGauge').style.setProperty('--value', argument);
+            document.getElementById('argumentValue').textContent = argument.toFixed(0) + '%';
+
+            // Mood
+            const moodEmojis = {
+                peaceful: '😊',
+                lively: '🎉',
+                tense: '😰',
+                argument: '😤',
+                quiet: '🤫',
+                unknown: '❓'
+            };
+            
+            const mood = atm.mood || 'unknown';
+            document.getElementById('moodEmoji').textContent = moodEmojis[mood] || '❓';
+            document.getElementById('moodLabel').textContent = mood.charAt(0).toUpperCase() + mood.slice(1);
+            document.getElementById('moodTrend').textContent = `Trend: ${atm.trend || 'stable'}`;
+        }
+
+        // ─── Thinking Stream ──────────────────────────────────────────
+
+        function addThought(type, content, tag = null) {
+            const container = document.getElementById('streamContainer');
+            const thought = document.createElement('div');
+            thought.className = `thought ${type}`;
+            
+            const time = new Date().toLocaleTimeString('de-DE');
+            const tagHtml = tag ? `<span class="thought-tag">${tag}</span>` : '';
+            
+            thought.innerHTML = `
+                <div class="thought-time">${time}</div>
+                <div class="thought-content">${tagHtml}${content}</div>
+            `;
+            
+            container.insertBefore(thought, container.firstChild);
+            
+            // Limit thoughts
+            while (container.children.length > 100) {
+                container.lastChild.remove();
+            }
+            
+            stats.thoughts++;
+            document.getElementById('thoughtCount').textContent = stats.thoughts;
+        }
+
+        function addConversation(user, soma) {
+            stats.conversations.unshift({ user, soma, time: new Date() });
+            if (stats.conversations.length > 20) stats.conversations.pop();
+            renderConversations();
+        }
+
+        function renderConversations() {
+            const list = document.getElementById('conversationList');
+            list.innerHTML = stats.conversations.map((c, i) => `
+                <div class="conversation-item">
+                    <div class="conv-avatar">👤</div>
+                    <div class="conv-content">
+                        <div class="conv-user">${escapeHtml(c.user)}</div>
+                        <div class="conv-soma">🤖 ${escapeHtml(c.soma)}</div>
+                    </div>
+                    <div class="conv-time">${c.time.toLocaleTimeString('de-DE')}</div>
+                </div>
+            `).join('');
+            document.getElementById('convCount').textContent = stats.conversations.length;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // ─── Waveform Visualization ───────────────────────────────────
+
+        function initWaveform() {
+            const waveform = document.getElementById('waveform');
+            for (let i = 0; i < 50; i++) {
+                const bar = document.createElement('div');
+                bar.className = 'wave-bar';
+                bar.style.height = '10px';
+                waveform.appendChild(bar);
+            }
+        }
+
+        function animateWaveform() {
+            const bars = document.querySelectorAll('.wave-bar');
+            bars.forEach((bar, i) => {
+                const height = 10 + Math.random() * 60 * (connected ? 1 : 0.1);
+                bar.style.height = height + 'px';
+            });
+        }
+
+        // ─── Init ─────────────────────────────────────────────────────
+
+        document.addEventListener('DOMContentLoaded', () => {
+            initWaveform();
+            connectWebSocket();
+            
+            // Animate waveform
+            setInterval(animateWaveform, 100);
+
+            // Demo thoughts (remove in production)
+            addThought('info', 'Dashboard initialisiert', 'SYSTEM');
+        });
+
+        // ─── Global Error Handler ─────────────────────────────────────
+
+        window.onerror = (msg, url, line) => {
+            addThought('error', `JS Error: ${msg}`, 'ERROR');
+        };
+    </script>
+</body>
+</html>

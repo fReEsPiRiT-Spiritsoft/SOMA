@@ -36,6 +36,9 @@ from brain_core.engines.heavy_llama import HeavyLlamaEngine
 from brain_core.engines.nano_intent import NanoIntentEngine
 from brain_core.engines.light_phi import LightPhiEngine
 from shared.health_schemas import SystemMetrics, SystemHealthReport
+from evolution_lab.plugin_manager import PluginManager, PluginGenerator
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from pydantic import BaseModel as PydanticBaseModel
 
 logger = structlog.get_logger("soma.brain")
 
@@ -59,6 +62,52 @@ ws_connections: set[WebSocket] = set()
 
 # Voice Pipeline (Das lebendige Ohr + Mund)
 voice_pipeline: VoicePipeline | None = None
+
+# Evolution Lab
+plugin_manager = PluginManager()
+plugin_generator: PluginGenerator | None = None
+
+
+# ── Thought Broadcasting ─────────────────────────────────────────────────
+
+async def broadcast_thought(
+    thought_type: str, 
+    content: str, 
+    tag: str | None = None,
+    extra: dict | None = None
+):
+    """
+    Pushe einen 'Gedanken' an alle Dashboard-Clients.
+    
+    Args:
+        thought_type: info, stt, llm, tts, emotion, warn, error
+        content: Der Gedankentext
+        tag: Optional category tag
+        extra: Optional additional data
+    """
+    import json
+    import time
+    
+    if not ws_connections:
+        return
+    
+    payload = json.dumps({
+        "type": "thought",
+        "thought_type": thought_type,
+        "content": content,
+        "tag": tag,
+        "timestamp": time.time(),
+        "extra": extra or {},
+    })
+    
+    dead: list[WebSocket] = []
+    for ws in ws_connections:
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        ws_connections.discard(ws)
 
 
 # ── Lifespan (Startup / Shutdown) ────────────────────────────────────────
@@ -102,10 +151,11 @@ async def lifespan(app: FastAPI):
     await nano_engine.initialize()
     logger.info("boot_phase", service="engines", status="initialized")
 
-    # 4. Logic Router zusammenbauen
+    # 4. Logic Router zusammenbauen (mit Plugin-Integration)
     logic_router = LogicRouter(
         health_monitor=health_monitor,
         queue_handler=queue_handler,
+        plugin_manager=plugin_manager,  # Evolution Lab Integration
     )
     logic_router.register_engine("heavy", heavy_engine)
     logic_router.register_engine("light", light_engine)
@@ -126,7 +176,7 @@ async def lifespan(app: FastAPI):
             health_monitor.last_metrics.ram_percent < 80 else nano_engine
         return await engine.generate(
             prompt=soma_req.prompt,
-            system_prompt=LogicRouter._build_system_prompt(soma_req),
+            system_prompt=logic_router._build_system_prompt(soma_req),
         )
 
     queue_handler.set_process_callback(process_deferred)
@@ -145,14 +195,29 @@ async def lifespan(app: FastAPI):
             audio_device="default",
             stt_model="small",
             tts_voice="de_DE-thorsten-high",
+            broadcast_callback=broadcast_thought,  # Dashboard Events!
         )
         await voice_pipeline.start()
+        await broadcast_thought("info", "🎤 Voice Pipeline gestartet - Soma hört zu!", "BOOT")
         logger.info("boot_phase", service="voice_pipeline", status="online 🎤")
     except Exception as exc:
         logger.error("boot_phase", service="voice_pipeline", status="failed", error=str(exc))
+        await broadcast_thought("error", f"Voice Pipeline Fehler: {exc}", "BOOT")
         voice_pipeline = None
 
     logger.info("soma_online", msg="SOMA-AI ist bereit. 🧠🎤")
+    await broadcast_thought("info", "🧠 SOMA-AI ist online und bereit!", "SYSTEM")
+
+    # ── Evolution Lab initialisieren ─────────────────────────────────────
+    global plugin_generator
+    plugin_generator = PluginGenerator(
+        manager=plugin_manager,
+        heavy_engine=heavy_engine,
+    )
+    await plugin_manager.load_all()
+    loaded = plugin_manager.list_loaded()
+    logger.info("evolution_lab_ready", plugins_loaded=len(loaded))
+    await broadcast_thought("info", f"🧬 Evolution Lab bereit – {len(loaded)} Plugins geladen", "EVOLUTION")
 
     yield  # ── App läuft ──
 
@@ -257,6 +322,141 @@ async def get_deferred_result(request_id: str):
     if result:
         return {"request_id": request_id, "result": result, "status": "completed"}
     return {"request_id": request_id, "result": None, "status": "pending"}
+
+
+# ── Conversation History Endpoint ───────────────────────────────────────
+
+@app.get("/api/v1/conversation/history")
+async def get_conversation_history():
+    """Gesprächsverlauf für Dashboard."""
+    if voice_pipeline:
+        return {
+            "history": voice_pipeline._conversation_history[-50:],  # Letzte 50 Einträge
+            "session_id": voice_pipeline._voice_session_id,
+        }
+    return {"history": [], "session_id": None}
+
+# ── Evolution Lab Endpoints ──────────────────────────────────────────────
+
+class PluginGenRequest(PydanticBaseModel):
+    name: str
+    description: str
+
+
+@app.post("/api/v1/evolution/generate")
+async def generate_plugin(req: PluginGenRequest):
+    """
+    Soma schreibt, testet und installiert ein neues Plugin.
+    Triggert den vollen Evolution Lab Flow.
+    """
+    if not plugin_generator:
+        raise HTTPException(503, "Evolution Lab nicht initialisiert")
+
+    # Name bereinigen (snake_case)
+    import re
+    name = re.sub(r"[^a-z0-9_]", "_", req.name.lower().strip())
+    if not name:
+        raise HTTPException(400, "Ungültiger Plugin-Name")
+
+    success, message, code = await plugin_generator.generate_from_description(
+        name=name,
+        description=req.description,
+        broadcast_callback=broadcast_thought,
+    )
+
+    return {
+        "success": success,
+        "message": message,
+        "plugin_name": name,
+        "code_length": len(code),
+        "code_preview": code[:300] + "..." if len(code) > 300 else code,
+    }
+
+
+@app.get("/api/v1/evolution/plugins")
+async def list_plugins():
+    """Alle installierten Plugins."""
+    all_p = plugin_manager.list_all()
+    return {
+        "loaded": [
+            {
+                "name": p.name,
+                "version": p.version,
+                "description": p.description,
+                "is_loaded": p.is_loaded,
+                "error": p.error,
+            }
+            for p in all_p.values()
+        ],
+        "count": len(all_p),
+        "last_generation": plugin_generator.last_generation if plugin_generator else {},
+    }
+
+
+@app.delete("/api/v1/evolution/plugins/{plugin_name}")
+async def delete_plugin(plugin_name: str):
+    """Plugin entladen und löschen."""
+    from pathlib import Path
+    await plugin_manager.unload_plugin(plugin_name)
+    plugin_path = plugin_manager.plugins_dir / f"{plugin_name}.py"
+    if plugin_path.exists():
+        plugin_path.unlink()
+    return {"success": True, "deleted": plugin_name}
+
+
+@app.post("/api/v1/evolution/plugins/{plugin_name}/reload")
+async def reload_plugin(plugin_name: str):
+    """Plugin hot-reloaden."""
+    meta = await plugin_manager.reload_plugin(plugin_name)
+    return {"success": meta.is_loaded, "error": meta.error, "name": meta.name}
+
+# ── Intent Statistics Endpoints ─────────────────────────────────────────
+
+@app.get("/api/v1/intent/stats")
+async def get_intent_stats():
+    """Live Intent-Statistiken für Dashboard."""
+    stats = logic_router.stats
+    return stats.model_dump()
+
+
+@app.get("/api/v1/dashboard/full")
+async def get_dashboard_data():
+    """
+    Kombinierter Endpunkt für das Dashboard.
+    Liefert alle Daten in einem Request.
+    """
+    metrics = health_monitor.last_metrics
+    if not metrics:
+        metrics = health_monitor.collect_metrics()
+    
+    intent_stats = logic_router.stats
+    
+    voice_stats = None
+    atmosphere = None
+    if voice_pipeline and voice_pipeline.is_running:
+        voice_stats = voice_pipeline.stats
+        atm = voice_pipeline.emotion.atmosphere
+        atmosphere = {
+            "mood": atm.mood.value,
+            "valence": atm.avg_valence,
+            "arousal": atm.avg_arousal,
+            "stress": atm.avg_stress,
+            "trend": atm.trend,
+            "argument_likelihood": atm.argument_likelihood,
+            "speakers_detected": atm.speakers_detected,
+        }
+    
+    return {
+        "metrics": metrics.model_dump() if metrics else None,
+        "intent_stats": intent_stats.model_dump(),
+        "voice": {
+            "status": "online" if voice_pipeline and voice_pipeline.is_running else "offline",
+            "stats": voice_stats,
+        },
+        "atmosphere": atmosphere,
+        "queue_size": await queue_handler.queue_size(),
+        "active_rooms": presence_manager.get_active_rooms(),
+    }
 
 
 # ── Voice Pipeline Endpoints ────────────────────────────────────────────

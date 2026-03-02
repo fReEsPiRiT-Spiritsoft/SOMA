@@ -187,12 +187,18 @@ class STTEngine:
     def _detect_soma(text: str) -> bool:
         """
         Erkennt "Soma" irgendwo im Text.
-        Berücksichtigt typische Whisper-Fehler:
-        'Soma', 'soma', 'SOMA', 'Sooma', 'Somar', 'so ma'
+        Berücksichtigt typische Whisper-Fehler und deutsche Aussprache.
         """
         t = text.lower()
-        # Exakte Matches
-        soma_variants = ["soma", "sooma", "so ma", "sohma", "somma", "zoma"]
+        # Exakte Matches und typische Whisper-Transkriptionsfehler
+        soma_variants = [
+            "soma", "sooma", "so ma", "sohma", "somma", "zoma",
+            "sommer", "zommer", "summer", "summa",  # Sehr häufige Whisper-Fehler!
+            "somar", "soomar", "somah", "sommar",
+            "suma", "zooma", "söma", "söhma",
+            "hey soma", "hey sommer", "hej soma",
+            "soma!", "sommer!", "hey,", "hallo soma",
+        ]
         return any(variant in t for variant in soma_variants)
 
     async def shutdown(self):

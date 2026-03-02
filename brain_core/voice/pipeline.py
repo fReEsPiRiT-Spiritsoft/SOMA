@@ -90,6 +90,7 @@ from brain_core.voice.stt import STTEngine, TranscriptionResult
 from brain_core.voice.tts import TTSEngine, SpeechEmotion
 from brain_core.voice.emotion import EmotionEngine, EmotionState, RoomMood
 from brain_core.voice.ambient import AmbientIntelligence, Intervention
+from brain_core.memory import get_memory, MemoryCategory
 
 logger = structlog.get_logger("soma.voice.pipeline")
 
@@ -116,6 +117,7 @@ class VoicePipeline:
         stt_model: str = "small",
         tts_voice: str = "de_DE-thorsten-high",
         output_device: Optional[str] = None,
+        broadcast_callback=None,
     ):
         """
         Args:
@@ -124,6 +126,7 @@ class VoicePipeline:
             stt_model: Whisper Model Size
             tts_voice: Piper Voice Name
             output_device: ALSA Output Device (None = default)
+            broadcast_callback: Async callback für Dashboard-Events
         """
         # ── Sub-Engines ─────────────────────────────────────────────
         self.vad = ContinuousVAD(aggressiveness=2)
@@ -131,10 +134,12 @@ class VoicePipeline:
         self.tts = TTSEngine(voice=tts_voice, output_device=output_device)
         self.emotion = EmotionEngine(window_sec=60.0)
         self.ambient = AmbientIntelligence(emotion_engine=self.emotion)
+        self.memory = get_memory()  # Persistent Memory System
 
         # ── External References ─────────────────────────────────────
         self._logic_router = logic_router
         self._audio_device = audio_device
+        self._broadcast = broadcast_callback
 
         # ── State ───────────────────────────────────────────────────
         self._running = False
@@ -147,6 +152,34 @@ class VoicePipeline:
             "interventions": 0,
             "uptime_start": 0.0,
         }
+        # Evolution Lab: Pending Plugin-Test nach Generierung
+        self._pending_plugin_test: Optional[str] = None
+        
+        # Conversation Memory: Eine persistente Session für Voice
+        # Soma erinnert sich an alles was in dieser Session besprochen wurde
+        self._voice_session_id = "voice_main_session"
+        self._conversation_history: list[dict] = []  # Für Dashboard
+
+    # ══════════════════════════════════════════════════════════════════
+    #  DASHBOARD BROADCASTING
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _emit(
+        self, 
+        event_type: str, 
+        content: str, 
+        tag: str = None,
+        extra: dict = None
+    ):
+        """Sende Event ans Dashboard via WebSocket."""
+        if self._broadcast:
+            try:
+                await self._broadcast(event_type, content, tag, extra)
+                logger.debug("broadcast_sent", type=event_type, tag=tag)
+            except Exception as e:
+                logger.warning("broadcast_failed", error=str(e))
+        else:
+            logger.debug("broadcast_no_callback", type=event_type)
 
     # ══════════════════════════════════════════════════════════════════
     #  LIFECYCLE
@@ -304,6 +337,14 @@ class VoicePipeline:
                 sample_rate=VAD_SAMPLE_RATE,
                 duration_sec=segment.duration_sec,
             )
+            
+            # Dashboard: Emotion Event
+            await self._emit(
+                "emotion",
+                f"Emotion: {emotion_reading.emotion.value} | Stress: {emotion_reading.stress_level:.0%}",
+                "VAD",
+                {"emotion": emotion_reading.emotion.value, "stress": emotion_reading.stress_level}
+            )
 
             # ── 2. Proaktive Intervention prüfen ─────────────────────
             current_hour = datetime.now().hour
@@ -311,6 +352,7 @@ class VoicePipeline:
 
             if intervention:
                 # Soma greift ein! (z.B. "Euer Streit ist unproduktiv...")
+                await self._emit("warn", f"⚡ Intervention: {intervention.type.value}", "AMBIENT")
                 await self._handle_intervention(intervention)
                 # Nach Intervention trotzdem STT machen (falls Soma angesprochen)
 
@@ -321,9 +363,19 @@ class VoicePipeline:
             )
 
             if not transcription.text.strip():
+                await self._emit("stt", "🔇 (Stille / unverständlich)", "STT")
                 return
 
             self._stats["transcriptions"] += 1
+            
+            # Dashboard: Was wurde gehört?
+            soma_marker = "🎯 SOMA!" if transcription.contains_soma else ""
+            await self._emit(
+                "stt", 
+                f"🎤 \"{transcription.text}\" {soma_marker}",
+                "STT",
+                {"text": transcription.text, "soma": transcription.contains_soma, "lang": transcription.language}
+            )
 
             logger.info(
                 "voice_heard",
@@ -343,6 +395,7 @@ class VoicePipeline:
 
         except Exception as e:
             logger.error("segment_processing_error", error=str(e))
+            await self._emit("error", f"Segment Error: {str(e)}", "ERROR")
 
     # ══════════════════════════════════════════════════════════════════
     #  SOMA-ANGESPROCHENE VERARBEITUNG
@@ -364,10 +417,22 @@ class VoicePipeline:
 
         if not prompt.strip():
             # Nur "Soma" gesagt, sonst nichts
+            await self._emit("llm", "👋 Soma wurde gerufen (ohne Frage)", "TRIGGER")
             await self.tts.speak(
                 "Ja?",
                 SpeechEmotion(speed=1.0, pitch=1.0, volume=0.9),
             )
+            return
+
+        # ── Evolution Lab Trigger ────────────────────────────────────
+        # "schreib ein Plugin", "erstell ein Plugin", "bau ein Plugin"
+        if self._is_plugin_request(prompt):
+            await self._handle_plugin_request(prompt)
+            return
+
+        # ── Pending Plugin Test ("Ja, ruf es auf") ───────────────────
+        if self._pending_plugin_test and self._is_affirmative(prompt):
+            await self._execute_pending_plugin()
             return
 
         logger.info(
@@ -375,6 +440,15 @@ class VoicePipeline:
             prompt=prompt,
             emotion=emotion_reading.emotion.value,
         )
+        
+        # ── Memory: Automatisch wichtige Infos speichern ─────────────
+        should_save, category, extracted = self.memory.should_remember(prompt)
+        if should_save and category and extracted:
+            self.memory.remember(extracted, category, source="voice_conversation")
+            logger.info("memory_auto_saved", category=category, content_preview=extracted[:50])
+            await self._emit("memory", f"💾 Gemerkt: {extracted[:50]}...", "MEMORY")
+        
+        await self._emit("llm", f"🧠 Denke nach: \"{prompt}\"", "LLM", {"prompt": prompt})
 
         # ── An Brain Core senden ─────────────────────────────────────
         if self._logic_router:
@@ -385,6 +459,7 @@ class VoicePipeline:
 
             request = SomaRequest(
                 prompt=prompt,
+                session_id=self._voice_session_id,  # Conversation Memory!
                 metadata={
                     "source": "voice",
                     "emotion": emotion_reading.emotion.value,
@@ -394,15 +469,40 @@ class VoicePipeline:
                     "emotion_context": emotion_context,
                 },
             )
+            
+            # Conversation History für Dashboard
+            self._conversation_history.append({
+                "role": "user",
+                "text": prompt,
+                "timestamp": datetime.now().isoformat(),
+            })
 
             response = await self._logic_router.route(request)
+            
+            # Conversation History für Dashboard (Assistant-Antwort)
+            self._conversation_history.append({
+                "role": "assistant",
+                "text": response.response,
+                "engine": response.engine_used,
+                "timestamp": datetime.now().isoformat(),
+            })
+            
+            # Dashboard: LLM Antwort
+            await self._emit(
+                "llm", 
+                f"💬 Antwort ({response.engine_used}): \"{response.response[:100]}...\"" if len(response.response) > 100 else f"💬 Antwort ({response.engine_used}): \"{response.response}\"",
+                response.engine_used.upper(),
+                {"response": response.response, "engine": response.engine_used, "latency_ms": response.latency_ms}
+            )
 
             # Antwort aussprechen
+            await self._emit("tts", f"🔊 Spreche: \"{response.response[:50]}...\"" if len(response.response) > 50 else f"🔊 Spreche: \"{response.response}\"", "TTS")
             speech_emotion = self._select_speech_emotion(emotion_reading)
             await self.tts.speak(response.response, speech_emotion)
 
         else:
             # Kein Logic Router → Fallback
+            await self._emit("warn", "⚠️ Logic Router nicht verbunden", "SYSTEM")
             await self.tts.speak(
                 "Ich höre dich, aber mein Denkvermögen ist noch nicht verbunden.",
                 SpeechEmotion.gentle(),
@@ -460,6 +560,255 @@ class VoicePipeline:
             await self.tts.speak(text, SpeechEmotion.calm(), priority=True)
 
     # ══════════════════════════════════════════════════════════════════
+    #  EVOLUTION LAB — PLUGIN GENERIERUNG VIA SPRACHE
+    # ══════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _is_plugin_request(prompt: str) -> bool:
+        """
+        Erkennt ob der Nutzer EXPLIZIT ein Plugin anfordert.
+        
+        MUSS enthalten:
+        1. Ein Plugin-Wort (plugin, erweiterung, etc.)
+        2. Ein Erstellungs-Wort (schreib, erstell, etc.)
+        3. Diese müssen ZUSAMMEN in einem Kontext sein
+        
+        NICHT triggern bei normalen Gesprächen!
+        """
+        p = prompt.lower()
+        
+        # Explizite Phrasen die DEFINITIV Plugin-Anfragen sind
+        explicit_triggers = [
+            "schreib dir ein plugin",
+            "erstell dir ein plugin", 
+            "mach dir ein plugin",
+            "bau dir ein plugin",
+            "schreib ein plugin",
+            "erstell ein plugin",
+            "programmier dir",
+            "programmier ein plugin",
+            "code dir ein plugin",
+            "plugin schreiben für",
+            "plugin erstellen für",
+            "plugin für",
+            "ein plugin das",
+            "ein plugin welches",
+            "schreib dir eine erweiterung",
+            "erstell dir eine erweiterung",
+            "write a plugin",
+            "create a plugin",
+            "build a plugin",
+        ]
+        
+        # Wenn eine explizite Phrase vorkommt → JA
+        for trigger in explicit_triggers:
+            if trigger in p:
+                return True
+        
+        # Sonst: NEIN (lieber zu streng als zu locker!)
+        return False
+
+    @staticmethod
+    def _is_plugin_edit_request(prompt: str) -> bool:
+        """Erkennt ob ein bestehendes Plugin bearbeitet werden soll."""
+        p = prompt.lower()
+        edit_words = ["erweit", "bearbeit", "änder", "verbess", "update", "edit", "fix", "patch", "modifiz"]
+        plugin_words = ["plugin", "plug-in", "erweiterung"]
+        has_plugin = any(pw in p for pw in plugin_words)
+        has_edit = any(ew in p for ew in edit_words)
+        return has_plugin and has_edit
+
+    def _extract_plugin_info(self, prompt: str) -> tuple[str, str]:
+        """
+        Extrahiert Plugin-Name und Beschreibung aus dem Prompt.
+        "kannst du dir ein Plugin schreiben welches die Uhrzeit anzeigt"
+        → name: 'uhrzeit_anzeige', description: 'die aktuelle Uhrzeit anzeigen'
+        """
+        import re
+        p = prompt.lower()
+        
+        # Alles VOR "plugin" entfernen (das ist nur Floskel)
+        # "kannst du dir ein plugin schreiben welches..." → "welches..."
+        plugin_split = re.split(r'\b(?:plugin|plug-in|erweiterung)\b', p, maxsplit=1)
+        if len(plugin_split) > 1:
+            after_plugin = plugin_split[1].strip()
+        else:
+            after_plugin = p
+        
+        # Füllwörter am Anfang entfernen
+        after_plugin = re.sub(
+            r'^[\s,]*(?:schreiben|erstellen|bauen|machen|entwickeln|welches|das|die|der|to|that|which|für|for)\s*',
+            '',
+            after_plugin
+        ).strip()
+        
+        # Das ist die Beschreibung
+        description = after_plugin if after_plugin else prompt
+        
+        # Name: Kernwörter der Beschreibung (ohne Stoppwörter)
+        stopwords = {
+            'es', 'dir', 'sich', 'ein', 'eine', 'das', 'die', 'der', 'den', 'dem',
+            'auf', 'in', 'an', 'zu', 'von', 'mit', 'und', 'oder', 'ist', 'sind',
+            'immer', 'ermöglicht', 'erlaubt', 'kann', 'können', 'soll', 'sollte',
+            'mir', 'mich', 'dich', 'ihm', 'ihr', 'uns', 'euch', 'sie', 'ihnen',
+            'aktuelle', 'aktuellen', 'aktuell', 'jedem', 'jeder', 'jedes', 'jeden',
+            'abrufen', 'anzeigen', 'zeigen', 'geben', 'sagen', 'holen', 'liefern',
+            'konversationskontext', 'kontext', 'gespräch', 'chat',
+        }
+        words = re.sub(r'[^a-zäöü0-9\s]', '', description.lower()).split()
+        name_words = [w for w in words if w not in stopwords and len(w) > 2][:3]
+        name = '_'.join(name_words) if name_words else 'custom_plugin'
+        
+        # Fallback wenn Name immer noch schlecht
+        if name in ('custom_plugin', 'plugin', 'schreiben', 'kannst'):
+            # Versuche Schlüsselwörter zu finden
+            keywords = ['datum', 'uhrzeit', 'zeit', 'wetter', 'temperatur', 'licht', 'musik']
+            for kw in keywords:
+                if kw in description:
+                    name = kw
+                    break
+        
+        logger.debug("plugin_info_extracted", name=name, description=description[:50])
+        return name, description
+
+    async def _handle_plugin_request(self, prompt: str):
+        """
+        Triggert den Evolution Lab Flow als BACKGROUND TASK.
+        Soma bleibt weiter ansprechbar während das Plugin generiert wird.
+        """
+        is_edit = self._is_plugin_edit_request(prompt)
+        name, description = self._extract_plugin_info(prompt)
+
+        if is_edit:
+            await self._emit("evolution", f"🔧 Plugin-Bearbeitung: '{name}'", "EVOLUTION")
+            await self.tts.speak(
+                f"Okay, ich bearbeite das Plugin im Hintergrund. Du kannst weiter mit mir reden.",
+                SpeechEmotion(speed=1.05, pitch=1.0, volume=0.9),
+            )
+        else:
+            await self._emit("evolution", f"🧬 Neues Plugin: '{name}'", "EVOLUTION")
+            await self.tts.speak(
+                "Alright, ich entwickle das Plugin im Hintergrund. Du kannst weiter mit mir reden.",
+                SpeechEmotion(speed=1.05, pitch=1.0, volume=0.9),
+            )
+
+        # Background Task starten — Soma bleibt ansprechbar!
+        asyncio.create_task(
+            self._plugin_background_worker(name, description, is_edit)
+        )
+
+    async def _plugin_background_worker(self, name: str, description: str, is_edit: bool):
+        """
+        Läuft im Hintergrund: LLM → Test → Install → Soma sagt Bescheid.
+        Soma liest KEINEN Code vor, nur Status-Updates.
+        """
+        try:
+            from brain_core.main import plugin_generator, plugin_manager
+            if not plugin_generator:
+                await self.tts.speak(
+                    "Evolution Lab ist noch nicht bereit.",
+                    SpeechEmotion.calm(),
+                )
+                return
+
+            # Bei Edit: Bestehenden Code laden und als Kontext mitgeben
+            if is_edit:
+                existing_code = ""
+                plugin_path = plugin_manager.plugins_dir / f"{name}.py"
+                if plugin_path.exists():
+                    existing_code = plugin_path.read_text(encoding='utf-8')
+                    description = (
+                        f"Bearbeite/Erweitere dieses bestehende Plugin:\n"
+                        f"```python\n{existing_code}\n```\n\n"
+                        f"Änderung: {description}\n\n"
+                        f"Gib den KOMPLETTEN aktualisierten Code zurück."
+                    )
+
+            await self._emit("evolution", f"⚙️ Generiere Code für '{name}'...", "EVOLUTION")
+
+            success, message, code = await plugin_generator.generate_from_description(
+                name=name,
+                description=description,
+                broadcast_callback=self._broadcast,
+            )
+
+            if success:
+                # Erfolg! Soma informiert und fragt ob testen
+                self._pending_plugin_test = name
+                await self._emit(
+                    "evolution",
+                    f"✅ Plugin '{name}' fertig! Geschrieben, getestet, installiert.",
+                    "EVOLUTION_OK",
+                    {"plugin": name, "code_length": len(code)}
+                )
+                await self.tts.speak(
+                    f"Fertig! Mein neues Plugin '{name.replace('_', ' ')}' ist geschrieben, "
+                    f"getestet und installiert. Soll ich es einmal für dich aufrufen?",
+                    SpeechEmotion(speed=1.0, pitch=1.05, volume=1.0),
+                )
+            else:
+                await self._emit("evolution", f"❌ Plugin fehlgeschlagen: {message}", "EVOLUTION")
+                await self.tts.speak(
+                    f"Das Plugin hat leider nicht funktioniert. {message[:60]}. "
+                    f"Soll ich es nochmal versuchen?",
+                    SpeechEmotion.calm(),
+                )
+        except Exception as exc:
+            logger.error("plugin_background_error", error=str(exc))
+            await self.tts.speak(
+                "Bei der Plugin-Entwicklung ist ein Fehler aufgetreten.",
+                SpeechEmotion.calm(),
+            )
+
+    # ══════════════════════════════════════════════════════════════════
+    #  PLUGIN EXECUTION & HELPERS
+    # ══════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _is_affirmative(text: str) -> bool:
+        """Erkennt 'Ja', 'Klar', 'Mach mal' etc."""
+        p = text.lower().strip()
+        affirmatives = [
+            "ja", "klar", "mach", "ruf", "teste", "zeig",
+            "yes", "sure", "go", "okay", "ok", "gerne",
+            "na klar", "mach mal", "probier", "los", "bitte",
+        ]
+        return any(a in p for a in affirmatives)
+
+    async def _execute_pending_plugin(self):
+        """Führt das gerade installierte Plugin aus und sagt das Ergebnis."""
+        name = self._pending_plugin_test
+        self._pending_plugin_test = None  # Reset
+
+        if not name:
+            return
+
+        try:
+            from brain_core.main import plugin_manager
+
+            await self._emit("evolution", f"▶️ Rufe Plugin '{name}' auf...", "EVOLUTION")
+            result = await plugin_manager.execute(name)
+
+            # Ergebnis aussprechen
+            result_str = str(result)[:200]
+            await self._emit(
+                "evolution",
+                f"📋 Plugin-Ergebnis: {result_str}",
+                "EVOLUTION_OK",
+                {"plugin": name, "result": result_str}
+            )
+            await self.tts.speak(
+                f"Ergebnis von Plugin '{name.replace('_', ' ')}': {result_str}",
+                SpeechEmotion(speed=1.0, pitch=1.0, volume=1.0),
+            )
+        except Exception as exc:
+            logger.error("plugin_execute_error", plugin=name, error=str(exc))
+            await self.tts.speak(
+                f"Das Plugin hat einen Fehler geworfen: {str(exc)[:60]}",
+                SpeechEmotion.calm(),
+            )
+
+    # ══════════════════════════════════════════════════════════════════
     #  HELPERS
     # ══════════════════════════════════════════════════════════════════
 
@@ -476,8 +825,9 @@ class VoicePipeline:
         import re
 
         # Soma-Varianten entfernen (case-insensitive)
+        # Auch Whisper-Fehler wie "Sommer", "Summer" etc.
         cleaned = re.sub(
-            r'\b(?:hey\s+)?(?:soma|sooma|sohma|somma|zoma)(?:\s*[,!.?])?\s*',
+            r'\b(?:hey\s+)?(?:soma|sooma|sohma|somma|zoma|sommer|zommer|summer|summa)(?:\s*[,!.?])?\s*',
             ' ',
             text,
             flags=re.IGNORECASE,

@@ -66,21 +66,32 @@ TEMPLATES = [
 WSGI_APPLICATION = "core_settings.wsgi.application"
 ASGI_APPLICATION = "core_settings.asgi.application"
 
-# ── Database: PostgreSQL (SSOT) ──────────────────────────────────────────
+# ── Database: PostgreSQL (SSOT) or SQLite (Dev Fallback) ─────────────────
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": os.getenv("POSTGRES_DB", "soma_db"),
-        "USER": os.getenv("POSTGRES_USER", "soma"),
-        "PASSWORD": os.getenv("POSTGRES_PASSWORD", "soma_secret_change_me"),
-        "HOST": os.getenv("POSTGRES_HOST", "localhost"),
-        "PORT": os.getenv("POSTGRES_PORT", "5432"),
-        "OPTIONS": {
-            "connect_timeout": 5,
-        },
+# Use SQLite for development if PostgreSQL is not available
+USE_SQLITE = os.getenv("USE_SQLITE", "True").lower() in ("true", "1", "yes")
+
+if USE_SQLITE:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.getenv("POSTGRES_DB", "soma_db"),
+            "USER": os.getenv("POSTGRES_USER", "soma"),
+            "PASSWORD": os.getenv("POSTGRES_PASSWORD", "soma_secret_change_me"),
+            "HOST": os.getenv("POSTGRES_HOST", "localhost"),
+            "PORT": os.getenv("POSTGRES_PORT", "5432"),
+            "OPTIONS": {
+                "connect_timeout": 5,
+            },
+        }
+    }
 
 # ── Auth ─────────────────────────────────────────────────────────────────
 
