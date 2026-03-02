@@ -44,7 +44,7 @@ DEFAULT_VOICE = "de_DE-thorsten-high"  # Thorsten: natürliche deutsche Stimme
 @dataclass
 class SpeechEmotion:
     """Emotionale Modulation der Sprachausgabe."""
-    speed: float = 1.0        # 0.5 = langsam (beruhigend), 1.5 = schnell
+    speed: float = 1.3        # 0.5 = langsam (beruhigend), 1.5 = schnell
     pitch: float = 1.0        # 0.8 = tief (ernst), 1.2 = hoch (fröhlich)
     volume: float = 1.0       # 0.5 = leise (nacht), 1.0 = normal
 

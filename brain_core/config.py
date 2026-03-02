@@ -28,7 +28,7 @@ class SomaConfig(BaseSettings):
     # ── Redis ────────────────────────────────────────────────────────────
     redis_host: str = "localhost"
     redis_port: int = 6379
-    redis_password: str = "soma_redis_secret"
+    redis_password: str = ""  # Empty = no auth for local dev
 
     # ── MQTT ─────────────────────────────────────────────────────────────
     mqtt_host: str = "localhost"
@@ -63,7 +63,9 @@ class SomaConfig(BaseSettings):
 
     @property
     def redis_url(self) -> str:
-        return f"redis://:{self.redis_password}@{self.redis_host}:{self.redis_port}/0"
+        if self.redis_password:
+            return f"redis://:{self.redis_password}@{self.redis_host}:{self.redis_port}/0"
+        return f"redis://{self.redis_host}:{self.redis_port}/0"
 
     @property
     def ollama_url(self) -> str:

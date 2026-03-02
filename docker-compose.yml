@@ -38,13 +38,12 @@ services:
       --maxmemory 512mb
       --maxmemory-policy allkeys-lru
       --appendonly yes
-      --requirepass ${REDIS_PASSWORD:-soma_redis_secret}
     ports:
       - "${REDIS_PORT:-6379}:6379"
     volumes:
       - soma_redisdata:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-soma_redis_secret}", "ping"]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
