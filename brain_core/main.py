@@ -68,6 +68,24 @@ plugin_manager = PluginManager()
 plugin_generator: PluginGenerator | None = None
 
 
+# ── Reminder Speak (Global für Import) ───────────────────────────────────
+
+async def reminder_speak(text: str):
+    """
+    Globaler TTS-Callback für Erinnerungen.
+    Kann aus anderen Modulen importiert werden.
+    """
+    global voice_pipeline
+    if voice_pipeline is None:
+        logger.warning("reminder_speak_no_pipeline", text=text)
+        return
+    
+    from brain_core.voice.tts import SpeechEmotion
+    await broadcast_thought("info", f"⏰ ERINNERUNG: {text}", "REMINDER")
+    logger.info("reminder_speaking", text=text)
+    await voice_pipeline.tts.speak(text, SpeechEmotion.alert())
+
+
 # ── Thought Broadcasting ─────────────────────────────────────────────────
 
 async def broadcast_thought(
@@ -218,6 +236,17 @@ async def lifespan(app: FastAPI):
     loaded = plugin_manager.list_loaded()
     logger.info("evolution_lab_ready", plugins_loaded=len(loaded))
     await broadcast_thought("info", f"🧬 Evolution Lab bereit – {len(loaded)} Plugins geladen", "EVOLUTION")
+    
+    # ── Erinnerungs-Plugin mit TTS verbinden ─────────────────────────────
+    if voice_pipeline and "erinnerung" in plugin_manager._plugins:
+        try:
+            erinnerung_module = plugin_manager._plugins["erinnerung"].module
+            if hasattr(erinnerung_module, "set_speak_callback"):
+                # Verwende die globale reminder_speak Funktion
+                erinnerung_module.set_speak_callback(reminder_speak)
+                logger.info("erinnerung_plugin_connected", status="TTS callback set")
+        except Exception as e:
+            logger.warning("erinnerung_plugin_connect_failed", error=str(e))
 
     yield  # ── App läuft ──
 

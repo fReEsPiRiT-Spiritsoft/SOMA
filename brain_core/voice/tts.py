@@ -217,6 +217,7 @@ class TTSEngine:
 
     async def _speak_piper(self, text: str, emotion: SpeechEmotion):
         """Synthese via Piper (neue API mit SynthesisConfig)."""
+        import concurrent.futures
         from piper.config import SynthesisConfig
         
         # SynthesisConfig für emotionale Modulation
@@ -227,12 +228,20 @@ class TTSEngine:
             volume=emotion.volume,
         )
         
-        # Audio-Chunks sammeln (AudioChunk hat audio_float_array, nicht audio)
-        audio_chunks = []
-        for chunk in self._piper.synthesize(text, syn_config=syn_config):
-            # Konvertiere float32 → int16 für WAV
-            int16_audio = (chunk.audio_float_array * 32767).astype(np.int16)
-            audio_chunks.append(int16_audio)
+        # Piper-Synthese in Thread-Executor auslagern (blocking CPU-Code)
+        # → Event Loop bleibt frei → asyncio.sleep-Timer (z.B. Reminder) feuern pünktlich
+        piper_instance = self._piper
+        loop = asyncio.get_event_loop()
+
+        def _synthesize_blocking():
+            audio_chunks = []
+            for chunk in piper_instance.synthesize(text, syn_config=syn_config):
+                int16_audio = (chunk.audio_float_array * 32767).astype(np.int16)
+                audio_chunks.append(int16_audio)
+            return audio_chunks
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            audio_chunks = await loop.run_in_executor(executor, _synthesize_blocking)
         
         if not audio_chunks:
             return

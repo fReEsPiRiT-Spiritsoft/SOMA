@@ -315,6 +315,37 @@ class LogicRouter:
         if plugin_info:
             base += f"\n\n{plugin_info}"
 
+        # ── ACTION-Tag System ────────────────────────────────────────
+        base += """
+
+AKTIONS-SYSTEM – PFLICHT:
+Wenn der Nutzer eine Erinnerung oder Aktion verlangt, MUSS am Ende deiner Antwort ein Tag stehen.
+Format: [ACTION:typ feld="wert" feld2="wert2"]
+Diese Tags werden NICHT vorgelesen, nur intern ausgeführt.
+
+REGELN FÜR ERINNERUNGEN (IMMER ZEITFELD ANGEBEN!):
+  Nutzer sagt "in X Sekunden" → [ACTION:reminder seconds=X topic="Thema"]
+  Nutzer sagt "in X Minuten"  → [ACTION:reminder minutes=X topic="Thema"]
+  Nutzer sagt "in X Stunden"  → [ACTION:reminder hours=X topic="Thema"]
+  Nutzer sagt "um HH:MM"      → [ACTION:reminder time="HH:MM" topic="Thema"]
+
+WICHTIG: Das Zeitfeld (seconds/minutes/hours/time) IMMER mitgeben – sonst funktioniert es nicht!
+
+Beispiele (so muss es aussehen):
+  Nutzer: "Erinnere mich in 10 Sekunden"
+  → "Klar, in 10 Sekunden melde ich mich![ACTION:reminder seconds=10 topic="Erinnerung"]"
+
+  Nutzer: "Erinnere mich in 5 Minuten ans Wasser"
+  → "In 5 Minuten sag ich dir Bescheid.[ACTION:reminder minutes=5 topic="Wasser"]"
+
+  Nutzer: "Stell Erinnerung um 18 Uhr: Abendessen"
+  → "Erledigt, um 18:00 erinnere ich dich.[ACTION:reminder time="18:00" topic="Abendessen"]"
+
+  Nutzer: "Ich heiße Patrick"
+  → "Freut mich, Patrick![ACTION:remember category="user_info" content="Der Nutzer heißt Patrick"]"
+
+Nur EIN Tag pro Aktion. Tag direkt ans Ende, KEIN Zeilenumbruch davor."""
+
         return base
 
     def _get_available_plugins_info(self) -> str:
@@ -366,9 +397,9 @@ class LogicRouter:
             if not plugins:
                 return ""
             
-            # Keyword-Mapping für automatische Plugin-Aktivierung
+            # Keyword-Mapping für datenliefernde Plugins (keine Aktions-Plugins!)
             keyword_plugins = {
-                # Datum/Uhrzeit
+                # Datum/Uhrzeit → liefert aktuelle Zeit als Kontext
                 ("zeit", "uhrzeit", "spät", "datum", "tag", "monat", "jahr", "wochentag"): 
                     ["datum_uhrzeit", "datetime", "time", "zeit"],
                 # Wetter (falls Plugin existiert)
@@ -377,6 +408,8 @@ class LogicRouter:
                 # System
                 ("system", "cpu", "ram", "speicher", "auslastung"): 
                     ["system_status", "health"],
+                # HINWEIS: Erinnerungs-Plugin wird NICHT hier getriggert.
+                # Stattdessen setzt das LLM einen [ACTION:reminder ...] Tag in der Antwort.
             }
             
             prompt_lower = prompt.lower()

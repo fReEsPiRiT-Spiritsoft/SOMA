@@ -204,10 +204,12 @@ class VoicePipeline:
         await self.tts.initialize()
         logger.info("pipeline_starting", phase="tts_ready")
 
-        # 3. Pipeline-Loop starten
+        # 3. Pipeline-Loops starten
         self._running = True
         self._stats["uptime_start"] = time.time()
         self._pipeline_task = asyncio.create_task(self._audio_loop())
+        # Autonomer Proaktiv-Loop: Interventionen & Timer unabhängig von Sprache
+        self._proactive_task = asyncio.create_task(self._proactive_loop())
 
         logger.info(
             "pipeline_online",
@@ -228,13 +230,14 @@ class VoicePipeline:
             except asyncio.TimeoutError:
                 self._arecord_proc.kill()
 
-        # Pipeline-Task canceln
-        if self._pipeline_task:
-            self._pipeline_task.cancel()
-            try:
-                await self._pipeline_task
-            except asyncio.CancelledError:
-                pass
+        # Pipeline-Tasks canceln
+        for task in (self._pipeline_task, getattr(self, "_proactive_task", None)):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         # Sub-Engines herunterfahren
         await self.stt.shutdown()
@@ -346,15 +349,9 @@ class VoicePipeline:
                 {"emotion": emotion_reading.emotion.value, "stress": emotion_reading.stress_level}
             )
 
-            # ── 2. Proaktive Intervention prüfen ─────────────────────
-            current_hour = datetime.now().hour
-            intervention = self.ambient.check(current_hour=current_hour)
-
-            if intervention:
-                # Soma greift ein! (z.B. "Euer Streit ist unproduktiv...")
-                await self._emit("warn", f"⚡ Intervention: {intervention.type.value}", "AMBIENT")
-                await self._handle_intervention(intervention)
-                # Nach Intervention trotzdem STT machen (falls Soma angesprochen)
+            # ── 2. Emotion an AmbientIntelligence weitergeben ──────────
+            # (Intervention wird im proaktiven Loop ausgelöst, nicht hier)
+            # Dadurch kann Soma auch ohne Ansprache eigenständig reagieren.
 
             # ── 3. STT: Sprache → Text ───────────────────────────────
             transcription = self.stt.transcribe(
@@ -435,6 +432,10 @@ class VoicePipeline:
             await self._execute_pending_plugin()
             return
 
+        # HINWEIS: Erinnerungen werden NICHT mehr direkt hier behandelt.
+        # Das LLM erkennt den Intent und setzt einen [ACTION:reminder...] Tag.
+        # → _execute_action_tags() in _handle_soma_request() führt ihn aus.
+
         logger.info(
             "soma_addressed",
             prompt=prompt,
@@ -478,11 +479,16 @@ class VoicePipeline:
             })
 
             response = await self._logic_router.route(request)
-            
+
+            # ── ACTION-Tag Dispatch ──────────────────────────────────
+            # Parst [ACTION:...] Tags aus der LLM-Antwort, führt sie aus
+            # und gibt den bereinigten Text zurück (ohne Tags).
+            clean_response, action_log = await self._execute_action_tags(response.response)
+
             # Conversation History für Dashboard (Assistant-Antwort)
             self._conversation_history.append({
                 "role": "assistant",
-                "text": response.response,
+                "text": clean_response,
                 "engine": response.engine_used,
                 "timestamp": datetime.now().isoformat(),
             })
@@ -490,15 +496,16 @@ class VoicePipeline:
             # Dashboard: LLM Antwort
             await self._emit(
                 "llm", 
-                f"💬 Antwort ({response.engine_used}): \"{response.response[:100]}...\"" if len(response.response) > 100 else f"💬 Antwort ({response.engine_used}): \"{response.response}\"",
+                f"💬 Antwort ({response.engine_used}): \"{clean_response[:100]}...\"" if len(clean_response) > 100 else f"💬 Antwort ({response.engine_used}): \"{clean_response}\"",
                 response.engine_used.upper(),
-                {"response": response.response, "engine": response.engine_used, "latency_ms": response.latency_ms}
+                {"response": clean_response, "engine": response.engine_used, "latency_ms": response.latency_ms,
+                 "actions_executed": action_log}
             )
 
-            # Antwort aussprechen
-            await self._emit("tts", f"🔊 Spreche: \"{response.response[:50]}...\"" if len(response.response) > 50 else f"🔊 Spreche: \"{response.response}\"", "TTS")
+            # Antwort aussprechen (bereinigt, ohne Tags)
+            await self._emit("tts", f"🔊 Spreche: \"{clean_response[:50]}...\"" if len(clean_response) > 50 else f"🔊 Spreche: \"{clean_response}\"", "TTS")
             speech_emotion = self._select_speech_emotion(emotion_reading)
-            await self.tts.speak(response.response, speech_emotion)
+            await self.tts.speak(clean_response, speech_emotion)
 
         else:
             # Kein Logic Router → Fallback
@@ -507,6 +514,178 @@ class VoicePipeline:
                 "Ich höre dich, aber mein Denkvermögen ist noch nicht verbunden.",
                 SpeechEmotion.gentle(),
             )
+
+    # ══════════════════════════════════════════════════════════════════
+    #  PROAKTIVER AUTONOMER LOOP (unabhängig von Sprach-Erkennung)
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _proactive_loop(self):
+        """
+        Läuft im Hintergrund — UNABHÄNGIG vom Mikrofon.
+
+        Prüft alle 20 Sekunden:
+          • Ambient Intelligence: Stress, Streit, Traurigkeit, Zeit?
+          • (Erinnerungen laufen über ihren eigenen asyncio.Task)
+
+        Damit kann Soma eigenständig sprechen ohne "Soma" zu hören.
+        """
+        # Kurz warten bis alles hochgefahren ist
+        await asyncio.sleep(15)
+
+        while self._running:
+            try:
+                # Nicht unterbrechen wenn Soma gerade selbst spricht
+                if not self.tts.is_speaking:
+                    current_hour = datetime.now().hour
+                    intervention = self.ambient.check(current_hour=current_hour)
+
+                    if intervention:
+                        logger.info(
+                            "proactive_intervention",
+                            type=intervention.type.value,
+                            priority=intervention.priority,
+                        )
+                        await self._emit(
+                            "warn",
+                            f"⚡ Proaktiv: {intervention.type.value}",
+                            "AMBIENT",
+                        )
+                        await self._handle_intervention(intervention)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.error("proactive_loop_error", error=str(exc))
+
+            # Alle 20 Sekunden prüfen (Cooldowns in AmbientIntelligence verhindern Spam)
+            await asyncio.sleep(20)
+
+    async def autonomous_speak(self, text: str, emotion=None):
+        """
+        Soma spricht OHNE angesprochen zu werden.
+        Direkt aufrufbar von Plugins, Timern, Reminders etc.
+        """
+        if emotion is None:
+            emotion = SpeechEmotion.alert()
+        await self._emit("tts", f"🔔 Autonom: \"{text[:60]}\"", "PROACTIVE")
+        logger.info("autonomous_speak", text=text[:80])
+        await self.tts.speak(text, emotion, priority=True)
+
+    # ══════════════════════════════════════════════════════════════════
+    #  ACTION-TAG DISPATCH
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _execute_action_tags(
+        self, response_text: str
+    ) -> tuple[str, list[str]]:
+        """
+        Parst [ACTION:type key="value" ...] Tags aus der LLM-Antwort.
+
+        - Führt jede erkannte Aktion aus (Erinnerung, Merken, …)
+        - Entfernt die Tags aus dem gesprochenen Text
+        - Gibt (bereinigter_text, ausgeführte_aktionen) zurück
+        """
+        import re
+
+        ACTION_PATTERN = re.compile(r'\[ACTION:(\w+)([^\]]*)\]')
+        PARAM_PATTERN  = re.compile(r'(\w+)="([^"]*)"')
+
+        clean_text = response_text
+        executed: list[str] = []
+
+        for match in ACTION_PATTERN.finditer(response_text):
+            action_type  = match.group(1).lower()
+            params_raw   = match.group(2)
+            params       = dict(PARAM_PATTERN.findall(params_raw))
+
+            logger.info("action_tag_found", action=action_type, params=params)
+            await self._emit("action", f"⚡ ACTION:{action_type} {params}", "ACTION")
+
+            try:
+                if action_type == "reminder":
+                    result = await self._action_set_reminder(params)
+                    executed.append(f"reminder: {result}")
+
+                elif action_type == "remember":
+                    result = await self._action_remember(params)
+                    executed.append(f"remember: {result}")
+
+                else:
+                    logger.warning("action_tag_unknown", action=action_type)
+
+            except Exception as exc:
+                logger.error("action_tag_exec_error", action=action_type, error=str(exc))
+
+            # Tag aus dem Text entfernen
+            clean_text = clean_text.replace(match.group(0), "")
+
+        # Leerzeichen normalisieren
+        clean_text = re.sub(r' {2,}', ' ', clean_text).strip()
+        return clean_text, executed
+
+    async def _action_set_reminder(self, params: dict) -> str:
+        """Setzt eine Erinnerung via ACTION-Tag-Parameter."""
+        import re
+        topic   = params.get("topic", "Erinnerung")
+        seconds = params.get("seconds")
+        minutes = params.get("minutes")
+        hours   = params.get("hours")
+        time_at = params.get("time")  # "HH:MM"
+
+        # Fallback: Zeitangabe aus dem topic-Text extrahieren
+        # (falls LLM das Zeitfeld vergessen hat, z.B. topic="in 10 Sekunden springen")
+        if not seconds and not minutes and not hours and not time_at:
+            m = re.search(r'in\s+(\d+)\s*sek', topic, re.IGNORECASE)
+            if m: seconds = m.group(1)
+            else:
+                m = re.search(r'in\s+(\d+)\s*min', topic, re.IGNORECASE)
+                if m: minutes = m.group(1)
+                else:
+                    m = re.search(r'in\s+(\d+)\s*stund', topic, re.IGNORECASE)
+                    if m: hours = m.group(1)
+                    else:
+                        m = re.search(r'um\s+(\d{1,2}):(\d{2})', topic)
+                        if m: time_at = f"{m.group(1)}:{m.group(2)}"
+            if seconds or minutes or hours or time_at:
+                logger.info("action_reminder_time_from_topic", topic=topic,
+                            seconds=seconds, minutes=minutes)
+
+        if self._logic_router and self._logic_router.plugin_manager:
+            pm   = self._logic_router.plugin_manager
+            meta = pm._plugins.get("erinnerung")
+            if meta and meta.is_loaded and meta.module:
+                # Callback immer auf diese Pipeline-Instanz setzen
+                # → Reminder spricht garantiert über den richtigen TTS-Worker
+                meta.module.set_speak_callback(self.autonomous_speak)
+
+                result = await meta.module.set_reminder_from_action(
+                    topic   = topic,
+                    seconds = int(seconds) if seconds else None,
+                    minutes = int(minutes) if minutes else None,
+                    hours   = int(hours)   if hours   else None,
+                    time_at = time_at,
+                )
+                logger.info("action_reminder_set", params=params, result=result)
+                return result
+
+        return "Erinnerungs-Plugin nicht verfügbar."
+
+    async def _action_remember(self, params: dict) -> str:
+        """Speichert eine Info via ACTION-Tag direkt im Memory."""
+        category = params.get("category", "important")
+        content  = params.get("content", "")
+        if not content:
+            return "Kein Inhalt zum Merken angegeben."
+
+        from brain_core.memory import MemoryCategory
+        try:
+            cat = MemoryCategory(category)
+        except ValueError:
+            cat = MemoryCategory.IMPORTANT
+
+        self.memory.remember(content, cat, source="llm_action_tag")
+        logger.info("action_remember_saved", category=category, content_preview=content[:60])
+        return f"Gemerkt in '{category}': {content[:60]}"
 
     # ══════════════════════════════════════════════════════════════════
     #  PROAKTIVE INTERVENTION
@@ -568,14 +747,23 @@ class VoicePipeline:
         """
         Erkennt ob der Nutzer EXPLIZIT ein Plugin anfordert.
         
-        MUSS enthalten:
-        1. Ein Plugin-Wort (plugin, erweiterung, etc.)
-        2. Ein Erstellungs-Wort (schreib, erstell, etc.)
-        3. Diese müssen ZUSAMMEN in einem Kontext sein
-        
-        NICHT triggern bei normalen Gesprächen!
+        Erweiterte Erkennung für:
+        - Verschiedene Schreibweisen (Plugin, Pluggen, Plug-in)
+        - Whisper-Transkriptionsfehler
+        - Natürliche Formulierungen
         """
         p = prompt.lower()
+        
+        # Whisper transkribiert manchmal "Plugin" als "Pluggen", "Plug-in", etc.
+        plugin_words = ["plugin", "pluggen", "plug-in", "plug in", "plagin", "erweiterung", "modul", "fähigkeit"]
+        action_words = ["schreib", "erstell", "bau", "mach", "entwickl", "programmier", "code", "erzeug", "generier"]
+        
+        has_plugin = any(pw in p for pw in plugin_words)
+        has_action = any(aw in p for aw in action_words)
+        
+        # Wenn beides vorhanden → wahrscheinlich Plugin-Anfrage
+        if has_plugin and has_action:
+            return True
         
         # Explizite Phrasen die DEFINITIV Plugin-Anfragen sind
         explicit_triggers = [
@@ -588,16 +776,22 @@ class VoicePipeline:
             "programmier dir",
             "programmier ein plugin",
             "code dir ein plugin",
-            "plugin schreiben für",
-            "plugin erstellen für",
+            "plugin schreiben",
+            "plugin erstellen",
             "plugin für",
             "ein plugin das",
             "ein plugin welches",
             "schreib dir eine erweiterung",
             "erstell dir eine erweiterung",
+            "neue fähigkeit",
+            "lern dir",
             "write a plugin",
             "create a plugin",
             "build a plugin",
+            # Whisper-Varianten
+            "schreib dir ein pluggen",
+            "erstell dir ein pluggen",
+            "ein pluggen",
         ]
         
         # Wenn eine explizite Phrase vorkommt → JA
@@ -605,7 +799,6 @@ class VoicePipeline:
             if trigger in p:
                 return True
         
-        # Sonst: NEIN (lieber zu streng als zu locker!)
         return False
 
     @staticmethod
@@ -774,6 +967,81 @@ class VoicePipeline:
             "na klar", "mach mal", "probier", "los", "bitte",
         ]
         return any(a in p for a in affirmatives)
+
+    @staticmethod
+    def _is_reminder_request(text: str) -> bool:
+        """
+        Erkennt Erinnerungs-Anfragen.
+        
+        Beispiele:
+          - "Erinnere mich in 30 Sekunden an Springen"
+          - "Erinner mich in 5 Minuten ans Essen"
+          - "Weck mich um 18 Uhr"
+          - "Setze einen Timer für 10 Minuten"
+        """
+        txt = text.lower()
+        reminder_patterns = [
+            "erinner",           # erinnere, erinnerung
+            "timer",
+            "weck",              # weck mich
+            "alarm",
+            "in .* minute",      # in X Minuten
+            "in .* sekunde",     # in X Sekunden  
+            "in .* stunde",      # in X Stunden
+            "um .* uhr",         # um 18 Uhr
+        ]
+        import re
+        for pattern in reminder_patterns:
+            if re.search(pattern, txt):
+                return True
+        return False
+
+    async def _handle_reminder_request(self, prompt: str):
+        """
+        Behandelt Erinnerungs-Anfragen DIREKT ohne LLM.
+        Ruft das Erinnerungs-Plugin auf.
+        """
+        logger.info("reminder_request_detected", prompt=prompt)
+        await self._emit("voice", f"⏰ Erinnerungs-Anfrage: {prompt}", "REMINDER_REQUEST")
+
+        try:
+            from brain_core.main import plugin_manager, reminder_speak
+
+            # Prüfe ob Erinnerungs-Plugin geladen
+            if "erinnerung" not in plugin_manager.loaded_plugins:
+                logger.warning("erinnerung_plugin_not_loaded")
+                await self.tts.speak(
+                    "Das Erinnerungs-Plugin ist nicht geladen. Bitte starte mich neu.",
+                    SpeechEmotion.calm(),
+                )
+                return
+
+            # TTS-Callback setzen (falls noch nicht)
+            plugin = plugin_manager.loaded_plugins["erinnerung"]
+            if hasattr(plugin, "set_speak_callback"):
+                plugin.set_speak_callback(reminder_speak)
+                logger.info("tts_callback_set_for_erinnerung")
+
+            # Plugin ausführen mit dem Prompt
+            result = await plugin_manager.execute("erinnerung", "execute", prompt)
+            logger.info("erinnerung_plugin_result", result=result)
+
+            # Bestätigung aussprechen
+            result_str = str(result) if result else "Erinnerung gesetzt"
+            await self._emit(
+                "voice",
+                f"⏰ {result_str}",
+                "REMINDER_SET",
+                {"prompt": prompt, "result": result_str}
+            )
+            await self.tts.speak(result_str, SpeechEmotion.calm())
+
+        except Exception as exc:
+            logger.error("reminder_request_error", error=str(exc), exc_info=True)
+            await self.tts.speak(
+                f"Fehler beim Setzen der Erinnerung: {str(exc)[:50]}",
+                SpeechEmotion.calm(),
+            )
 
     async def _execute_pending_plugin(self):
         """Führt das gerade installierte Plugin aus und sagt das Ergebnis."""
