@@ -221,12 +221,13 @@ class LogicRouter:
             return "nano"
 
         # Load-basiertes Routing
+        # Nano ist NUR für Device-Commands, NICHT für Gespräche!
         if load_level in (SystemLoadLevel.IDLE, SystemLoadLevel.NORMAL):
             return "heavy"   # Volle Llama-Power
-        elif load_level == SystemLoadLevel.ELEVATED:
-            return "light"   # Phi-3 / Llama 3B
-        else:  # HIGH
-            return "nano"    # Python-Scripts only
+        elif load_level in (SystemLoadLevel.ELEVATED, SystemLoadLevel.HIGH):
+            return "light"   # Phi-3 – immer noch ein LLM, kein Fallback
+        else:  # CRITICAL only
+            return "light"   # Selbst bei CRITICAL: Light statt komplett Nano
 
     @staticmethod
     def _is_nano_intent(prompt: str) -> bool:

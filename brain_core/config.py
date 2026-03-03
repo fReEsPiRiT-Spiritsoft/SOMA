@@ -44,8 +44,8 @@ class SomaConfig(BaseSettings):
     ollama_max_loaded_models: int = 2
 
     # ── Health Thresholds ────────────────────────────────────────────────
-    health_ram_warn_percent: float = 75.0
-    health_ram_critical_percent: float = 85.0
+    health_ram_warn_percent: float = 85.0      # War 75%, zu niedrig mit Ollama
+    health_ram_critical_percent: float = 92.0   # War 85%
     health_vram_warn_percent: float = 75.0
     health_vram_critical_percent: float = 85.0
     health_cpu_warn_percent: float = 80.0

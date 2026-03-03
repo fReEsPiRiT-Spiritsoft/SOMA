@@ -176,14 +176,24 @@ class TTSEngine:
         item = (text, emotion or SpeechEmotion())
 
         if priority:
-            # Priority: neue Queue mit diesem Item vorne
-            # (asyncio.Queue hat kein put_front, daher Workaround)
-            self._speak_queue._queue.appendleft(item)
-            self._speak_queue._unfinished_tasks += 1
+            # Priority: Item vorne einfügen UND Worker aufwecken
+            # asyncio.Queue.put() weckt get()-Wartende auf, appendleft nicht!
+            # Lösung: Alle Items aus Queue holen, neues vorne, alle wieder rein
+            temp_items = []
+            while not self._speak_queue.empty():
+                try:
+                    temp_items.append(self._speak_queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            # Neues Item zuerst
+            await self._speak_queue.put(item)
+            # Dann die alten wieder
+            for old_item in temp_items:
+                await self._speak_queue.put(old_item)
         else:
             await self._speak_queue.put(item)
 
-        logger.debug("tts_queued", text=text[:50], priority=priority)
+        logger.debug("tts_queued", text=text[:50], priority=priority, queue_size=self._speak_queue.qsize())
 
     async def _speak_worker(self):
         """Background-Worker: Spricht Sätze aus der Queue nacheinander."""

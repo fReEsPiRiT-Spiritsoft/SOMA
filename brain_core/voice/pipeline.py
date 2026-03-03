@@ -408,6 +408,9 @@ class VoicePipeline:
         Text an Llama 3 senden, Antwort aussprechen.
         """
         self._stats["soma_triggers"] += 1
+        # Merken wann der User zuletzt Soma angesprochen hat
+        # → _handle_intervention prüft das und verwirft veraltete Ambient-Antworten
+        self._user_last_spoken = time.time()
 
         # "Soma" aus dem Text entfernen für den Prompt
         prompt = self._extract_prompt(transcription.text)
@@ -705,26 +708,58 @@ class VoicePipeline:
         )
 
         if self._logic_router:
-            from brain_core.logic_router import SomaRequest
+            # ── Light-Engine direkt verwenden (phi3:mini, ~1-2s) ────────
+            # Ambient-Interventionen brauchen nur 1-2 kurze Sätze.
+            # Heavy-LLM (llama3, ~10-15s) erzeugt Race-Conditions:
+            # User spricht während der LLM generiert → Banter klingt wie Antwort.
+            light_engine = self._logic_router._engines.get("light")
+            heavy_engine = self._logic_router._engines.get("heavy")
+            engine = light_engine or heavy_engine
 
-            request = SomaRequest(
-                prompt=intervention.prompt,
-                metadata={
-                    "source": "ambient_intervention",
-                    "intervention_type": intervention.type.value,
-                    "emotion_context": intervention.emotion_context,
-                },
+            if not engine:
+                logger.warning("ambient_no_engine_available")
+                return
+
+            system_prompt = (
+                "Du bist Soma, ein smartes Ambient-KI-System. "
+                "Antworte SEHR kurz: maximal 2 Sätze, auf Deutsch. "
+                "Kein Aktions-Tag, kein [ACTION:...]. Nur normaler Text."
             )
 
-            response = await self._logic_router.route(request)
+            try:
+                response_text = await engine.generate(
+                    prompt=intervention.prompt,
+                    system_prompt=system_prompt,
+                    session_id="ambient_intervention",
+                )
+            except Exception as exc:
+                logger.error("ambient_llm_error", error=str(exc))
+                return
 
-            # Mit passendem Tonfall aussprechen
+            if not response_text or not response_text.strip():
+                logger.warning("ambient_empty_response")
+                return
+
+            # ── Race-Condition-Guard ─────────────────────────────────────
+            # Hat der User Soma in den letzten 8 Sekunden direkt angesprochen?
+            # → Ambient-Antwort verwerfen, sie würde wie eine direkte Antwort klingen.
+            last_spoken = getattr(self, "_user_last_spoken", None)
+            if last_spoken is not None:
+                user_spoken_recently = (time.time() - last_spoken) < 8.0
+                if user_spoken_recently:
+                    logger.info(
+                        "ambient_discarded_race_condition",
+                        type=intervention.type.value,
+                        response_preview=response_text[:60],
+                    )
+                    return
+
+            logger.info("ambient_speaking", text=response_text[:80])
+            await self._emit(
+                "tts", f"🔔 Ambient: \"{response_text[:60]}\"", "AMBIENT"
+            )
             emotion = SpeechEmotion.calm() if intervention.use_calm_voice else SpeechEmotion()
-            await self.tts.speak(
-                response.response,
-                emotion,
-                priority=True,  # Intervention hat Vorrang in der TTS-Queue
-            )
+            await self.tts.speak(response_text, emotion, priority=True)
         else:
             # Hardcoded Fallbacks wenn kein LLM verfügbar
             fallbacks = {
