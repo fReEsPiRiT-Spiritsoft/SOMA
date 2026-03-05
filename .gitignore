@@ -9,4 +9,4 @@ node_modules/
 .github/copilot-instructions.md
 .gitignore
 
-# Ignoriere Build-Ordner
+# Ignoriere Build-Ordner.models/
