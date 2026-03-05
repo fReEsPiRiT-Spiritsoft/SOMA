@@ -18,13 +18,14 @@ from typing import Optional
 
 import httpx
 import structlog
+from typer import prompt
 
 from brain_core.engines.base_engine import BaseEngine
 from brain_core.config import settings
 from shared.resilience import SomaCircuitBreaker, SomaRetryLogic
 
 logger = structlog.get_logger("soma.engine.heavy")
-
+response = ollama.generate(model="llama3:8b", prompt=prompt, keep_alive=10)
 
 class HeavyLlamaEngine(BaseEngine):
     """

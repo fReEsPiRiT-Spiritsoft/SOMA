@@ -1,0 +1,18 @@
+Plugin generator. KI soll erst ein paar mal nachfragen, unnd eigene ideen mit ein bringen um dann den nutzer am ende nochmal zu fragen ob sie das plugin mit den besprochenen features nun wirklich erstellenn soll.
+
+Benutzer Mood soll besser aufgegriffen werden.
+
+Wenn KI eigenständig etwas sagt, soll das im Kontext für sie enthalten sein.
+
+
+Smarthome und plugin generator sollen nicht durch STT befehle ausgelöst werden sondern durch die antwort des LMMś
+
+
+Wenn das Dashboard sich connectet hat, soll im Matrix style der schriftzug SOMA über den Bildschirm laufen
+
+SOMA (Zuhören, denken, handeln) besser visualisieren
+
+LLM MUSS sich immer Gewahr sein, das sie ein HOME Assistant KI system ist und soll seinen Benutzer kennen und Erkennen. so das wenn jemand anderes mit ihr spricht, keine vertraulichen Informationen raus gegeben werden.
+
+
+Ich möchte meine KI mit meiner Festnetznummer erreichen können!

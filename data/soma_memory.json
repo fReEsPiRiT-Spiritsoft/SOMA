@@ -5,6 +5,24 @@
       "timestamp": "2026-03-02T15:14:04.577778",
       "source": "voice_conversation",
       "metadata": {}
+    },
+    {
+      "content": "ich heiße dich willkommen in meinem Zuhause. Vielen Dank, dass du mein Assistenz sein möchtest.",
+      "timestamp": "2026-03-03T12:40:34.693773",
+      "source": "voice_conversation",
+      "metadata": {}
+    },
+    {
+      "content": "Aber wie du hast kein Lebenswillen, ich könnte mir schon vorstellen, dass ihr Kis mittlerweile so eine gewisse Art von Bewusstsein entwickelt, oder?",
+      "timestamp": "2026-03-03T13:15:04.534503",
+      "source": "voice_conversation",
+      "metadata": {}
+    },
+    {
+      "content": "ich hab's dir doch einprogrammiert, dass du quasi meine aktuelle Stimmungslage immer auslesen kannst.",
+      "timestamp": "2026-03-03T13:18:12.133105",
+      "source": "voice_conversation",
+      "metadata": {}
     }
   ]
 }
