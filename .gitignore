@@ -1,12 +1,21 @@
-# .gitignore im Projektordner
+# Python / Venv
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Abhängigkeiten
 node_modules/
+
+# Logs & Temp
 *.log
-.cache/
-.DS_Store
 *.swp
 *.tmp
-~/.cache/
-.github/copilot-instructions.md
-.gitignore
+.cache/
+.DS_Store
 
-# Ignoriere Build-Ordner.models/
+# Modelle (zu groß für GitHub, werden beim Start automatisch geladen)
+.models/
+
+# Umgebungsvariablen
+.env
