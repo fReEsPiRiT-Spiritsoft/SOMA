@@ -47,6 +47,50 @@
       "timestamp": "2026-03-11T11:25:37.394356",
       "source": "voice_conversation",
       "metadata": {}
+    },
+    {
+      "content": "ich wollte dir nur mal eben schnell sagen. Mein Name ist Patrick Schmidt und ich bin dein Entwickler. Ich baue dieses System um dich herum, damit du dieses intelligente Allround Ambient System wirst und quasi ein Zuhause lebendig machen kannst.",
+      "timestamp": "2026-03-11T13:33:51.079707",
+      "source": "voice_conversation",
+      "metadata": {}
+    },
+    {
+      "content": "Wenn du jetzt in kurzen Worten einfach mal erklären wolltest wer ich bin und wer du bist. Wie würde das klingen? Leg mal los",
+      "timestamp": "2026-03-11T13:43:20.142286",
+      "source": "voice_conversation",
+      "metadata": {}
+    },
+    {
+      "content": "kannst du mir bitte eine kleine Geschichte über einen Softwareentwickler erzählen?",
+      "timestamp": "2026-03-11T14:23:29.121652",
+      "source": "voice_conversation",
+      "metadata": {}
+    },
+    {
+      "content": "Boah, das klingt richtig, richtig, richtig interessant. Ich bin gerade wirklich am überlegen, wie überaus mächtig du werden könntest, wenn man das so durchzieht, oder,",
+      "timestamp": "2026-03-11T14:38:17.231377",
+      "source": "voice_conversation",
+      "metadata": {}
+    },
+    {
+      "content": "Hm, ok, so mal. Ja, das reicht mir erst mal, ich bin jetzt gerade noch dabei, dein Gesicht, deine Visualisierung noch ein bisschen aufzupeppen.",
+      "timestamp": "2026-03-11T14:40:37.300714",
+      "source": "voice_conversation",
+      "metadata": {}
+    },
+    {
+      "content": "ich bin echt begeistert von dem was ich hier geschaffen habe also du bist ja wirklich ein ganz schön intelligentes und ausgeklügeltes system hast noch ein paar bugs aber den werden wir schon noch her oder",
+      "timestamp": "2026-03-11T15:02:25.018886",
+      "source": "voice_conversation",
+      "metadata": {}
+    }
+  ],
+  "important": [
+    {
+      "content": "bitte endlich, dass du auf Deutsch mit mir reden sollst.",
+      "timestamp": "2026-03-11T13:57:29.195884",
+      "source": "voice_conversation",
+      "metadata": {}
     }
   ]
 }

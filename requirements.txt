@@ -55,5 +55,10 @@ ufw==0.36.2
 urllib3==2.6.3
 websockets>=12.0
 wheel==0.46.3
+
+# ── SOMA Memory System (Vector Embeddings) ───────────────────────
+numpy>=1.24.0
+aiohttp>=3.9.0
+
 yt-dlp==2026.2.4
 yt-dlp-ejs==0.4.0

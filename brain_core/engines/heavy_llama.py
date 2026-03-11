@@ -125,8 +125,13 @@ class HeavyLlamaEngine(BaseEngine):
         prompt: str,
         system_prompt: Optional[str] = None,
         session_id: Optional[str] = None,
+        options_override: Optional[dict] = None,
     ) -> str:
-        """Generiere Antwort via Ollama Chat API."""
+        """Generiere Antwort via Ollama Chat API.
+
+        Args:
+            options_override: Überschreibt Ollama-Options (z.B. temperature=0.1 für Code).
+        """
         if not self._client:
             raise RuntimeError("HeavyEngine nicht initialisiert")
 
@@ -147,6 +152,15 @@ class HeavyLlamaEngine(BaseEngine):
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
 
+        # Basis-Options + optionaler Override (z.B. temperature=0.1 für Code-Generierung)
+        ollama_options = {
+            "num_ctx": 8192,
+            "temperature": 0.7,
+            "top_p": 0.9,
+        }
+        if options_override:
+            ollama_options.update(options_override)
+
         # Ollama API Call
         async def _call() -> str:
             resp = await self._client.post(
@@ -155,11 +169,7 @@ class HeavyLlamaEngine(BaseEngine):
                     "model": self._model,
                     "messages": messages,
                     "stream": False,
-                    "options": {
-                        "num_ctx": 4096,
-                        "temperature": 0.7,
-                        "top_p": 0.9,
-                    },
+                    "options": ollama_options,
                 },
             )
             resp.raise_for_status()

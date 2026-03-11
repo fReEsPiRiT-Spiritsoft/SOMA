@@ -136,14 +136,18 @@ print(f\"🎤 {d.get('status','?')} | Transkriptionen: {d.get('transcriptions',0
         warn "Kein Audio-Device gefunden"
     fi
 
-    # Memory System
-    echo -e "\n  ${B}Memory System:${NC}"
-    MEMORY_FILE="$SCRIPT_DIR/brain_core/data/soma_memory.json"
-    if [ -f "$MEMORY_FILE" ]; then
-        ENTRIES=$(python3 -c "import json; d=json.load(open('$MEMORY_FILE')); print(sum(len(v) for v in d.values()))" 2>/dev/null || echo "0")
-        ok "Aktiv – $ENTRIES Erinnerungen gespeichert"
+    # Memory System (3-Layer: Working / Episodic / Semantic)
+    echo -e "\n  ${B}Memory System (3-Layer):${NC}"
+    if curl -sf http://localhost:8100/api/v1/memory/stats >/dev/null 2>&1; then
+        MEM=$(curl -sf http://localhost:8100/api/v1/memory/stats | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+print(f\"L1: {d.get('working_memory_turns',0)} Turns | L2: {d.get('episodic_episodes',0)} Episoden | L3: {d.get('semantic_facts',0)} Fakten\")" 2>/dev/null || echo "aktiv")
+        ok "Online – $MEM"
+    elif [ -f "$SCRIPT_DIR/data/soma_memory.db" ]; then
+        ok "SQLite-DB vorhanden (Brain Core offline)"
     else
-        warn "Noch keine Erinnerungen"
+        warn "Noch keine Erinnerungen (startet mit Brain Core)"
     fi
 
     # Evolution Lab

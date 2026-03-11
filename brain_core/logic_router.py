@@ -358,9 +358,15 @@ class LogicRouter:
             base += f"\n\nAKTUELLE RAUMSTIMMUNG: {emotion_ctx}"
 
         # ── Memory-Integration ────────────────────────────────────────────
+        # Alte JSON-Memory als Fallback
         memory_context = self.memory.get_summary_for_prompt()
         if memory_context:
             base += f"\n\n{memory_context}"
+
+        # 3-Layer Hierarchical Memory (Embeddings + Episodic + Semantic)
+        hierarchical_memory = request.metadata.get("memory_context", "")
+        if hierarchical_memory:
+            base += f"\n\n{hierarchical_memory}"
 
         # ── Plugin-Integration ────────────────────────────────────────────
         plugin_info = self._get_available_plugins_info()

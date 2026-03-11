@@ -1,67 +1,72 @@
 /**
- * SOMA-AI Socket Client v2
+ * SOMA-AI Socket Client v3
  * ==========================
  * Real-time WebSocket-Verbindung zum brain_core.
  * Steuert das Visual Face basierend auf:
  *   - Thought-Events (STT, LLM, TTS, Emotion)
  *   - System-Metriken (CPU/RAM/VRAM/Load)
  *   - Audio-Level
+ *
+ * State Machine:
+ *   idle -> listening -> thinking -> [bridge=thinking] -> speaking -> grace(8s) -> idle
+ *   activeTurn=true blockiert STT-Noise waehrend thinking/speaking/grace
  */
 
 (function () {
     'use strict';
 
-    const BRAIN_WS_URL = `ws://${location.hostname}:8100/ws/thinking`;
-    const BRAIN_API    = `http://${location.hostname}:8100/api/v1`;
-    const statusBar    = document.getElementById('status-bar');
-    const somaText     = document.getElementById('soma-text');
+    var BRAIN_WS_URL = 'ws://' + location.hostname + ':8100/ws/thinking';
+    var BRAIN_API    = 'http://' + location.hostname + ':8100/api/v1';
+    var statusBar    = document.getElementById('status-bar');
+    var somaText     = document.getElementById('soma-text');
 
-    let ws = null;
-    let reconnectTimer = null;
-    let heartbeatTimer = null;
+    var ws = null;
+    var reconnectTimer = null;
+    var heartbeatTimer = null;
+    var activityTimeout = null;
 
-    // Timeout um nach dem letzten Speaking/Thinking Event zurück zu idle zu fallen
-    let activityTimeout = null;
+    // -- Turn State --
+    var ttsActive      = false;
+    var pendingLLMText = false;
+    var textHideTimer  = null;
+    var textShownAt    = 0;
+    var ttsEndedAt     = 0;
+    var activeTurn     = false;
+    var TEXT_GRACE_MS  = 1500;
 
-    // TTS-Text: aktiv solange Soma spricht
-    let ttsActive   = false;
-    let textHideTimer = null;
-
-    function resetActivityTimeout(ms = 3000) {
+    function resetActivityTimeout(ms) {
+        if (ms === undefined) ms = 3000;
         if (activityTimeout) clearTimeout(activityTimeout);
-        activityTimeout = setTimeout(() => {
+        activityTimeout = setTimeout(function() {
+            activeTurn  = false;
+            ttsActive   = false;
+            ttsEndedAt  = 0;
+            hideText();
             if (window.SomaFace) window.SomaFace.setMode('idle');
         }, ms);
     }
 
-    // ── Connection Management ───────────────────────────────────────────
+    // == Connection Management ==
 
     function connect() {
         if (ws && ws.readyState === WebSocket.OPEN) return;
-
         ws = new WebSocket(BRAIN_WS_URL);
 
-        ws.onopen = () => {
-            console.log('[SOMA Socket] Connected to brain_core');
+        ws.onopen = function() {
+            console.log('[SOMA Socket] Connected');
             setStatus('connected');
-
-            // Heartbeat
-            heartbeatTimer = setInterval(() => {
+            heartbeatTimer = setInterval(function() {
                 if (ws.readyState === WebSocket.OPEN) ws.send('ping');
             }, 30000);
-
-            // Initialdaten holen
             fetchVoiceStatus();
         };
 
-        ws.onmessage = (event) => {
+        ws.onmessage = function(event) {
             try {
-                const data = JSON.parse(event.data);
-
+                var data = JSON.parse(event.data);
                 if (data.type === 'thought') {
                     handleThought(data);
                 } else {
-                    // Metriken (health)
                     handleMetrics(data);
                 }
             } catch (e) {
@@ -69,14 +74,14 @@
             }
         };
 
-        ws.onclose = () => {
+        ws.onclose = function() {
             console.log('[SOMA Socket] Disconnected');
             setStatus('disconnected');
             cleanup();
             scheduleReconnect();
         };
 
-        ws.onerror = () => { ws.close(); };
+        ws.onerror = function() { ws.close(); };
     }
 
     function cleanup() {
@@ -86,133 +91,176 @@
 
     function scheduleReconnect() {
         if (reconnectTimer) return;
-        reconnectTimer = setTimeout(() => {
+        reconnectTimer = setTimeout(function() {
             reconnectTimer = null;
             connect();
         }, 3000);
     }
 
-    // ── Thought Event Handler ───────────────────────────────────────────
-    //  data: { type: "thought", thought_type: "stt"|"llm"|"tts"|...,
-    //          content: "...", tag: "...", extra: {...} }
+    // == Thought Event Handler ==
 
     function handleThought(data) {
-        const t = data.thought_type || '';
-        const tag = (data.tag || '').toUpperCase();
-        const extra = data.extra || {};
+        var t = data.thought_type || '';
+        var tag = (data.tag || '').toUpperCase();
+        var extra = data.extra || {};
 
         if (!window.SomaFace) return;
 
-        // ── STT (Sprache erkannt → listening) ───────────────────
+        // -- STT: User spricht (oder Noise) --
         if (t === 'stt' || tag === 'STT') {
+            // Waehrend SOMA denkt/spricht kommen staendig STT-Events
+            // (Ambient-Noise, Echo). Diese MUESSEN ignoriert werden.
+            if (activeTurn) return;
+
             window.SomaFace.setMode('listening');
-            hideText();                 // Alte Antwort wegblenden sobald User spricht
-            ttsActive = false;
+            hideText();
+            ttsActive      = false;
+            pendingLLMText = false;
+            ttsEndedAt     = 0;
             resetActivityTimeout(4000);
         }
 
-        // ── LLM (Soma denkt → thinking) ─────────────────────────
+        // -- LLM: Soma denkt --
         if (t === 'llm' || tag === 'LLM' || tag === 'THINKING') {
+            activeTurn = true;
             window.SomaFace.setMode('thinking');
-            resetActivityTimeout(8000);  // Denken kann lange dauern
-        }
-
-        // ── TTS (Soma spricht → speaking) ───────────────────────
-        if (t === 'tts' || tag === 'TTS' || tag === 'SPEAKING') {
-            window.SomaFace.setMode('speaking');
-            // Vollständiger Text aus extra.response (kein Truncating)
-            const fullText = extra.response || data.content;
-            if (fullText) {
-                showText(fullText, 0);  // 0 = kein Auto-hide, bleibt bis TTS fertig
+            resetActivityTimeout(60000);
+            // Wenn die echte Antwort mitkommt, sofort Text anzeigen
+            if (extra.response) {
+                pendingLLMText = false;
+                showText(extra.response, 0);
                 ttsActive = true;
             }
-            // Kein fester resetActivityTimeout — Polling erkennt TTS-Ende
         }
 
-        // ── Emotion-Updates ─────────────────────────────────────
+        // -- TTS: Soma spricht --
+        // BRIDGE = Denkpause ("Moment...") -> Mode bleibt THINKING
+        // Alles andere = echte Antwort -> Mode wird SPEAKING
+        if (t === 'tts' || tag === 'TTS' || tag === 'SPEAKING' || tag === 'BRIDGE') {
+            activeTurn = true;
+
+            if (tag === 'BRIDGE') {
+                // Bridge ist eine Denkpause. NUR thinking, NIEMALS speaking!
+                window.SomaFace.setMode('thinking');
+                ttsActive      = true;
+                pendingLLMText = true;
+                textShownAt    = Date.now();
+            } else {
+                // Echte Antwort wird gesprochen -> speaking
+                window.SomaFace.setMode('speaking');
+                pendingLLMText = false;
+                var fullText = extra.response;
+                if (fullText) {
+                    showText(fullText, 0);
+                    ttsActive = true;
+                }
+            }
+        }
+
+        // -- Emotion --
         if (t === 'emotion' || tag === 'EMOTION') {
-            // Stress-Level als Energie-Boost
             if (extra.stress !== undefined) {
                 window.SomaFace.setEnergy(extra.stress);
             }
         }
 
-        // ── Evolution Lab ───────────────────────────────────────
+        // -- Evolution Lab --
         if (tag === 'EVOLUTION' || tag === 'EVOLUTION_OK') {
             window.SomaFace.setMode('thinking');
-            resetActivityTimeout(5000);
+            activeTurn = true;
+            resetActivityTimeout(15000);
         }
 
-        // ── Audio-Level (wenn mitgeliefert) ─────────────────────
+        // -- Audio Level --
         if (extra.audio_level !== undefined) {
             window.SomaFace.pushAudioLevel(extra.audio_level);
         }
     }
 
-    // ── Metrics Handler ─────────────────────────────────────────────────
+    // == Metrics Handler ==
 
     function handleMetrics(metrics) {
-        const loadLevel = metrics.load_level || 'idle';
+        var loadLevel = metrics.load_level || 'idle';
 
-        // Nur als Fallback wenn gerade kein aktives Speaking/Thinking
         if (loadLevel === 'critical' && window.SomaFace) {
             window.SomaFace.setMode('critical');
         }
 
-        // Status bar update
-        const cpu  = metrics.cpu_percent?.toFixed(0)      || '—';
-        const ram  = metrics.ram_percent?.toFixed(0)      || '—';
-        const vram = metrics.gpu?.vram_percent?.toFixed(0) || '—';
+        var cpu  = metrics.cpu_percent  ? metrics.cpu_percent.toFixed(0)       : '--';
+        var ram  = metrics.ram_percent  ? metrics.ram_percent.toFixed(0)       : '--';
+        var vram = (metrics.gpu && metrics.gpu.vram_percent) ? metrics.gpu.vram_percent.toFixed(0) : '--';
 
-        statusBar.textContent = `SOMA · ${loadLevel.toUpperCase()} · CPU ${cpu}% · RAM ${ram}% · VRAM ${vram}%`;
+        statusBar.textContent = 'SOMA | ' + loadLevel.toUpperCase() + ' | CPU ' + cpu + '% | RAM ' + ram + '% | VRAM ' + vram + '%';
     }
 
-    // ── Voice Status Polling (Fallback) ─────────────────────────────────
+    // == Voice Status Polling (Fallback, alle 2s) ==
 
     async function fetchVoiceStatus() {
         try {
-            const res = await fetch(`${BRAIN_API}/voice`);
-            const v = await res.json();
+            var res = await fetch(BRAIN_API + '/voice');
+            var v = await res.json();
             if (!v || v.status === 'offline') return;
 
-            const s = v.stats || {};
+            var s = v.stats || {};
+
             if (s.tts_speaking) {
-                // Soma spricht gerade — sicherstellen dass Mode stimmt
-                if (window.SomaFace) window.SomaFace.setMode('speaking');
-            } else if (ttsActive) {
-                // TTS war aktiv, ist jetzt fertig → Text ausblenden + zurück zu idle
-                hideText();
-                if (window.SomaFace) {
-                    window.SomaFace.setMode('idle');
-                    resetActivityTimeout(0);  // Sofort idle (kein extra Delay)
+                // TTS laeuft: Bridge = thinking, echte Antwort = speaking
+                if (pendingLLMText) {
+                    if (window.SomaFace) window.SomaFace.setMode('thinking');
+                } else {
+                    if (window.SomaFace) window.SomaFace.setMode('speaking');
                 }
+                ttsEndedAt  = 0;
+                ttsActive   = true;
+                activeTurn  = true;
+
+            } else if (ttsActive) {
+                // TTS hat aufgehoert
+
+                if (pendingLLMText) {
+                    // Bridge fertig, LLM denkt noch -> thinking
+                    if (window.SomaFace) window.SomaFace.setMode('thinking');
+                    return;
+                }
+
+                // Endzeit einmalig festhalten
+                if (ttsEndedAt === 0) ttsEndedAt = Date.now();
+
+                // Text bleibt TEXT_GRACE_MS sichtbar nach TTS-Ende
+                if (Date.now() - ttsEndedAt < TEXT_GRACE_MS) return;
+
+                // Grace abgelaufen -> komplett zuruecksetzen
+                hideText();
+                ttsEndedAt  = 0;
+                ttsActive   = false;
+                activeTurn  = false;
+                if (window.SomaFace) window.SomaFace.setMode('idle');
             }
         } catch (e) { /* silent */ }
     }
 
-    // Poll voice status alle 2s als Backup
     setInterval(fetchVoiceStatus, 2000);
 
-    // ── Status Display ──────────────────────────────────────────────────
+    // == Status Display ==
 
     function setStatus(status) {
-        const messages = {
-            'connected':    'SOMA · Online',
-            'disconnected': 'SOMA · Reconnecting...',
+        var messages = {
+            'connected':    'SOMA | Online',
+            'disconnected': 'SOMA | Reconnecting...',
         };
         statusBar.textContent = messages[status] || 'SOMA';
     }
 
-    // ── Text Overlay ────────────────────────────────────────────────────
+    // == Text Overlay ==
 
-    // duration = 0  →  bleibt sichtbar bis hideText() gerufen wird
-    // duration > 0  →  auto-fade nach X ms
-    function showText(text, duration = 0) {
+    function showText(text, duration) {
         if (textHideTimer) { clearTimeout(textHideTimer); textHideTimer = null; }
+        if (!text) return;
         somaText.textContent = text;
         somaText.classList.add('visible');
-        somaText.scrollTop = 0;   // Anfang des Textes zeigen
-        if (duration > 0) {
+        somaText.scrollTop = 0;
+        textShownAt = Date.now();
+        if (duration && duration > 0) {
             textHideTimer = setTimeout(hideText, duration);
         }
     }
@@ -220,27 +268,27 @@
     function hideText() {
         if (textHideTimer) { clearTimeout(textHideTimer); textHideTimer = null; }
         somaText.classList.remove('visible');
-        ttsActive = false;
+        ttsActive   = false;
+        textShownAt = 0;
     }
 
-    // ── Public API ──────────────────────────────────────────────────────
+    // == Public API ==
 
     window.SomaSocket = {
-        showText,
+        showText: showText,
 
-        sendCommand(command) {
+        sendCommand: function(command) {
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify(command));
             }
         },
 
-        getReadyState() {
+        getReadyState: function() {
             return ws ? ws.readyState : WebSocket.CLOSED;
         },
     };
 
-    // ── Auto-Connect ────────────────────────────────────────────────────
+    // == Auto-Connect ==
     connect();
-
-    console.log('[SOMA Socket] Client v2 initialized.');
+    console.log('[SOMA Socket] Client v3 initialized.');
 })();

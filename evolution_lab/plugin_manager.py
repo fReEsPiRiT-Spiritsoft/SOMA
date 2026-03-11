@@ -341,6 +341,9 @@ class PluginGenerator:
         if not self._heavy_engine:
             return False, "Kein LLM verfügbar (heavy_engine fehlt)", ""
 
+        # Alte Session clearen → kein Altlast aus vorherigen Versuchen
+        self._heavy_engine.drop_session(f"evolution_{name}")
+
         # ── LLM generiert den Code (mit Retry-Loop) ──────────────────────
         system_prompt = self._prompt_template
         user_prompt = (
@@ -378,6 +381,7 @@ class PluginGenerator:
                     prompt=prompt,
                     system_prompt=system_prompt,
                     session_id=f"evolution_{name}",
+                    options_override={"temperature": 0.1, "top_p": 0.95},
                 )
             except Exception as exc:
                 msg = f"LLM-Fehler: {exc}"
@@ -417,6 +421,7 @@ class PluginGenerator:
             if success:
                 self.last_generation["status"] = "installed"
                 await _emit(f"🚀 Plugin '{name}' installiert und geladen!", "EVOLUTION_OK")
+                self._heavy_engine.drop_session(f"evolution_{name}")
                 return True, message, code
             else:
                 last_error = message
@@ -427,6 +432,7 @@ class PluginGenerator:
                     self.last_generation["status"] = "failed"
                     self.last_generation["error"] = message
                     await _emit(f"❌ Plugin fehlgeschlagen nach {MAX_GENERATION_RETRIES} Retries: {message}")
+                    self._heavy_engine.drop_session(f"evolution_{name}")
                     return False, message, code
 
         # Sollte nicht erreicht werden, aber sicherheitshalber
@@ -500,15 +506,23 @@ class PluginGenerator:
     @staticmethod
     def _extract_code(raw: str) -> str:
         """Extrahiert reinen Python-Code aus LLM-Antwort (entfernt Markdown etc.)."""
+        # Primär: Markdown-Code-Block (```python ... ``` oder ``` ... ```)
         match = re.search(r"```(?:python)?\n?(.*?)```", raw, re.DOTALL)
         if match:
             return match.group(1).strip()
-        # Kein Markdown-Block → Direkt zurückgeben, HTML/Text-Prefix entfernen
+
+        # Fallback: Kein Markdown-Block → Text-Präfix abschneiden, Code sammeln
+        # Erkennt alle üblichen Python-Zeilenanfänge
+        CODE_STARTS = (
+            "import ", "from ", "async def ", "def ", "class ",
+            "#", '"""', "'''", "__", "@",
+        )
         lines = raw.strip().splitlines()
-        code_lines = []
+        code_lines: list[str] = []
         in_code = False
         for line in lines:
-            if line.strip().startswith(("import ", "from ", "async def ", "def ", "#", '"""', "__")):
+            stripped = line.strip()
+            if not in_code and stripped.startswith(CODE_STARTS):
                 in_code = True
             if in_code:
                 code_lines.append(line)

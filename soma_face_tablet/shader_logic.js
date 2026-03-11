@@ -31,6 +31,8 @@
         vizMode: 'wave',      // 'wave' | 'orb'
         speaking: false,
         audioLevel: 0.0,      // raw audio 0-1
+        modeId:       0.0,    // interpolierter Modus-Index für Orb-Shader
+        targetModeId: 0.0,    // Ziel  (0=idle 1=listen 2=speak 3=think 4=crit)
     };
 
     // ══════════════════════════════════════════════════════════════════
@@ -199,6 +201,7 @@
         uniform float u_energy;
         uniform vec3  u_color;
         uniform vec2  u_res;
+        uniform float u_mode;   // 0=idle  1=listen  2=speak  3=think  4=crit
 
         varying vec2 vUv;
 
@@ -245,102 +248,115 @@
             vec2 uv = (vUv - 0.5) * 2.0;
             uv.x *= aspect;
 
-            float t = u_time;
+            float t   = u_time;
             float amp = u_amp;
             float nrg = u_energy;
 
-            float dist = length(uv);
+            // ── Mode weights (interpoliert ueber u_mode 0-4) ─────
+            float mSpeak = smoothstep(1.5, 2.0, u_mode) - smoothstep(2.5, 3.0, u_mode);
+            float mThink = smoothstep(2.5, 3.0, u_mode) - smoothstep(3.5, 4.0, u_mode);
 
-            // ── Kern-Radius mit organischer Verzerrung ──────────
-            float baseR = 0.22 + amp * 0.08;
+            float dist  = length(uv);
             float angle = atan(uv.y, uv.x);
 
-            // Verzerrung: die Oberflaeche "atmet"
+            // ── Kern-Radius mit organischer Verzerrung ──────────
+            float baseR = 0.22 + amp * 0.07 + mSpeak * 0.02;
+            float ds = 0.7 + mSpeak * 1.6 + mThink * 1.0;
             float distort = 0.0;
-            distort += sin(angle * 3.0 + t * 0.7) * 0.03 * amp;
-            distort += sin(angle * 5.0 - t * 1.1) * 0.02 * amp;
-            distort += snoise(vec2(angle * 2.0, t * 0.5)) * 0.04 * amp;
-            // Audio-Reaktion auf der Oberflaeche
-            distort += snoise(vec2(angle * 8.0, t * 3.0)) * 0.03 * nrg;
+            distort += sin(angle * 3.0 + t * ds)       * 0.030 * amp;
+            distort += sin(angle * 5.0 - t * (ds+0.4)) * 0.020 * amp;
+            distort += snoise(vec2(angle * 2.0, t * (0.5 + mThink * 1.5))) * 0.040 * amp;
+            distort += snoise(vec2(angle * 8.0, t * (3.0 + mSpeak * 4.0))) * 0.030 * nrg;
 
             float r = baseR + distort;
 
-            // ── Kern (solider Bereich) ──────────────────────────
+            // ── Kern ─────────────────────────────────────────────
             float inner = smoothstep(r + 0.01, r - 0.03, dist);
 
-            // Kern-Textur: wirbelndes Plasma
-            float plasma = fbm(uv * 3.0 + t * 0.3) * 0.5 + 0.5;
-            float plasma2 = fbm(uv * 5.0 - t * 0.4 + 50.0) * 0.5 + 0.5;
-            float kernelTex = mix(plasma, plasma2, 0.5 + 0.5 * sin(t * 0.2));
+            float ps = 0.3 + mThink * 1.6 + mSpeak * 0.6;
+            float plasma  = fbm(uv * 3.0 + t * ps) * 0.5 + 0.5;
+            float plasma2 = fbm(uv * 5.0 - t * (ps * 0.85) + 50.0) * 0.5 + 0.5;
+            float kernelTex = mix(plasma, plasma2, 0.5 + 0.5 * sin(t * (0.2 + mThink * 2.0)));
 
-            // ── Glow-Ringe ──────────────────────────────────────
-            float glow1 = 0.03 / (abs(dist - r) + 0.03);
-            float glow2 = 0.15 / (dist * dist + 0.15);
+            // ── Basis-Glows ──────────────────────────────────────
+            float glow1 = 0.030 / (abs(dist - r)        + 0.030);
+            float glow2 = 0.150 / (dist * dist           + 0.150);
             float glow3 = 0.008 / (abs(dist - r - 0.05) + 0.008);
 
-            // ── Tentakel / Strahlen ─────────────────────────────
-            float rays = 0.0;
-            for (float i = 0.0; i < 12.0; i++) {
-                float ra = i * 3.14159 * 2.0 / 12.0 + t * 0.15 + sin(t * 0.3 + i) * 0.3;
-                float rLen = 0.15 + amp * 0.25 + nrg * 0.15
-                           + sin(t * 0.8 + i * 1.7) * 0.05;
-                vec2 dir = vec2(cos(ra), sin(ra));
+            // ── Speaking: 2 pulsierende Halo-Ringe ───────────────
+            float haloP  = 0.5 + 0.5 * sin(t * 3.2);
+            float speak1 = mSpeak * 0.045 / (abs(dist - r - 0.14) + 0.008);
+            float speak2 = mSpeak * 0.025 / (abs(dist - r - 0.30 - haloP * 0.08) + 0.011);
 
-                // Abstand von Punkt zur Tentakel-Linie
+            // ── Thinking: 2 neuronale Puls-Ringe (konzentrisch) ──
+            float np1     = fract(dist * 8.0 - t * 5.0);
+            float neural1 = mThink * smoothstep(0.80, 1.0, np1) * 0.20 * amp;
+            float np2     = fract(dist * 5.0 - t * 7.5);
+            float neural2 = mThink * smoothstep(0.86, 1.0, np2) * 0.13 * amp;
+
+            // ── Tentakel / Strahlen (12 – wie Original) ──────────
+            float rays   = 0.0;
+            float raySpd = 0.12 + mSpeak * 0.50 + mThink * 0.65;
+            float maxLen = 0.15 + amp * 0.22 + nrg * 0.12
+                         + mSpeak * 0.12 + mThink * 0.18;
+            for (float i = 0.0; i < 12.0; i++) {
+                float ra  = i * 3.14159 * 2.0 / 12.0 + t * raySpd + sin(t * 0.3 + i) * 0.3;
+                float rLen = maxLen + sin(t * (0.8 + mSpeak * 0.8) + i * 1.7) * 0.05;
+                vec2  dir  = vec2(cos(ra), sin(ra));
                 float proj = dot(uv, dir);
                 if (proj > r * 0.5 && proj < r + rLen) {
-                    vec2 closest = dir * proj;
-                    float d = length(uv - closest);
-                    float thick = 0.008 + 0.005 * sin(proj * 20.0 + t * 4.0);
-                    float ray = thick / (d + thick);
+                    vec2  cl   = dir * proj;
+                    float d    = length(uv - cl);
+                    float thick = 0.008 + 0.005 * sin(proj * 20.0 + t * 4.0)
+                                + mSpeak * 0.004;
+                    float ray  = thick / (d + thick);
                     ray *= smoothstep(r + rLen, r * 0.8, proj);
-                    ray *= amp;
+                    ray *= amp * (0.8 + mSpeak * 0.5 + mThink * 0.4);
                     rays += ray * 0.15;
                 }
             }
 
-            // ── Partikel ────────────────────────────────────────
+            // ── Partikel (15 – wie Original) ─────────────────────
             float particles = 0.0;
+            float partR = 0.40 + mSpeak * 0.30;
             for (float i = 0.0; i < 15.0; i++) {
                 float seed = i * 73.1 + 137.3;
                 float pa = fract(sin(seed) * 43758.5) * 6.283;
-                float pr = 0.25 + fract(cos(seed) * 22578.3) * 0.4;
-                pa += t * (0.1 + fract(sin(seed * 2.0) * 1234.5) * 0.2);
+                float pr = 0.25 + fract(cos(seed) * 22578.3) * partR;
+                float spd = 0.10 + fract(sin(seed * 2.0) * 1234.5)
+                          * (0.2 + mSpeak * 0.35);
+                pa += t * spd;
                 pr += sin(t * 0.4 + i) * 0.08;
-                vec2 pp = vec2(cos(pa), sin(pa)) * pr;
+                vec2  pp = vec2(cos(pa), sin(pa)) * pr;
                 float pd = length(uv - pp);
                 float bright = 0.3 + nrg * 0.7;
                 particles += (0.0004 / (pd * pd + 0.0004)) * bright * amp;
             }
 
-            // ── Farb-Zusammenbau ────────────────────────────────
+            // ── Farb-Zusammenbau ─────────────────────────────────
             vec3 col = vec3(0.0);
 
-            // Kern
-            vec3 kernColor = u_color * (0.6 + kernelTex * 0.6);
-            col += kernColor * inner;
+            float kernBright = 0.6 + kernelTex * 0.6
+                             + mSpeak * 0.35 + mThink * 0.20;
+            col += u_color * kernBright * inner;
 
-            // Glows
-            vec3 surfaceGlow = u_color * 1.2;
-            col += surfaceGlow * glow1 * 0.25;
-            col += u_color * glow2 * 0.15 * amp;
-            col += u_color * 0.6 * glow3 * 0.3;
+            col += u_color * 1.2 * glow1 * (0.25 + mSpeak * 0.40);
+            col += u_color       * glow2  * (0.15 + (mSpeak + mThink) * 0.18) * amp;
+            col += u_color * 0.6 * glow3  * 0.30;
 
-            // Tentakel
+            col += u_color * (speak1 + speak2);
+            col += u_color * (neural1 + neural2);
             col += u_color * rays;
-
-            // Partikel
             col += u_color * 0.7 * particles;
 
-            // Breathing
-            float breath = 0.5 + 0.5 * sin(t * 0.35);
+            // Atemzug: tempo variiert mit Modus
+            float bs    = 0.35 + mThink * 0.50 + mSpeak * 0.30;
+            float breath = 0.5 + 0.5 * sin(t * bs);
             col *= 0.85 + 0.15 * breath;
 
-            // ── Scan-Linien ─────────────────────────────────────
             float scan = sin(vUv.y * u_res.y * 1.2) * 0.012 + 0.988;
             col *= scan;
 
-            // ── Vignette ────────────────────────────────────────
             float vig = 1.0 - dot(vUv * 2.0 - 1.0, (vUv * 2.0 - 1.0) * 0.35);
             vig = smoothstep(0.0, 1.0, vig);
             col *= vig;
@@ -360,6 +376,7 @@
             u_energy: { value: 0.0 },
             u_color:  { value: new THREE.Vector3(0.0, 1.0, 0.53) },
             u_res:    { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+            u_mode:   { value: 0.0 },
         };
     }
 
@@ -400,11 +417,11 @@
     // ══════════════════════════════════════════════════════════════════
 
     const MODES = {
-        idle:      { amp: 0.35, energy: 0.0,  r: 0.0, g: 1.0, b: 0.53 },
-        listening: { amp: 0.45, energy: 0.1,  r: 0.0, g: 0.9, b: 0.65 },
-        speaking:  { amp: 0.85, energy: 0.7,  r: 0.0, g: 1.0, b: 0.53 },
-        thinking:  { amp: 0.55, energy: 0.35, r: 0.15, g: 0.5, b: 1.0 },
-        critical:  { amp: 0.7,  energy: 0.6,  r: 1.0, g: 0.15, b: 0.15 },
+        idle:      { amp: 0.30, energy: 0.00, r: 0.00, g: 1.00, b: 0.53, modeId: 0 },  // Grün  – ruhig
+        listening: { amp: 0.50, energy: 0.20, r: 0.00, g: 0.85, b: 0.90, modeId: 1 },  // Cyan  – aktiv
+        speaking:  { amp: 0.68, energy: 0.80, r: 0.00, g: 0.45, b: 1.00, modeId: 2 },  // BLAU  – energetisch
+        thinking:  { amp: 0.60, energy: 0.55, r: 0.65, g: 0.00, b: 1.00, modeId: 3 },  // LILA  – neural
+        critical:  { amp: 0.80, energy: 0.80, r: 1.00, g: 0.00, b: 0.15, modeId: 4 },  // Rot   – alarm
     };
 
     // ══════════════════════════════════════════════════════════════════
@@ -419,9 +436,10 @@
             state.mode = mode;
             state.targetAmplitude = p.amp;
             state.targetEnergy    = p.energy;
-            state.targetR = p.r;
-            state.targetG = p.g;
-            state.targetB = p.b;
+            state.targetR         = p.r;
+            state.targetG         = p.g;
+            state.targetB         = p.b;
+            state.targetModeId    = p.modeId;
         },
 
         /** Direkte Audio-Pegel Zufuehrung (0-1) */
@@ -446,6 +464,8 @@
                 waveMesh.visible = true;
                 orbMesh.visible  = false;
             }
+            // Persistieren: ueberleben Tab-Backgrounding / Page-Reload
+            try { localStorage.setItem('soma_viz', state.vizMode); } catch(e) {}
             return state.vizMode;
         },
 
@@ -477,14 +497,15 @@
         smoothTime += delta;
 
         // ── Sanfte Interpolation ────────────────────────────────
-        const lerpSpeed  = 3.5;   // Amplitude/Energie
-        const colorSpeed = 2.5;   // Farbe
+        const lerpSpeed  = 9.0;   // Amplitude/Energie
+        const colorSpeed = 7.0;   // Farbe
 
-        state.amplitude += (state.targetAmplitude - state.amplitude) * delta * lerpSpeed;
-        state.energy    += (state.targetEnergy    - state.energy)    * delta * lerpSpeed;
-        state.colorR    += (state.targetR - state.colorR) * delta * colorSpeed;
-        state.colorG    += (state.targetG - state.colorG) * delta * colorSpeed;
-        state.colorB    += (state.targetB - state.colorB) * delta * colorSpeed;
+        state.amplitude  += (state.targetAmplitude  - state.amplitude)  * delta * lerpSpeed;
+        state.energy     += (state.targetEnergy     - state.energy)     * delta * lerpSpeed;
+        state.modeId     += (state.targetModeId     - state.modeId)     * delta * lerpSpeed;
+        state.colorR     += (state.targetR - state.colorR) * delta * colorSpeed;
+        state.colorG     += (state.targetG - state.colorG) * delta * colorSpeed;
+        state.colorB     += (state.targetB - state.colorB) * delta * colorSpeed;
 
         // ── Uniforms updaten ────────────────────────────────────
         const mat = (state.vizMode === 'wave') ? waveMat : orbMat;
@@ -492,6 +513,7 @@
         mat.uniforms.u_amp.value    = state.amplitude;
         mat.uniforms.u_energy.value = state.energy;
         mat.uniforms.u_color.value.set(state.colorR, state.colorG, state.colorB);
+        orbMat.uniforms.u_mode.value = state.modeId;
 
         renderer.render(scene, camera);
     }
@@ -501,6 +523,19 @@
     // ══════════════════════════════════════════════════════════════════
 
     window.SomaFace.setMode('idle');
+
+    // Gespeicherten Visualisierungsmodus wiederherstellen (survives page reload)
+    try {
+        const savedViz = localStorage.getItem('soma_viz');
+        if (savedViz === 'orb') {
+            state.vizMode    = 'orb';
+            waveMesh.visible = false;
+            orbMesh.visible  = true;
+            // Button-Label im DOM korrigieren (wird nach Skript-Laden gesetzt)
+            window._somaRestoreViz = 'orb';
+        }
+    } catch(e) {}
+
     requestAnimationFrame(animate);
 
     console.log('[SOMA Face] Visual interface v2 initialized.');

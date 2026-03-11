@@ -92,6 +92,12 @@ from brain_core.voice.tts import TTSEngine, SpeechEmotion
 from brain_core.voice.emotion import EmotionEngine, EmotionState, RoomMood
 from brain_core.voice.ambient import AmbientIntelligence, Intervention
 from brain_core.memory import get_memory, MemoryCategory
+from brain_core.memory.integration import (
+    on_wake_word as memory_on_wake_word,
+    build_context_for_query,
+    after_response as memory_after_response,
+)
+from brain_core.memory.two_phase import get_bridge_response
 
 logger = structlog.get_logger("soma.voice.pipeline")
 
@@ -217,6 +223,15 @@ class VoicePipeline:
         self._pipeline_task = asyncio.create_task(self._audio_loop())
         # Autonomer Proaktiv-Loop: Interventionen & Timer unabhängig von Sprache
         self._proactive_task = asyncio.create_task(self._proactive_loop())
+
+        # ── Speak-Callback auf alle Plugins setzen (Reminders, etc.) ──────
+        # Muss hier passieren BEVOR _deferred_restore() im Plugin läuft,
+        # damit Erinnerungen nach Neustart sofort sprechen können.
+        if self._logic_router and self._logic_router.plugin_manager:
+            for meta in self._logic_router.plugin_manager._plugins.values():
+                if meta.is_loaded and meta.module and hasattr(meta.module, "set_speak_callback"):
+                    meta.module.set_speak_callback(self.autonomous_speak)
+                    logger.info("plugin_speak_callback_registered", plugin=meta.name)
 
         logger.info(
             "pipeline_online",
@@ -478,6 +493,18 @@ class VoicePipeline:
             # Emotionaler Kontext für den System-Prompt
             emotion_context = self.emotion.get_context_for_llm()
 
+            # ── Memory-enriched System-Prompt (parallel zum Emotion-Context) ──
+            emotion_str = emotion_reading.emotion.value if emotion_reading else "neutral"
+            try:
+                memory_prompt_extra = await build_context_for_query(
+                    user_text=prompt,
+                    emotion=emotion_str,
+                    is_child=getattr(self, '_child_mode', False),
+                )
+            except Exception as mem_err:
+                logger.warning("memory_context_failed", error=str(mem_err))
+                memory_prompt_extra = ""
+
             request = SomaRequest(
                 prompt=prompt,
                 session_id=self._voice_session_id,  # Conversation Memory!
@@ -491,6 +518,8 @@ class VoicePipeline:
                     # ZORA-Kern: Was wurde in den letzten Minuten gesagt?
                     # Auch Gespräche ohne Wake-Word geben Soma echten Kontext.
                     "ambient_context": self._get_ambient_context_str(),
+                    # 3-Layer Memory System: Erinnerungen + Fakten + Kontext
+                    "memory_context": memory_prompt_extra,
                 },
             )
             
@@ -501,12 +530,56 @@ class VoicePipeline:
                 "timestamp": datetime.now().isoformat(),
             })
 
-            response = await self._logic_router.route(request)
+            # ── Two-Phase Response: Bridge sprechen wenn LLM zu langsam ──
+            llm_task = asyncio.create_task(self._logic_router.route(request))
+            bridge_spoken = False
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.shield(llm_task), timeout=1.5,
+                )
+            except asyncio.TimeoutError:
+                # LLM braucht > 1.5s → Bridge sofort sprechen
+                bridge = get_bridge_response(
+                    intent="default",
+                    emotion=emotion_str,
+                )
+                if bridge:
+                    bridge_spoken = True
+                    await self._emit("tts", bridge, "BRIDGE", {"bridge": bridge})
+                    await self.tts.speak(
+                        bridge,
+                        SpeechEmotion(speed=1.1, pitch=1.0, volume=0.8),
+                    )
+                # Auf echte Antwort warten
+                response = await llm_task
 
             # ── ACTION-Tag Dispatch ──────────────────────────────────
-            # Parst [ACTION:...] Tags aus der LLM-Antwort, führt sie aus
-            # und gibt den bereinigten Text zurück (ohne Tags).
             clean_response, action_log = await self._execute_action_tags(response.response)
+
+            # ── Code-Block Schutz ────────────────────────────────────
+            # Wenn das LLM einen ```python Block in der Antwort hat,
+            # bedeutet das: es hat Code generiert statt ihn ans Evolution Lab zu schicken.
+            # Wir leiten es jetzt korrekt weiter und sprechen den Code NICHT vor.
+            import re as _re
+            code_block_match = _re.search(r'```(?:python)?\s*\n?(.*?)```', clean_response, _re.DOTALL)
+            if code_block_match and self._is_plugin_request(prompt):
+                # Korrekt: in Evolution Lab leiten
+                await self.tts.speak(
+                    "Ich leite das direkt in mein Evolution Lab weiter und baue es korrekt.",
+                    SpeechEmotion(speed=1.05, pitch=1.0, volume=0.9),
+                )
+                asyncio.create_task(
+                    self._handle_plugin_request(prompt)
+                )
+                return
+            elif code_block_match:
+                # LLM hat Code generiert ohne Plugin-Trigger: Code-Blöcke vor TTS entfernen
+                clean_response = _re.sub(
+                    r'```(?:python)?\s*\n?.*?```',
+                    '[Code wurde nicht vorgelesen]',
+                    clean_response,
+                    flags=_re.DOTALL,
+                ).strip()
 
             # Conversation History für Dashboard (Assistant-Antwort)
             self._conversation_history.append({
@@ -534,6 +607,17 @@ class VoicePipeline:
             )
             speech_emotion = self._select_speech_emotion(emotion_reading)
             await self.tts.speak(clean_response, speech_emotion)
+
+            # ── Memory: Interaktion speichern (fire-and-forget) ────────
+            try:
+                asyncio.create_task(memory_after_response(
+                    user_text=prompt,
+                    soma_text=clean_response,
+                    emotion=emotion_str,
+                    topic=prompt[:60],
+                ))
+            except Exception:
+                pass  # Memory-Fehler dürfen Pipeline nie brechen
 
         else:
             # Kein Logic Router → Fallback
@@ -1035,9 +1119,13 @@ class VoicePipeline:
         """
         p = prompt.lower()
         
-        # Whisper transkribiert manchmal "Plugin" als "Pluggen", "Plug-in", etc.
-        plugin_words = ["plugin", "pluggen", "plug-in", "plug in", "plagin", "erweiterung", "modul", "fähigkeit"]
-        action_words = ["schreib", "erstell", "bau", "mach", "entwickl", "programmier", "code", "erzeug", "generier"]
+        # Whisper transkribiert manchmal "Plugin" als "Pluggen", "Plug-in", "Plugge" etc.
+        plugin_words = [
+            "plugin", "pluggen", "plug-in", "plug in", "plagin",
+            "plugge", "pluggi", "plugg", "pluge", "plug-",
+            "erweiterung", "modul", "fähigkeit", "skript", "script",
+        ]
+        action_words = ["schreib", "erstell", "bau", "mach", "entwickl", "programmier", "code", "erzeug", "generier", "lern"]
         
         has_plugin = any(pw in p for pw in plugin_words)
         has_action = any(aw in p for aw in action_words)

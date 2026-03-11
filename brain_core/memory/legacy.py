@@ -25,7 +25,7 @@ logger = structlog.get_logger("soma.memory")
 
 # ── Speicherort ─────────────────────────────────────────────────────────
 
-MEMORY_FILE = Path(__file__).parent.parent / "data" / "soma_memory.json"
+MEMORY_FILE = Path(__file__).parent.parent.parent / "data" / "soma_memory.json"
 
 
 class MemoryCategory:

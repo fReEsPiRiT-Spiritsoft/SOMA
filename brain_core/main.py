@@ -39,6 +39,12 @@ from brain_core.discovery.ha_bridge import HomeAssistantBridge
 from brain_core.phone.phone_pipeline import PhonePipeline
 from shared.health_schemas import SystemMetrics, SystemHealthReport
 from evolution_lab.plugin_manager import PluginManager, PluginGenerator
+from brain_core.memory.setup_embeddings import ensure_embedding_model
+from brain_core.memory.integration import (
+    init_memory_system,
+    set_consolidation_llm,
+    get_orchestrator,
+)
 from pathlib import Path
 from pydantic import BaseModel as PydanticBaseModel
 
@@ -78,20 +84,24 @@ phone_pipeline: PhonePipeline | None = None
 
 # ── Reminder Speak (Global für Import) ───────────────────────────────────
 
+def get_pipeline():
+    """Gibt die aktuelle VoicePipeline-Instanz zurück (oder None)."""
+    return voice_pipeline
+
+
 async def reminder_speak(text: str):
     """
     Globaler TTS-Callback für Erinnerungen.
-    Kann aus anderen Modulen importiert werden.
+    Nutzt autonomous_speak der Pipeline → Priority-TTS + Dashboard-Event.
     """
     global voice_pipeline
     if voice_pipeline is None:
         logger.warning("reminder_speak_no_pipeline", text=text)
         return
-    
-    from brain_core.voice.tts import SpeechEmotion
+
     await broadcast_thought("info", f"⏰ ERINNERUNG: {text}", "REMINDER")
     logger.info("reminder_speaking", text=text)
-    await voice_pipeline.tts.speak(text, SpeechEmotion.alert())
+    await voice_pipeline.autonomous_speak(text)
 
 
 # ── Thought Broadcasting ─────────────────────────────────────────────────
@@ -183,6 +193,26 @@ async def lifespan(app: FastAPI):
     await light_engine.initialize()
     await nano_engine.initialize()
     logger.info("boot_phase", service="engines", status="initialized")
+
+    # 3b. Memory System (3-Layer Hierarchy + Embeddings)
+    try:
+        await ensure_embedding_model()
+        memory_orchestrator = await init_memory_system()
+
+        # Consolidation-LLM: Heavy Engine im Idle
+        async def _consolidation_llm(prompt: str) -> str:
+            return await heavy_engine.generate(prompt=prompt, system_prompt="")
+        set_consolidation_llm(_consolidation_llm)
+
+        logger.info("boot_phase", service="memory_system", status="online 🧠")
+        await broadcast_thought(
+            "info",
+            "🧠 Memory System online — 3 Gedächtnis-Ebenen aktiv",
+            "BOOT",
+        )
+    except Exception as exc:
+        logger.error("boot_phase", service="memory_system", status="failed", error=str(exc))
+        await broadcast_thought("warn", f"Memory System Fehler: {exc}", "BOOT")
 
     # 4. Logic Router zusammenbauen (mit Plugin-Integration)
     logic_router = LogicRouter(
@@ -600,6 +630,16 @@ async def get_atmosphere():
         "argument_likelihood": atm.argument_likelihood,
         "speakers_detected": atm.speakers_detected,
     }
+
+
+@app.get("/api/v1/memory/stats")
+async def get_memory_stats():
+    """Gedächtnis-Statistiken (3-Layer Hierarchy)."""
+    try:
+        orchestrator = get_orchestrator()
+        return await orchestrator.get_memory_stats()
+    except RuntimeError:
+        return {"error": "Memory system not initialized"}
 
 
 # ── WebSocket: Live Thinking Stream ─────────────────────────────────────

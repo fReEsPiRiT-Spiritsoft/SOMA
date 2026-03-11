@@ -1,18 +1,24 @@
 """
 Plugin: Erinnerung / Reminder
 ==============================
-Soma kann Erinnerungen setzen und dich zu bestimmten Zeiten benachrichtigen.
+v2.0 — Memory-First: Erinnerungen leben im 3-Layer Memory System.
+
+✅ Überlebt Brain Core Neustarts (persistent in SQLite L3 Semantic)
+✅ SOMA kennt alle Termine (L2 Episodic + L3 Semantic)
+✅ Erscheint automatisch im Gesprächs-Kontext beim Nachfragen
+✅ Background Consolidation destilliert Gewohnheiten aus Terminen
 
 Beispiele:
   - "Soma, erinnere mich um 15:30 an den Termin"
   - "Soma, Erinnerung um 16 Uhr: Müll rausbringen"
   - "Soma, in 10 Minuten: Wasser kochen"
 """
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __author__ = "SOMA Evolution Lab"
-__description__ = "Setzt Erinnerungen und benachrichtigt zur angegebenen Zeit"
+__description__ = "Erinnerungen persistent im Memory System — überleben Neustarts"
 
 import asyncio
+import json
 import re
 from datetime import datetime, timedelta
 from typing import Optional, Callable, Awaitable
@@ -20,11 +26,91 @@ import structlog
 
 logger = structlog.get_logger("soma.plugin.erinnerung")
 
-# Globale Erinnerungsliste (persistent während Runtime)
-_reminders: list[dict] = []
+# ── Memory-Kategorie in L3 ────────────────────────────────────────────────
+_REMINDER_CATEGORY = "reminder"
+
+# ── Laufzeit-State (kein SSOT — nur für asyncio Task-Management) ─────────
 _reminder_tasks: dict[str, asyncio.Task] = {}
 _speak_callback: Optional[Callable[[str], Awaitable[None]]] = None
 
+
+# ── Memory-Helpers ────────────────────────────────────────────────────────
+
+async def _get_orch():
+    """Gibt den MemoryOrchestrator zurück — None wenn noch nicht bereit."""
+    try:
+        from brain_core.memory.integration import get_orchestrator
+        return get_orchestrator()
+    except Exception:
+        return None
+
+
+async def _save_to_memory(reminder_id: str, topic: str, target_time: datetime):
+    """Speichert Erinnerung als Fakt in L3 (SSOT)."""
+    orch = await _get_orch()
+    if orch is None:
+        return
+    payload = json.dumps(
+        {"topic": topic, "time": target_time.isoformat()},
+        ensure_ascii=False,
+    )
+    await orch.semantic.learn_fact(
+        category=_REMINDER_CATEGORY,
+        subject=reminder_id,
+        fact=payload,
+        confidence=0.99,  # Erinnerungen sind immer gesichert
+    )
+
+
+async def _delete_from_memory(reminder_id: str):
+    """Löscht eine erledigte/abgebrochene Erinnerung aus L3."""
+    orch = await _get_orch()
+    if orch is None:
+        return
+    try:
+        await orch.semantic.forget_fact(reminder_id)
+    except Exception as e:
+        logger.warning("reminder_memory_delete_failed", id=reminder_id, error=str(e))
+
+
+async def _get_all_from_memory() -> list[dict]:
+    """Lädt alle aktiven Erinnerungen direkt aus L3 — Memory ist die einzige Quelle."""
+    orch = await _get_orch()
+    if orch is None:
+        return []
+    try:
+        facts = await orch.semantic.get_facts_by_category(_REMINDER_CATEGORY)
+        result = []
+        for f in facts:
+            try:
+                data = json.loads(f.fact)
+                data["id"] = f.subject
+                result.append(data)
+            except (json.JSONDecodeError, KeyError):
+                continue
+        return result
+    except Exception as e:
+        logger.warning("reminders_load_failed", error=str(e))
+        return []
+
+
+async def _record_event(event: str, topic: str):
+    """Schreibt ein Reminder-Event als Episode in L2 — für Kontext und Recall."""
+    orch = await _get_orch()
+    if orch is None:
+        return
+    asyncio.create_task(
+        orch.store_interaction(
+            user_text=f"Reminder {event}: {topic}",
+            soma_text=f"reminder_{event}",
+            emotion="neutral",
+            intent=f"reminder_{event}",
+            topic="reminder",
+        )
+    )
+
+
+# ── Plugin Lifecycle ─────────────────────────────────────────────────────
 
 def set_speak_callback(callback: Callable[[str], Awaitable[None]]) -> None:
     """Setzt die TTS-Callback-Funktion für Benachrichtigungen."""
@@ -34,8 +120,49 @@ def set_speak_callback(callback: Callable[[str], Awaitable[None]]) -> None:
 
 
 async def on_load():
-    """Plugin geladen."""
-    logger.info("erinnerung_plugin_loaded", active_reminders=len(_reminders))
+    """Plugin geladen — stellt nach Neustart alle Erinnerungen aus Memory wieder ein."""
+    logger.info("erinnerung_plugin_v2_loaded")
+    asyncio.create_task(_deferred_restore())
+
+
+async def _deferred_restore():
+    """Wartet bis Memory bereit ist (Brain Core Boot), dann alle Reminders aus L3 neu einplanen."""
+    for _ in range(15):  # max 30s warten
+        await asyncio.sleep(2)
+        orch = await _get_orch()
+        if orch is None:
+            continue
+        # Memory ist bereit
+        reminders = await _get_all_from_memory()
+        now = datetime.now()
+        rescheduled = 0
+        expired = 0
+        for r in reminders:
+            try:
+                target = datetime.fromisoformat(r["time"])
+                rid = r["id"]
+                if target <= now:
+                    # Abgelaufen während Neustart → aus Memory löschen
+                    asyncio.create_task(_delete_from_memory(rid))
+                    expired += 1
+                    continue
+                if rid in _reminder_tasks:
+                    continue
+                # _speak_callback wurde von der Pipeline vor _deferred_restore gesetzt
+                task = asyncio.create_task(
+                    _reminder_worker(rid, target, r["topic"], speak_fn=_speak_callback)
+                )
+                _reminder_tasks[rid] = task
+                rescheduled += 1
+            except Exception as e:
+                logger.warning("reminder_reschedule_failed", id=r.get("id"), error=str(e))
+        logger.info(
+            "reminders_restored_from_memory",
+            rescheduled=rescheduled,
+            expired_cleaned=expired,
+        )
+        return
+    logger.warning("deferred_restore_gave_up", reason="Memory not ready after 30s")
 
 
 def parse_time(text: str) -> Optional[datetime]:
@@ -112,14 +239,16 @@ async def _reminder_worker(
     reminder_id: str,
     target_time: datetime,
     topic: str,
-    speak_fn=None,          # Callback wird beim Erstellen mitgegeben – nicht beim Feuern gelesen
+    speak_fn=None,
 ):
-    """Background-Worker der auf die Zeit wartet und dann benachrichtigt."""
+    """Background-Worker: wartet, spricht die Benachrichtigung, räumt Memory auf."""
     now = datetime.now()
     wait_seconds = (target_time - now).total_seconds()
 
     if wait_seconds <= 0:
-        logger.warning("reminder_already_past", id=reminder_id, target=target_time.isoformat())
+        logger.warning("reminder_already_past", id=reminder_id)
+        await _delete_from_memory(reminder_id)
+        _reminder_tasks.pop(reminder_id, None)
         return
 
     logger.info(
@@ -130,37 +259,45 @@ async def _reminder_worker(
         topic=topic,
     )
 
-    await asyncio.sleep(wait_seconds)
+    try:
+        await asyncio.sleep(wait_seconds)
+    except asyncio.CancelledError:
+        logger.info("reminder_cancelled_during_sleep", id=reminder_id)
+        return
 
-    # Zeit ist da! Benachrichtigen
+    # Zeit ist da → Benachrichtigen
     message = f"Hey! Erinnerung: {topic}"
-    logger.info("reminder_triggered", id=reminder_id, message=message)
+    logger.info("reminder_triggered", id=reminder_id, topic=topic)
 
-    # Callback-Auswahl: mitgegebener > aktueller Modul-Global > Fallback über main
+    # Immer aktuellsten Callback nehmen: Argument > Modul-Global > Fallback
     cb = speak_fn or _speak_callback
     if cb is None:
-        # Letzter Ausweg: reminder_speak aus main.py direkt importieren
+        # Letzter Ausweg: Pipeline-Instanz direkt fragen
         try:
-            from brain_core.main import reminder_speak as _fallback_speak
-            cb = _fallback_speak
-            logger.warning("reminder_using_fallback_callback")
-        except ImportError:
+            from brain_core.main import get_pipeline
+            pipeline = get_pipeline()
+            if pipeline:
+                cb = pipeline.autonomous_speak
+                logger.warning("reminder_using_pipeline_fallback")
+        except Exception:
             pass
 
     if cb:
         try:
+            logger.info("reminder_speaking", id=reminder_id, topic=topic)
             await cb(message)
         except Exception as e:
             logger.error("reminder_speak_failed", error=str(e), id=reminder_id)
     else:
-        logger.error("reminder_no_callback", id=reminder_id, topic=topic,
-                     msg="Kein TTS-Callback vorhanden – Erinnerung nicht ausgegeben!")
+        logger.error(
+            "reminder_no_callback", id=reminder_id,
+            msg="Kein TTS-Callback — ist die Pipeline gestartet? Prüfe Pipeline.start()"
+        )
 
-    # Aus Liste entfernen
-    global _reminders
-    _reminders = [r for r in _reminders if r["id"] != reminder_id]
-    if reminder_id in _reminder_tasks:
-        del _reminder_tasks[reminder_id]
+    # ── Memory aufräumen + Event aufzeichnen ──────────────────────────────
+    await _delete_from_memory(reminder_id)        # aus L3 löschen
+    await _record_event("triggered", topic)        # Episode in L2 schreiben
+    _reminder_tasks.pop(reminder_id, None)
 
 
 async def set_reminder(text: str) -> str:
@@ -222,69 +359,69 @@ async def set_reminder_from_action(
     return await _create_reminder(target_time, topic)
 
 
-async def _create_reminder(target_time, topic: str) -> str:
-    """Legt den Reminder-Eintrag an und startet den Background-Task."""
-    reminder_id = f"rem_{datetime.now().strftime('%H%M%S')}_{len(_reminders)}"
+async def _create_reminder(target_time: datetime, topic: str) -> str:
+    """Legt Reminder in L3 (SSOT) an, schreibt Episode in L2, startet asyncio Task."""
+    reminder_id = f"rem_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{len(_reminder_tasks)}"
 
-    reminder = {
-        "id": reminder_id,
-        "time": target_time.isoformat(),
-        "topic": topic,
-        "created": datetime.now().isoformat(),
-    }
-    _reminders.append(reminder)
+    # 1. In L3 Semantic Memory speichern (überlebt Neustarts)
+    await _save_to_memory(reminder_id, topic, target_time)
 
-    # Callback jetzt einfrieren – nicht erst beim Feuern lesen
+    # 2. Episode in L2 schreiben (SOMA "erinnert sich" dass du das gesagt hast)
+    await _record_event("set", f"{topic} um {target_time.strftime('%H:%M')} Uhr")
+
+    # 3. asyncio Task starten
     captured_callback = _speak_callback
-
-    # Background-Task starten
     task = asyncio.create_task(
         _reminder_worker(reminder_id, target_time, topic, speak_fn=captured_callback)
     )
     _reminder_tasks[reminder_id] = task
 
-    # Exceptions im Task sichtbar machen (sonst lautlos verworfen)
     def _on_done(t: asyncio.Task):
         if not t.cancelled() and t.exception() is not None:
             logger.error("reminder_task_crashed", id=reminder_id, error=str(t.exception()))
     task.add_done_callback(_on_done)
 
     time_str = target_time.strftime("%H:%M")
-    logger.info("reminder_created", id=reminder_id, at=time_str, topic=topic,
-                callback_set=captured_callback is not None)
+    logger.info("reminder_created", id=reminder_id, at=time_str, topic=topic)
     return f"Alles klar! Ich erinnere dich um {time_str} Uhr: {topic}"
 
 
 async def list_reminders() -> str:
-    """Listet alle aktiven Erinnerungen auf."""
-    if not _reminders:
+    """Listet alle Erinnerungen direkt aus L3 Memory — immer aktuell, auch nach Neustart."""
+    reminders = await _get_all_from_memory()
+    if not reminders:
         return "Du hast keine aktiven Erinnerungen."
-    
+    now = datetime.now()
+    active = [
+        r for r in reminders
+        if datetime.fromisoformat(r["time"]) > now
+    ]
+    if not active:
+        return "Alle Erinnerungen sind bereits abgelaufen."
     lines = ["Deine Erinnerungen:"]
-    for r in _reminders:
-        time = datetime.fromisoformat(r["time"]).strftime("%H:%M")
-        lines.append(f"  • {time} Uhr: {r['topic']}")
-    
+    for r in sorted(active, key=lambda x: x["time"]):
+        t = datetime.fromisoformat(r["time"]).strftime("%H:%M")
+        lines.append(f"  • {t} Uhr: {r['topic']}")
     return "\n".join(lines)
 
 
 async def cancel_reminder(topic_match: str) -> str:
-    """Löscht eine Erinnerung die zum Thema passt."""
-    global _reminders
-    
+    """Löscht eine Erinnerung aus Memory und bricht den asyncio Task ab."""
+    reminders = await _get_all_from_memory()
     topic_lower = topic_match.lower()
-    to_cancel = [r for r in _reminders if topic_lower in r["topic"].lower()]
-    
+    to_cancel = [r for r in reminders if topic_lower in r["topic"].lower()]
+
     if not to_cancel:
         return f"Keine Erinnerung mit '{topic_match}' gefunden."
-    
+
     for r in to_cancel:
         rid = r["id"]
         if rid in _reminder_tasks:
             _reminder_tasks[rid].cancel()
-            del _reminder_tasks[rid]
-        _reminders = [rem for rem in _reminders if rem["id"] != rid]
-    
+            _reminder_tasks.pop(rid, None)
+        await _delete_from_memory(rid)
+
+    await _record_event("cancelled", to_cancel[0]["topic"])
     return f"Erinnerung '{to_cancel[0]['topic']}' gelöscht."
 
 
@@ -323,4 +460,7 @@ async def execute(text: str = "") -> str:
         logger.info("erinnerung_fallback_set_reminder")
         return await set_reminder(text)
     
-    return f"Aktive Erinnerungen: {len(_reminders)}. Sage 'Erinnere mich um [Zeit] an [Thema]' um eine neue zu setzen."
+    reminders = await _get_all_from_memory()
+    now = datetime.now()
+    active_count = len([r for r in reminders if datetime.fromisoformat(r["time"]) > now])
+    return f"Aktive Erinnerungen: {active_count}. Sage 'Erinnere mich um [Zeit] an [Thema]' um eine neue zu setzen."

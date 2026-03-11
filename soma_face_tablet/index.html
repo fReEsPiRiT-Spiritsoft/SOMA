@@ -19,7 +19,7 @@
             bottom: 18px;
             left: 50%;
             transform: translateX(-50%);
-            z-index: 10;
+            z-index: 9999;
             color: rgba(0, 255, 136, 0.45);
             font-family: 'JetBrains Mono', monospace;
             font-size: 11px;
@@ -32,7 +32,7 @@
             bottom: 55px;
             left: 50%;
             transform: translateX(-50%);
-            z-index: 10;
+            z-index: 9999;
             color: rgba(0, 255, 136, 0.92);
             font-family: 'JetBrains Mono', monospace;
             font-size: 13px;
@@ -55,6 +55,8 @@
             white-space: pre-wrap;
             scrollbar-width: thin;
             scrollbar-color: rgba(0,255,136,0.25) transparent;
+            overscroll-behavior: contain; /* kein Browser-Back bei Scroll-Ende */
+            touch-action: pan-y;          /* kein horizontaler Swipe-Back */
         }
         #soma-text::-webkit-scrollbar { width: 4px; }
         #soma-text::-webkit-scrollbar-track { background: transparent; }
@@ -66,7 +68,7 @@
             position: fixed;
             top: 18px;
             right: 18px;
-            z-index: 20;
+            z-index: 9999;
             background: rgba(255,255,255,0.04);
             border: 1px solid rgba(0,255,136,0.15);
             border-radius: 10px;
@@ -90,7 +92,7 @@
             position: fixed;
             top: 18px;
             left: 18px;
-            z-index: 10;
+            z-index: 9999;
             display: flex;
             align-items: center;
             gap: 8px;
@@ -142,6 +144,12 @@
 
         const vizLabels = { wave: '◇ WAVE', orb: '⬡ ORB' };
 
+        // Button-Label beim Laden aus localStorage wiederherstellen
+        try {
+            const sv = localStorage.getItem('soma_viz') || window._somaRestoreViz;
+            if (sv) vizBtn.textContent = vizLabels[sv] || '◇ WAVE';
+        } catch(e) {}
+
         vizBtn.addEventListener('click', () => {
             if (!window.SomaFace) return;
             const newMode = window.SomaFace.toggleViz();
@@ -151,9 +159,9 @@
         // ── Mode indicator updater (check every 500ms) ─────────────
         const modeColors = {
             idle:      '#00ff88',
-            listening: '#00ddaa',
-            speaking:  '#00ff88',
-            thinking:  '#4477ff',
+            listening: '#00ddbb',
+            speaking:  '#0077ff',   // Blau
+            thinking:  '#9933ff',   // Lila
             critical:  '#ff3344',
         };
 
