@@ -108,15 +108,20 @@ def parse_topic(text: str) -> str:
     return text.strip() if text.strip() else "Erinnerung"
 
 
-async def _reminder_worker(reminder_id: str, target_time: datetime, topic: str):
+async def _reminder_worker(
+    reminder_id: str,
+    target_time: datetime,
+    topic: str,
+    speak_fn=None,          # Callback wird beim Erstellen mitgegeben – nicht beim Feuern gelesen
+):
     """Background-Worker der auf die Zeit wartet und dann benachrichtigt."""
     now = datetime.now()
     wait_seconds = (target_time - now).total_seconds()
-    
+
     if wait_seconds <= 0:
         logger.warning("reminder_already_past", id=reminder_id, target=target_time.isoformat())
         return
-    
+
     logger.info(
         "reminder_scheduled",
         id=reminder_id,
@@ -124,19 +129,33 @@ async def _reminder_worker(reminder_id: str, target_time: datetime, topic: str):
         wait_seconds=round(wait_seconds),
         topic=topic,
     )
-    
+
     await asyncio.sleep(wait_seconds)
-    
+
     # Zeit ist da! Benachrichtigen
     message = f"Hey! Erinnerung: {topic}"
     logger.info("reminder_triggered", id=reminder_id, message=message)
-    
-    if _speak_callback:
+
+    # Callback-Auswahl: mitgegebener > aktueller Modul-Global > Fallback über main
+    cb = speak_fn or _speak_callback
+    if cb is None:
+        # Letzter Ausweg: reminder_speak aus main.py direkt importieren
         try:
-            await _speak_callback(message)
+            from brain_core.main import reminder_speak as _fallback_speak
+            cb = _fallback_speak
+            logger.warning("reminder_using_fallback_callback")
+        except ImportError:
+            pass
+
+    if cb:
+        try:
+            await cb(message)
         except Exception as e:
-            logger.error("reminder_speak_failed", error=str(e))
-    
+            logger.error("reminder_speak_failed", error=str(e), id=reminder_id)
+    else:
+        logger.error("reminder_no_callback", id=reminder_id, topic=topic,
+                     msg="Kein TTS-Callback vorhanden – Erinnerung nicht ausgegeben!")
+
     # Aus Liste entfernen
     global _reminders
     _reminders = [r for r in _reminders if r["id"] != reminder_id]
@@ -206,7 +225,7 @@ async def set_reminder_from_action(
 async def _create_reminder(target_time, topic: str) -> str:
     """Legt den Reminder-Eintrag an und startet den Background-Task."""
     reminder_id = f"rem_{datetime.now().strftime('%H%M%S')}_{len(_reminders)}"
-    
+
     reminder = {
         "id": reminder_id,
         "time": target_time.isoformat(),
@@ -214,12 +233,25 @@ async def _create_reminder(target_time, topic: str) -> str:
         "created": datetime.now().isoformat(),
     }
     _reminders.append(reminder)
-    
+
+    # Callback jetzt einfrieren – nicht erst beim Feuern lesen
+    captured_callback = _speak_callback
+
     # Background-Task starten
-    task = asyncio.create_task(_reminder_worker(reminder_id, target_time, topic))
+    task = asyncio.create_task(
+        _reminder_worker(reminder_id, target_time, topic, speak_fn=captured_callback)
+    )
     _reminder_tasks[reminder_id] = task
-    
+
+    # Exceptions im Task sichtbar machen (sonst lautlos verworfen)
+    def _on_done(t: asyncio.Task):
+        if not t.cancelled() and t.exception() is not None:
+            logger.error("reminder_task_crashed", id=reminder_id, error=str(t.exception()))
+    task.add_done_callback(_on_done)
+
     time_str = target_time.strftime("%H:%M")
+    logger.info("reminder_created", id=reminder_id, at=time_str, topic=topic,
+                callback_set=captured_callback is not None)
     return f"Alles klar! Ich erinnere dich um {time_str} Uhr: {topic}"
 
 

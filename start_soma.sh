@@ -17,17 +17,21 @@
 # Stoppen: ./stop_all.sh
 # ============================================================================
 
-set -uo pipefail
+set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+# ── Python: venv-Pfad direkt nutzen (kein source activate nötig!) ─────────
+VENV="$SCRIPT_DIR/.venv"
+PYTHON="$VENV/bin/python"
 
 # ── Colors & Helpers ─────────────────────────────────────────────────────
 G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; C='\033[0;36m'; B='\033[1m'; NC='\033[0m'
 ok()   { echo -e "  ${G}✓${NC} $1"; }
 warn() { echo -e "  ${Y}⚠${NC} $1"; }
 fail() { echo -e "  ${R}✗${NC} $1"; }
-head() { echo -e "\n${C}── $1 ──${NC}"; }
+hdr()  { echo -e "\n${C}── $1 ──${NC}"; }
 
 # ── Directories ──────────────────────────────────────────────────────────
 PIDDIR="$SCRIPT_DIR/.pids"
@@ -197,11 +201,31 @@ if curl -sf http://localhost:8100/api/v1/health >/dev/null 2>&1; then
     exit 0
 fi
 
+# ── 0. sudo-Rechte einmalig cachen ──────────────────────────────────────
+hdr "0/6 Autorisierung"
+
+if sudo -n true 2>/dev/null; then
+    ok "sudo bereits autorisiert"
+else
+    echo -e "  ${B}🔑 Einmalige Passwort-Eingabe für diese Session:${NC}"
+    sudo -v
+    if [ $? -eq 0 ]; then
+        ok "sudo-Rechte gecacht ✓"
+    else
+        fail "sudo fehlgeschlagen – einige Services starten evtl. nicht"
+    fi
+fi
+
+# Keep-alive: sudo-Timestamp frisch halten bis Skript endet
+(while true; do sudo -n true 2>/dev/null; sleep 50; done) &
+SUDO_KEEPALIVE_PID=$!
+trap "kill $SUDO_KEEPALIVE_PID 2>/dev/null" EXIT
+
 # ── 1. Docker Daemon ────────────────────────────────────────────────────
-head "1/5 Docker Daemon"
+hdr "1/6 Docker Daemon"
 
 if ! docker info &>/dev/null 2>&1; then
-    echo -e "  Docker Daemon starten (sudo nötig)..."
+    echo -e "  Docker Daemon starten..."
     sudo systemctl start docker
     sleep 2
     if docker info &>/dev/null 2>&1; then
@@ -216,10 +240,21 @@ else
 fi
 
 # ── 2. Infrastruktur-Container ──────────────────────────────────────────
-head "2/5 Infrastruktur (PostgreSQL, Redis, MQTT)"
+hdr "2/6 Infrastruktur (PostgreSQL, Redis, MQTT)"
 
-# Container starten
-docker compose -f "$SCRIPT_DIR/docker-compose.yml" up -d postgres redis mosquitto 2>&1 | grep -v "^$" | head -5
+# Basis-Services (immer starten)
+DOCKER_SERVICES="postgres redis mosquitto"
+
+# Asterisk nur starten wenn Image existiert
+if docker image inspect soma-asterisk &>/dev/null 2>&1; then
+    DOCKER_SERVICES="$DOCKER_SERVICES asterisk"
+    ok "Asterisk Phone Gateway wird mitgestartet"
+else
+    warn "Asterisk-Image nicht gebaut – Phone Gateway übersprungen"
+    warn "Später nachholen: docker compose build asterisk"
+fi
+
+docker compose -f "$SCRIPT_DIR/docker-compose.yml" up -d $DOCKER_SERVICES 2>&1 | grep -v "^$" | head -10
 
 # Warte auf Health-Checks
 echo -e "  Warte auf Services..."
@@ -244,7 +279,7 @@ else
 fi
 
 # ── 3. Ollama ───────────────────────────────────────────────────────────
-head "3/5 Ollama (LLM Runtime)"
+hdr "3/6 Ollama (LLM Runtime)"
 
 if curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
     ok "Ollama läuft bereits"
@@ -275,28 +310,25 @@ print(', '.join(names) if names else 'keine')" 2>/dev/null || echo "?")
 fi
 
 # ── 4. Python venv ──────────────────────────────────────────────────────
-head "4/5 Python Environment"
+hdr "4/6 Python Environment"
 
-VENV="$SCRIPT_DIR/.venv"
-if [ -f "$VENV/bin/activate" ]; then
-    source "$VENV/bin/activate"
-    ok "venv aktiviert: $(python --version 2>&1)"
+if [ -x "$PYTHON" ]; then
+    PY_VER=$("$PYTHON" --version 2>&1)
+    ok "venv erkannt: $PY_VER"
 else
-    fail "venv nicht gefunden!"
-    fail "Erst ausführen: python3 -m venv .venv && pip install -r requirements.txt"
+    fail "Python venv nicht gefunden: $PYTHON"
+    fail "Erst ausführen: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
     exit 1
 fi
 
 # ── 5a. Django SSOT ─────────────────────────────────────────────────────
-head "5/5 SOMA Services"
+hdr "5/6 Django SSOT (Port 8200)"
 
-echo -e "  ${B}Django SSOT (Port 8200):${NC}"
 if curl -sf http://localhost:8200/ >/dev/null 2>&1; then
     ok "Django läuft bereits"
 else
-    # Django starten
     cd "$SCRIPT_DIR"
-    USE_SQLITE=true nohup python brain_memory_ui/manage.py runserver 0.0.0.0:8200 \
+    USE_SQLITE=true nohup "$PYTHON" brain_memory_ui/manage.py runserver 0.0.0.0:8200 \
         > "$LOGDIR/django.log" 2>&1 &
     DJANGO_PID=$!
     echo "$DJANGO_PID" > "$PIDDIR/django.pid"
@@ -310,12 +342,13 @@ else
 fi
 
 # ── 5b. Brain Core ──────────────────────────────────────────────────────
-echo -e "\n  ${B}Brain Core (Port 8100):${NC}"
+hdr "6/6 Brain Core (Port 8100)"
+
 if curl -sf http://localhost:8100/api/v1/health >/dev/null 2>&1; then
     ok "Brain Core läuft bereits"
 else
     cd "$SCRIPT_DIR"
-    nohup python -m brain_core.main \
+    nohup "$PYTHON" -m brain_core.main \
         > "$LOGDIR/brain_core.log" 2>&1 &
     BRAIN_PID=$!
     echo "$BRAIN_PID" > "$PIDDIR/brain_core.pid"
@@ -359,6 +392,18 @@ if [ "$BRAIN_OK" = "1" ]; then
     echo -e "${G}║${NC}  Logs:    ${C}./start_soma.sh --logs${NC}                           ${G}║${NC}"
     echo -e "${G}║${NC}  Stop:    ${C}./stop_all.sh${NC}                                    ${G}║${NC}"
     echo -e "${G}╚══════════════════════════════════════════════════════════════╝${NC}"
+
+    # Auto-open dashboard in default browser (set AUTO_OPEN_BROWSER=0 to disable)
+    DASH_URL="http://localhost:8200/dashboard/"
+    if [ "${AUTO_OPEN_BROWSER:-1}" != "0" ]; then
+        if command -v xdg-open >/dev/null 2>&1; then
+            xdg-open "$DASH_URL" >/dev/null 2>&1 || true
+        elif command -v gnome-open >/dev/null 2>&1; then
+            gnome-open "$DASH_URL" >/dev/null 2>&1 || true
+        elif command -v python3 >/dev/null 2>&1; then
+            python3 -m webbrowser "$DASH_URL" >/dev/null 2>&1 || true
+        fi
+    fi
 else
     echo -e "${Y}╔══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${Y}║${NC}  ${B}⏳ SOMA-AI startet noch...${NC}                                 ${Y}║${NC}"
@@ -369,3 +414,4 @@ else
     echo -e "${Y}╚══════════════════════════════════════════════════════════════╝${NC}"
 fi
 echo ""
+# wc -l /home/patricks/Schreibtisch/SOMA/start_soma.sh && head -5 /home/patricks/Schreibtisch/SOMA/start_soma.sh && echo "---" && tail -5 /home/patricks/Schreibtisch/SOMA/start_soma.sh

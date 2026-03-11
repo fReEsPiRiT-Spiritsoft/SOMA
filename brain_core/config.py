@@ -50,10 +50,31 @@ class SomaConfig(BaseSettings):
     health_vram_critical_percent: float = 85.0
     health_cpu_warn_percent: float = 80.0
     health_temp_warn_celsius: float = 75.0
-
+    # ── VRAM Management ─────────────────────────────────────────────
+    # Ollama VRAM freigeben nach N Sekunden ohne LLM-Request (0 = deaktiviert)
+    vram_unload_idle_secs: float = 10.0
+    # Heavy-Engine aktiv lassen bis VRAM diese Auslastung überschreitet
+    heavy_engine_max_vram_pct: float = 90.0
     # ── Home Assistant ───────────────────────────────────────────────────
     ha_url: str = "http://homeassistant.local:8123"
     ha_token: str = ""
+    ha_speaker_entity: str = "media_player.all"  # HA entity for home broadcasts
+
+    # ── Phone Gateway (Asterisk ARI) ─────────────────────────────────────
+    # See asterisk/ directory for setup instructions.
+    # docker compose up asterisk to start the gateway.
+    asterisk_host: str = "localhost"
+    asterisk_ari_port: int = 8088
+    asterisk_ari_user: str = "soma-ari"
+    asterisk_ari_pass: str = "soma_ari_secret"   # CHANGE THIS in .env!
+    phone_recordings_dir: str = "data/phone_recordings"
+    phone_sounds_dir: str = "data/phone_sounds"
+    # Password spoken over phone to authenticate (CHANGE THIS!)
+    soma_phone_password: str = "starlight"
+    # Optional: SHA-256 hash of password (more secure). If set, overrides soma_phone_password.
+    soma_phone_password_hash: str = ""
+    # SOMA's reachable URL for Home Assistant to fetch TTS audio
+    soma_local_url: str = "http://192.168.0.100:8100"  # CHANGE to your machine's LAN IP
 
     # ── Django SSOT ──────────────────────────────────────────────────────
     django_host: str = "0.0.0.0"

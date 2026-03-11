@@ -50,10 +50,12 @@ class HealthMonitor:
         interval: float = 5.0,
         on_metrics: Optional[Callable[[SystemMetrics], Awaitable[None]]] = None,
         on_critical: Optional[Callable[[SystemMetrics], Awaitable[None]]] = None,
+        heavy_engine: Optional[object] = None,  # HeavyLlamaEngine-Referenz für VRAM-Druck
     ):
         self.interval = interval
         self._on_metrics = on_metrics
         self._on_critical = on_critical
+        self._heavy_engine = heavy_engine
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._last_metrics: Optional[SystemMetrics] = None
@@ -174,6 +176,14 @@ class HealthMonitor:
                         else "n/a",
                     )
                     await self._on_critical(metrics)
+
+                # VRAM-Druck: Heavy-Engine sofort entladen wenn > 90%
+                if (
+                    self._heavy_engine is not None
+                    and metrics.gpu is not None
+                    and metrics.gpu.vram_percent > settings.heavy_engine_max_vram_pct
+                ):
+                    self._heavy_engine.notify_vram_pressure()
 
             except Exception as exc:
                 logger.error("health_monitor_error", error=str(exc))

@@ -206,3 +206,60 @@ class STTEngine:
         self._model = None
         self._ready = False
         logger.info("stt_shutdown")
+
+    async def transcribe_file(self, filepath: str) -> "TranscriptionResult":
+        """
+        Transkribiere eine Audio-Datei (WAV, MP3, etc.) direkt via faster-whisper.
+        Genutzt vom Phone-Gateway: Asterisk-Aufnahmen landen als WAV-Datei,
+        Whisper verarbeitet sie direkt ohne numpy-Konvertierung.
+
+        Args:
+            filepath: Absoluter Pfad zur Audio-Datei
+
+        Returns:
+            TranscriptionResult (gleiche Struktur wie transcribe())
+        """
+        await self.initialize()  # Sicherstellen dass Model geladen
+
+        start = time.time()
+
+        segments_iter, info = self._model.transcribe(
+            filepath,
+            language=self._language,
+            beam_size=3,
+            vad_filter=True,
+            vad_parameters=dict(
+                min_silence_duration_ms=300,
+                speech_pad_ms=100,
+            ),
+            word_timestamps=False,
+        )
+
+        text_parts: list[str] = []
+        segments: list[dict] = []
+        for seg in segments_iter:
+            text_parts.append(seg.text.strip())
+            segments.append({"start": seg.start, "end": seg.end, "text": seg.text})
+
+        full_text = " ".join(text_parts).strip()
+        processing_ms = (time.time() - start) * 1000
+
+        result = TranscriptionResult(
+            text=full_text,
+            language=info.language or "de",
+            confidence=round(info.language_probability or 0.0, 2),
+            duration_sec=round(info.duration or 0.0, 2),
+            processing_ms=round(processing_ms, 1),
+            segments=segments,
+            contains_soma=self._detect_soma(full_text),
+        )
+
+        if full_text:
+            logger.info(
+                "stt_file_transcribed",
+                file=filepath[-30:],
+                text=full_text[:80],
+                ms=result.processing_ms,
+            )
+
+        return result

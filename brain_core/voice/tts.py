@@ -323,3 +323,71 @@ class TTSEngine:
         self._piper = None
         self._ready = False
         logger.info("tts_shutdown")
+
+    async def speak_to_file(self, text: str, output_path: Path) -> None:
+        """
+        Synthese direkt in eine WAV-Datei — KEIN Abspielen.
+        Genutzt vom Phone-Gateway: TTS-Audio wird in Datei geschrieben,
+        dann von Asterisk über ARI abgespielt.
+
+        Args:
+            text:        Auszusprechender Text
+            output_path: Ziel-Datei (wird überschrieben)
+        """
+        if not self._ready:
+            await self.initialize()
+
+        if self._piper:
+            await self._piper_to_file(text, output_path)
+        else:
+            await self._espeak_to_file(text, output_path)
+
+    async def _piper_to_file(self, text: str, output_path: Path) -> None:
+        """Piper-Synthese → WAV-Datei (ohne aplay)."""
+        import concurrent.futures
+        from piper.config import SynthesisConfig
+
+        syn_config = SynthesisConfig(
+            length_scale=1.0 / 1.0,  # Neutrale Geschwindigkeit
+            noise_scale=0.667,
+            noise_w_scale=0.8,
+            volume=1.0,
+        )
+
+        piper_instance = self._piper
+        loop = asyncio.get_event_loop()
+
+        def _synthesize() -> list:
+            chunks = []
+            for chunk in piper_instance.synthesize(text, syn_config=syn_config):
+                int16 = (chunk.audio_float_array * 32767).astype(np.int16)
+                chunks.append(int16)
+            return chunks
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            chunks = await loop.run_in_executor(ex, _synthesize)
+
+        if not chunks:
+            logger.warning("piper_to_file_empty", text=text[:40])
+            return
+
+        all_audio = np.concatenate(chunks)
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(output_path), "wb") as wav_out:
+            wav_out.setnchannels(1)
+            wav_out.setsampwidth(2)
+            wav_out.setframerate(self._piper.config.sample_rate)
+            wav_out.writeframes(all_audio.tobytes())
+
+        logger.debug("tts_to_file", path=str(output_path), text=text[:40])
+
+    async def _espeak_to_file(self, text: str, output_path: Path) -> None:
+        """espeak-ng → WAV-Datei (Fallback wenn Piper nicht verfügbar)."""
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        proc = await asyncio.create_subprocess_exec(
+            "espeak-ng", "-v", "de", "-w", str(output_path), text,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()

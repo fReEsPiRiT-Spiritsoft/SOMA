@@ -1,0 +1,83 @@
+; ================================================================
+; PJSIP Template — SOMA Phone Gateway
+; Generated at container startup by entrypoint.sh via envsubst
+;
+; EMPFOHLENER WEG: Sipgate Basic (kostenlos)
+; ================================================================
+;
+; EINRICHTUNG (einmalig, ~5 Minuten):
+;
+; 1. Kostenlosen Account anlegen: https://www.sipgate.de/basic
+;    → Du bekommst eine eigene deutsche Rufnummer (z.B. 030/...)
+;
+; 2. Im Sipgate-Portal → Einstellungen → SIP-Zugangsdaten notieren:
+;      SIP-ID:       z.B. 1234567e0   (das ist VODAFONE_SIP_USER)
+;      SIP-Passwort: dein Passwort    (das ist VODAFONE_SIP_PASS)
+;    Server ist immer: sipgate.de
+;
+; 3. In .env eintragen:
+;      VODAFONE_SIP_HOST=sipgate.de
+;      VODAFONE_SIP_USER=1234567e0
+;      VODAFONE_SIP_PASS=deinPasswort
+;
+; 4. Optional: Deine Vodafone-Festnetznummer auf die Sipgate-Nummer weiterleiten
+;    → Vodafone Station → Telefon-Einstellungen → Rufumleitung
+;    → Auf die Sipgate-Nummer umleiten (dann klingelt SOMA wenn jemand anruft)
+;
+; 5. docker compose build asterisk && docker compose up -d asterisk
+;
+; ================================================================
+
+; ── Transport ─────────────────────────────────────────────────────────
+[transport-udp]
+type = transport
+protocol = udp
+bind = 0.0.0.0:5060
+external_media_address = ${SOMA_LOCAL_IP}
+external_signaling_address = ${SOMA_LOCAL_IP}
+
+; ── Auth für Sipgate (oder anderen SIP-Anbieter) ──────────────────────
+[soma-auth]
+type = auth
+auth_type = userpass
+username = ${VODAFONE_SIP_USER}
+password = ${VODAFONE_SIP_PASS}
+
+; ── AOR — wo Asterisk erreichbar ist ─────────────────────────────────
+[soma-aor]
+type = aor
+max_contacts = 1
+
+; ── Endpoint — eingehende Anrufe vom SIP-Provider ────────────────────
+[soma-endpoint]
+type = endpoint
+transport = transport-udp
+context = from-phone
+disallow = all
+allow = ulaw
+allow = alaw
+allow = g722
+auth = soma-auth
+aors = soma-aor
+direct_media = no
+rtp_symmetric = yes
+force_rport = yes
+rewrite_contact = yes
+
+; ── Identify — Asterisk erkennt Anrufe vom Provider ──────────────────
+[soma-identify]
+type = identify
+endpoint = soma-endpoint
+match = ${VODAFONE_SIP_HOST}
+
+; ── Registration — Asterisk meldet sich beim SIP-Provider an ─────────
+[soma-registration]
+type = registration
+transport = transport-udp
+outbound_auth = soma-auth
+server_uri = sip:${VODAFONE_SIP_HOST}
+client_uri = sip:${VODAFONE_SIP_USER}@${VODAFONE_SIP_HOST}
+contact_user = ${VODAFONE_SIP_USER}
+retry_interval = 60
+max_retries = 0
+expiration = 3600

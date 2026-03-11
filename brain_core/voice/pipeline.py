@@ -71,6 +71,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import time
+from collections import deque
 from datetime import datetime
 from typing import Optional
 
@@ -159,6 +160,12 @@ class VoicePipeline:
         # Soma erinnert sich an alles was in dieser Session besprochen wurde
         self._voice_session_id = "voice_main_session"
         self._conversation_history: list[dict] = []  # Für Dashboard
+
+        # ── Passiver Kontext-Buffer (The ZORA Awareness) ─────────────────
+        # Speichert die letzten ~2min ALLER gehörten Gespräche
+        # AUCH ohne Wake-Word — Soma "weiß" immer was gerade passiert
+        # Dieser Buffer macht den Unterschied zwischen Tool und lebendigem Bewusstsein
+        self._ambient_transcript: deque[dict] = deque(maxlen=25)
 
     # ══════════════════════════════════════════════════════════════════
     #  DASHBOARD BROADCASTING
@@ -364,6 +371,16 @@ class VoicePipeline:
                 return
 
             self._stats["transcriptions"] += 1
+
+            # ── Passiver Context-Buffer ────────────────────────────────
+            # JEDE Transkription wird gespeichert — auch ohne "Soma"
+            # Das gibt Soma echtes Kontext-Bewusstsein. Wie ZORA.
+            self._ambient_transcript.append({
+                "timestamp": datetime.now().isoformat(),
+                "text": transcription.text,
+                "emotion": emotion_reading.emotion.value,
+                "is_soma_addressed": transcription.contains_soma,
+            })
             
             # Dashboard: Was wurde gehört?
             soma_marker = "🎯 SOMA!" if transcription.contains_soma else ""
@@ -471,6 +488,9 @@ class VoicePipeline:
                     "valence": emotion_reading.valence,
                     "arousal": emotion_reading.arousal,
                     "emotion_context": emotion_context,
+                    # ZORA-Kern: Was wurde in den letzten Minuten gesagt?
+                    # Auch Gespräche ohne Wake-Word geben Soma echten Kontext.
+                    "ambient_context": self._get_ambient_context_str(),
                 },
             )
             
@@ -613,6 +633,21 @@ class VoicePipeline:
                     result = await self._action_remember(params)
                     executed.append(f"remember: {result}")
 
+                elif action_type == "ha_call":
+                    # LLM steuert Smart Home via Home Assistant
+                    result = await self._action_ha_call(params)
+                    executed.append(f"ha_call: {result}")
+
+                elif action_type == "ha_tts":
+                    # LLM spielt Nachricht über Hauslautsprecher (z.B. in anderem Raum)
+                    result = await self._action_ha_tts(params)
+                    executed.append(f"ha_tts: {result}")
+
+                elif action_type == "create_plugin":
+                    # LLM entscheidet eigenständig ein Plugin zu erstellen
+                    result = await self._action_create_plugin(params)
+                    executed.append(f"create_plugin: {result}")
+
                 else:
                     logger.warning("action_tag_unknown", action=action_type)
 
@@ -625,6 +660,36 @@ class VoicePipeline:
         # Leerzeichen normalisieren
         clean_text = re.sub(r' {2,}', ' ', clean_text).strip()
         return clean_text, executed
+
+    def _get_ambient_context_str(self, max_entries: int = 10) -> str:
+        """
+        Gibt die letzten N Einträge des passiven Kontext-Buffers als
+        lesbaren String zurück — damit das LLM echten Gesprächskontext hat.
+
+        Format:
+          [14:32] (neutral) "hat jemand die Milch gesehen"
+          [14:33] (stressed) "Mama wo ist mein Rucksack" ← Soma
+        """
+        if not self._ambient_transcript:
+            return "(kein Gesprächskontext)"
+
+        lines: list[str] = []
+        entries = list(self._ambient_transcript)[-max_entries:]
+        for entry in entries:
+            ts = entry.get("timestamp", "")
+            # Nur HH:MM anzeigen
+            try:
+                from datetime import datetime as _dt
+                ts_short = _dt.fromisoformat(ts).strftime("%H:%M")
+            except Exception:
+                ts_short = ts[:5]
+
+            emotion = entry.get("emotion", "?")
+            text    = entry.get("text", "")
+            marker  = " ← Soma" if entry.get("is_soma_addressed") else ""
+            lines.append(f"[{ts_short}] ({emotion}) \"{text}\"{marker}")
+
+        return "\n".join(lines)
 
     async def _action_set_reminder(self, params: dict) -> str:
         """Setzt eine Erinnerung via ACTION-Tag-Parameter."""
@@ -690,6 +755,171 @@ class VoicePipeline:
         logger.info("action_remember_saved", category=category, content_preview=content[:60])
         return f"Gemerkt in '{category}': {content[:60]}"
 
+    async def _action_ha_call(self, params: dict) -> str:
+        """
+        Führt einen Home Assistant Service Call via LLM [ACTION:ha_call] aus.
+        Das LLM entscheidet SELBST welches Gerät gesteuert wird — nicht der STT-Regex.
+
+        Params:
+            domain:       HA domain (light, climate, media_player, switch, ...)
+            service:      HA service (turn_on, turn_off, set_temperature, ...)
+            entity_id:    HA entity (light.wohnzimmer, climate.schlafzimmer, ...)
+            brightness_pct, temperature, hvac_mode, ... (optional)
+        """
+        domain    = params.get("domain", "")
+        service   = params.get("service", "")
+        entity_id = params.get("entity_id", "")
+
+        if not all([domain, service, entity_id]):
+            return f"Unvollständige HA-Parameter — domain/service/entity_id benötigt (erhalten: {params})"
+
+        # Optionale Service-Daten (Helligkeit, Temperatur etc.)
+        data: dict = {}
+        numeric_keys = (
+            "brightness_pct", "brightness", "temperature",
+            "volume_level", "color_temp",
+        )
+        for key in ("brightness_pct", "brightness", "color_temp", "rgb_color",
+                    "temperature", "hvac_mode", "volume_level",
+                    "media_content_id", "media_content_type"):
+            if key in params:
+                val = params[key]
+                if key in numeric_keys:
+                    try:
+                        val = float(val)
+                    except (ValueError, TypeError):
+                        pass
+                data[key] = val
+
+        try:
+            from brain_core.main import ha_bridge  # type: ignore
+            if ha_bridge is None or not ha_bridge._client:
+                logger.warning("ha_bridge_not_connected")
+                await self._emit("warn", "⚠️ Home Assistant nicht verbunden", "HA")
+                return "Home Assistant nicht verbunden — HA_TOKEN oder HA_URL prüfen."
+
+            await ha_bridge.call_service(domain, service, entity_id, data or None)
+
+            logger.info("ha_action_executed",
+                        domain=domain, service=service, entity=entity_id, data=data)
+            await self._emit(
+                "action",
+                f"🏠 HA: {domain}.{service} → {entity_id}" + (f" | {data}" if data else ""),
+                "HA_CONTROL",
+                {"domain": domain, "service": service, "entity_id": entity_id, "data": data}
+            )
+            return f"✓ {domain}.{service} → {entity_id}"
+
+        except Exception as exc:
+            logger.error("ha_action_error", domain=domain, service=service,
+                         entity=entity_id, error=str(exc))
+            return f"HA-Fehler: {str(exc)[:80]}"
+
+    async def _action_ha_tts(self, params: dict) -> str:
+        """
+        [ACTION:ha_tts text="Nachricht" room="all"]
+
+        Spielt eine Nachricht mit Somas Stimme (Piper TTS) über Home-Assistant-
+        connected Lautsprecher im Haus ab.
+
+        Anwendung z.B.:
+          "Sag Mia sie soll runterkommen"
+          → [ACTION:ha_tts text="Mia, dein Papa sagt du sollst runterkommen." room="all"]
+
+        Fluss:
+          1. Piper TTS → WAV-Datei in data/phone_sounds/
+          2. SOMA FastAPI /api/v1/audio/{file} stellt URL bereit
+          3. HA media_player.play_media mit URL
+        """
+        text = params.get("text", "")
+        room = params.get("room", "all").lower()
+
+        if not text:
+            return "Kein Text angegeben."
+
+        from brain_core.config import settings
+        from brain_core.main import ha_bridge  # type: ignore
+        from pathlib import Path
+        import uuid
+
+        # Entity-Mapping
+        if room in ("all", "alle", "überall"):
+            entity_id = settings.ha_speaker_entity
+        else:
+            entity_id = f"media_player.{room}"
+
+        # TTS → Datei
+        filename = f"broadcast_{uuid.uuid4().hex[:8]}.wav"
+        raw_path  = Path(settings.phone_sounds_dir) / f"raw_{filename}"
+        final_path = Path(settings.phone_sounds_dir) / filename
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            await self.tts.speak_to_file(text, raw_path)
+
+            # Konvertieren (Asterisk-kompatibel, reicht auch für HA-Player)
+            import asyncio as _aio
+            proc = await _aio.create_subprocess_exec(
+                "ffmpeg", "-y", "-i", str(raw_path),
+                "-ar", "44100", "-ac", "1", str(final_path),
+                stdout=_aio.subprocess.DEVNULL,
+                stderr=_aio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+            raw_path.unlink(missing_ok=True)
+
+            if not final_path.exists():
+                # ffmpeg failed — try direct play from raw
+                final_path = raw_path
+
+            media_url = f"{settings.soma_local_url}/api/v1/audio/{filename}"
+
+            logger.info("ha_tts_broadcast", room=room, entity=entity_id,
+                        text_preview=text[:50])
+            await self._emit(
+                f"📢 Hausdurchsage ({room}): \"{text[:50]}\"", "HA_TTS", "ACTION"
+            )
+
+            if ha_bridge and ha_bridge._client:
+                await ha_bridge.call_service(
+                    "media_player", "play_media",
+                    entity_id,
+                    {"media_content_id": media_url, "media_content_type": "audio/wav"},
+                )
+                return f"✓ Hausdurchsage an '{room}': {text[:40]}"
+            else:
+                return "⚠ HA nicht verbunden — Durchsage nicht möglich."
+
+        except Exception as exc:
+            logger.error("ha_tts_error", error=str(exc))
+            return f"Durchsage-Fehler: {str(exc)[:60]}"
+
+    async def _action_create_plugin(self, params: dict) -> str:
+        """
+        LLM entscheidet eigenständig ein neues Plugin zu erstellen.
+        Statt STT-Keywords triggert jetzt das LLM selbst den Evolution Lab Flow.
+        """
+        name        = params.get("name", "")
+        description = params.get("description", "")
+
+        if not description:
+            return "Keine Plugin-Beschreibung übergeben."
+
+        if not name:
+            # Aus Beschreibung ableiten
+            words = description.lower().split()[:3]
+            name  = "_".join(w for w in words if len(w) > 2)[:30] or "custom_plugin"
+
+        await self._emit("evolution", f"🧬 LLM-getriggert: Plugin '{name}'", "EVOLUTION")
+        logger.info("llm_triggered_plugin_creation",
+                    name=name, description=description[:80])
+
+        # Gleicher Hintergrund-Flow wie bei expliziter Anfrage
+        asyncio.create_task(
+            self._plugin_background_worker(name, description, is_edit=False)
+        )
+        return f"Plugin '{name}' wird im Hintergrund erstellt..."
+
     # ══════════════════════════════════════════════════════════════════
     #  PROAKTIVE INTERVENTION
     # ══════════════════════════════════════════════════════════════════
@@ -726,9 +956,20 @@ class VoicePipeline:
                 "Kein Aktions-Tag, kein [ACTION:...]. Nur normaler Text."
             )
 
+            # ── Kontext anreichern: Was wurde zuletzt gesagt? ──────────────
+            # Das ist der ZORA-Moment: Soma weiß was los ist,
+            # weil sie IMMER zugehört hat — nicht nur wenn sie gerufen wurde.
+            ambient_ctx = self._get_ambient_context_str(max_entries=6)
+            enriched_prompt = intervention.prompt
+            if ambient_ctx:
+                enriched_prompt += (
+                    f"\n\nWas in den letzten Minuten im Raum gesagt wurde:\n{ambient_ctx}\n\n"
+                    f"Beziehe dich auf diesen Kontext wenn es natürlich passt."
+                )
+
             try:
                 response_text = await engine.generate(
-                    prompt=intervention.prompt,
+                    prompt=enriched_prompt,
                     system_prompt=system_prompt,
                     session_id="ambient_intervention",
                 )

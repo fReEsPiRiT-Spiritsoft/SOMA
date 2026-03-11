@@ -96,6 +96,30 @@ services:
         limits:
           memory: 20G
 
+  # ── Asterisk Phone Gateway ──────────────────────────────────────────
+  # Registers as SIP phone at Vodafone Station → receives landline calls
+  # Requires: VODAFONE_SIP_HOST, VODAFONE_SIP_USER, VODAFONE_SIP_PASS in .env
+  asterisk:
+    build: ./asterisk
+    container_name: soma-asterisk
+    restart: unless-stopped
+    # network_mode: host is required for SIP — avoids NAT translation issues
+    # that would break SIP registration and RTP audio streams.
+    network_mode: host
+    environment:
+      - VODAFONE_SIP_HOST=${VODAFONE_SIP_HOST:-192.168.0.1}
+      - VODAFONE_SIP_USER=${VODAFONE_SIP_USER:-soma}
+      - VODAFONE_SIP_PASS=${VODAFONE_SIP_PASS:-changeme_in_env}
+      - ASTERISK_ARI_PASS=${ASTERISK_ARI_PASS:-soma_ari_secret}
+    volumes:
+      - ./asterisk/config:/etc/asterisk           # Asterisk config files
+      - ./data/phone_recordings:/var/spool/asterisk/recording  # Caller recordings → STT
+      - ./data/phone_sounds:/var/lib/asterisk/sounds/soma      # SOMA TTS → ARI play
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
 volumes:
   soma_pgdata:
     driver: local

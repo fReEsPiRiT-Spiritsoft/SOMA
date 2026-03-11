@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 
 import structlog
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from brain_core.config import settings
@@ -35,9 +35,11 @@ from brain_core.audio_router import AudioRouter
 from brain_core.engines.heavy_llama import HeavyLlamaEngine
 from brain_core.engines.nano_intent import NanoIntentEngine
 from brain_core.engines.light_phi import LightPhiEngine
+from brain_core.discovery.ha_bridge import HomeAssistantBridge
+from brain_core.phone.phone_pipeline import PhonePipeline
 from shared.health_schemas import SystemMetrics, SystemHealthReport
 from evolution_lab.plugin_manager import PluginManager, PluginGenerator
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from pathlib import Path
 from pydantic import BaseModel as PydanticBaseModel
 
 logger = structlog.get_logger("soma.brain")
@@ -45,12 +47,12 @@ logger = structlog.get_logger("soma.brain")
 # ── Global Service Instances ─────────────────────────────────────────────
 
 queue_handler = QueueHandler()
-health_monitor = HealthMonitor(interval=5.0)
 presence_manager = PresenceManager()
 audio_router = AudioRouter()
 
-# Engines
+# Engines (vor HealthMonitor erstellen, damit heavy_engine übergeben werden kann)
 heavy_engine = HeavyLlamaEngine()
+health_monitor = HealthMonitor(interval=5.0, heavy_engine=heavy_engine)
 light_engine = LightPhiEngine()
 nano_engine = NanoIntentEngine()
 
@@ -66,6 +68,12 @@ voice_pipeline: VoicePipeline | None = None
 # Evolution Lab
 plugin_manager = PluginManager()
 plugin_generator: PluginGenerator | None = None
+
+# Home Assistant Bridge — LLM steuert Smart Home via [ACTION:ha_call]
+ha_bridge: HomeAssistantBridge = HomeAssistantBridge()
+
+# Phone Gateway (Asterisk ARI → Festnetz)
+phone_pipeline: PhonePipeline | None = None
 
 
 # ── Reminder Speak (Global für Import) ───────────────────────────────────
@@ -143,6 +151,13 @@ async def lifespan(app: FastAPI):
         logger.info("boot_phase", service="redis", status="connected")
     except Exception as exc:
         logger.error("boot_phase", service="redis", status="failed", error=str(exc))
+
+    # 2. Home Assistant Bridge verbinden (LLM steuert Smart Home)
+    try:
+        await ha_bridge.connect()
+        logger.info("boot_phase", service="ha_bridge", status="connected")
+    except Exception as exc:
+        logger.warning("boot_phase", service="ha_bridge", status="failed", error=str(exc))
 
     # 2. Health Monitor starten mit Broadcast-Callback
     async def broadcast_metrics(metrics: SystemMetrics):
@@ -242,20 +257,51 @@ async def lifespan(app: FastAPI):
         try:
             erinnerung_module = plugin_manager._plugins["erinnerung"].module
             if hasattr(erinnerung_module, "set_speak_callback"):
-                # Verwende die globale reminder_speak Funktion
-                erinnerung_module.set_speak_callback(reminder_speak)
-                logger.info("erinnerung_plugin_connected", status="TTS callback set")
+                # autonomous_speak bevorzugen (Dashboard-Emit + TTS),
+                # reminder_speak als Fallback wenn pipeline noch nicht ready
+                speak_cb = voice_pipeline.autonomous_speak if voice_pipeline else reminder_speak
+                erinnerung_module.set_speak_callback(speak_cb)
+                logger.info("erinnerung_plugin_connected",
+                            status="TTS callback set",
+                            callback=speak_cb.__name__)
         except Exception as e:
             logger.warning("erinnerung_plugin_connect_failed", error=str(e))
+
+    # ── Phone Gateway (Asterisk ARI) starten ─────────────────────────────
+    # Ermöglicht Soma über Festnetz-Nummer zu erreichen.
+    # Voraussetzung: Asterisk Container läuft (docker compose up asterisk)
+    global phone_pipeline
+    try:
+        if voice_pipeline:
+            phone_pipeline = PhonePipeline(
+                stt_engine=voice_pipeline.stt,
+                tts_engine=voice_pipeline.tts,
+                logic_router=logic_router,
+                ha_bridge=ha_bridge,
+                broadcast_callback=broadcast_thought,
+            )
+            await phone_pipeline.start()
+            logger.info("boot_phase", service="phone_gateway", status="starting 📞")
+            await broadcast_thought("info", "📞 Festnetz-Gateway startet (Asterisk ARI)", "PHONE")
+        else:
+            logger.warning("phone_gateway_skipped",
+                           reason="Voice Pipeline nicht verfügbar")
+    except Exception as exc:
+        logger.error("boot_phase", service="phone_gateway",
+                     status="failed", error=str(exc))
+        phone_pipeline = None
 
     yield  # ── App läuft ──
 
     # ── Shutdown ─────────────────────────────────────────────────────────
     logger.info("soma_shutting_down")
+    if phone_pipeline:
+        await phone_pipeline.stop()
     if voice_pipeline:
         await voice_pipeline.stop()
     await health_monitor.stop()
     await queue_handler.disconnect()
+    await ha_bridge.disconnect()
     logger.info("soma_offline")
 
 
@@ -292,6 +338,44 @@ async def ask_soma(request: SomaRequest):
             engine_used="boot",
         )
     return await logic_router.route(request)
+
+
+@app.get("/api/v1/audio/{filename}")
+async def serve_audio(filename: str):
+    """
+    Stellt TTS-Audio-Dateien bereit — genutzt vom Phone Gateway.
+    Home Assistant ruft diese URL ab wenn Soma eine Hausdurchsage spielt.
+
+    URL: http://<SOMA_IP>:8100/api/v1/audio/{filename}
+    Set SOMA_LOCAL_URL in .env to your machine's LAN IP.
+    """
+    from fastapi.responses import FileResponse
+
+    # Nur aus dem phone_sounds Verzeichnis (Sicherheit) 
+    safe_name = Path(filename).name  # Verhindert Path Traversal
+    filepath = Path(settings.phone_sounds_dir) / safe_name
+
+    if not filepath.exists():
+        raise HTTPException(status_code=404, detail=f"Audio file '{safe_name}' not found")
+
+    return FileResponse(
+        str(filepath),
+        media_type="audio/wav",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/api/v1/phone/status")
+async def get_phone_status():
+    """Phone Gateway Status."""
+    if not phone_pipeline:
+        return {"status": "not_started", "active_calls": 0}
+    return {
+        "status": "running" if phone_pipeline.is_running else "stopped",
+        "active_calls": phone_pipeline.active_calls,
+        "asterisk_host": settings.asterisk_host,
+        "asterisk_ari_port": settings.asterisk_ari_port,
+    }
 
 
 @app.get("/api/v1/health")
