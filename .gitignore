@@ -19,3 +19,5 @@ node_modules/
 
 # Umgebungsvariablen
 .env
+copilot-instructions.md
+.github
