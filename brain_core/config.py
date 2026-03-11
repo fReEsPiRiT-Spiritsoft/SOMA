@@ -38,7 +38,7 @@ class SomaConfig(BaseSettings):
     # ── Ollama ───────────────────────────────────────────────────────────
     ollama_host: str = "http://localhost"
     ollama_port: int = 11434
-    ollama_heavy_model: str = "llama3:8b"
+    ollama_heavy_model: str = "qwen2.5-coder:14b"
     ollama_light_model: str = "phi3:mini"
     ollama_num_parallel: int = 2
     ollama_max_loaded_models: int = 2

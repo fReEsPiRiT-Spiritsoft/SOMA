@@ -29,6 +29,24 @@
       "timestamp": "2026-03-10T16:38:51.582837",
       "source": "voice_conversation",
       "metadata": {}
+    },
+    {
+      "content": "ich bin echt stolz auf dich was wir schon geschafft haben",
+      "timestamp": "2026-03-11T11:08:41.704482",
+      "source": "voice_conversation",
+      "metadata": {}
+    },
+    {
+      "content": "du läufst jetzt auf einem anderen Modell und ich bin mir noch nicht ganz sicher, ob jetzt O-Lama 8B oder dir dieses 14B-Modell echt intelligenter ist, Was denkst du denn?",
+      "timestamp": "2026-03-11T11:22:57.018646",
+      "source": "voice_conversation",
+      "metadata": {}
+    },
+    {
+      "content": "Ja, so mal, das klingt richtig interessant, aber wie würde man denn dieses Erinnerungssystem oder sowas aufbauen, dass du als Assistent dich auch selbst an Dinge erinnern kannst? Vielleicht jetzt nicht unbedingt mit einem Zeitstempel, aber angesprochene Dinge und wer ich bin und andere Sachen, die du dir halt einfach merken kannst.",
+      "timestamp": "2026-03-11T11:25:37.394356",
+      "source": "voice_conversation",
+      "metadata": {}
     }
   ]
 }

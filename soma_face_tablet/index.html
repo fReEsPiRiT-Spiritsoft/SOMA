@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>SOMA</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
@@ -15,36 +16,116 @@
         }
         #status-bar {
             position: fixed;
-            bottom: 20px;
+            bottom: 18px;
             left: 50%;
             transform: translateX(-50%);
             z-index: 10;
-            color: rgba(0, 255, 136, 0.6);
+            color: rgba(0, 255, 136, 0.45);
             font-family: 'JetBrains Mono', monospace;
-            font-size: 12px;
+            font-size: 11px;
             text-align: center;
             pointer-events: none;
+            letter-spacing: 1px;
         }
         #soma-text {
             position: fixed;
-            bottom: 60px;
+            bottom: 55px;
             left: 50%;
             transform: translateX(-50%);
             z-index: 10;
-            color: rgba(0, 255, 136, 0.8);
+            color: rgba(0, 255, 136, 0.92);
             font-family: 'JetBrains Mono', monospace;
-            font-size: 14px;
-            text-align: center;
-            max-width: 80%;
-            pointer-events: none;
+            font-size: 13px;
+            line-height: 1.75;
+            text-align: left;
+            width: 88%;
+            max-width: 1080px;
+            max-height: 42vh;
+            padding: 16px 22px;
+            background: rgba(0, 8, 4, 0.80);
+            border: 1px solid rgba(0, 255, 136, 0.14);
+            border-radius: 10px;
+            backdrop-filter: blur(14px);
+            -webkit-backdrop-filter: blur(14px);
+            pointer-events: auto;
             opacity: 0;
             transition: opacity 0.5s ease;
+            overflow-y: auto;
+            word-break: break-word;
+            white-space: pre-wrap;
+            scrollbar-width: thin;
+            scrollbar-color: rgba(0,255,136,0.25) transparent;
         }
+        #soma-text::-webkit-scrollbar { width: 4px; }
+        #soma-text::-webkit-scrollbar-track { background: transparent; }
+        #soma-text::-webkit-scrollbar-thumb { background: rgba(0,255,136,0.25); border-radius: 2px; }
         #soma-text.visible { opacity: 1; }
+
+        /* Viz-Switch Button */
+        #viz-switch {
+            position: fixed;
+            top: 18px;
+            right: 18px;
+            z-index: 20;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(0,255,136,0.15);
+            border-radius: 10px;
+            color: rgba(0,255,136,0.5);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            padding: 8px 14px;
+            cursor: pointer;
+            transition: background 0.3s, color 0.3s, border-color 0.3s;
+            letter-spacing: 0.5px;
+            -webkit-tap-highlight-color: transparent;
+        }
+        #viz-switch:hover, #viz-switch:active {
+            background: rgba(0,255,136,0.08);
+            color: rgba(0,255,136,0.9);
+            border-color: rgba(0,255,136,0.4);
+        }
+
+        /* Mode indicator (top left, subtle) */
+        #mode-indicator {
+            position: fixed;
+            top: 18px;
+            left: 18px;
+            z-index: 10;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            pointer-events: none;
+        }
+        #mode-dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: #00ff88;
+            box-shadow: 0 0 8px rgba(0,255,136,0.5);
+            animation: modePulse 2.5s ease-in-out infinite;
+        }
+        #mode-label {
+            color: rgba(0,255,136,0.4);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+        }
+        @keyframes modePulse {
+            0%, 100% { opacity: 0.6; transform: scale(1); }
+            50% { opacity: 1; transform: scale(1.3); }
+        }
     </style>
 </head>
 <body>
     <canvas id="soma-canvas"></canvas>
+
+    <div id="mode-indicator">
+        <div id="mode-dot"></div>
+        <span id="mode-label">idle</span>
+    </div>
+
+    <button id="viz-switch" title="Visualisierung wechseln">◇ WAVE</button>
+
     <div id="soma-text"></div>
     <div id="status-bar">SOMA · Listening</div>
 
@@ -52,5 +133,56 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="shader_logic.js"></script>
     <script src="socket_client.js"></script>
+
+    <script>
+        // ── Viz Switch Button ───────────────────────────────────────
+        const vizBtn = document.getElementById('viz-switch');
+        const modeLabel = document.getElementById('mode-label');
+        const modeDot   = document.getElementById('mode-dot');
+
+        const vizLabels = { wave: '◇ WAVE', orb: '⬡ ORB' };
+
+        vizBtn.addEventListener('click', () => {
+            if (!window.SomaFace) return;
+            const newMode = window.SomaFace.toggleViz();
+            vizBtn.textContent = vizLabels[newMode] || '◇ WAVE';
+        });
+
+        // ── Mode indicator updater (check every 500ms) ─────────────
+        const modeColors = {
+            idle:      '#00ff88',
+            listening: '#00ddaa',
+            speaking:  '#00ff88',
+            thinking:  '#4477ff',
+            critical:  '#ff3344',
+        };
+
+        let lastMode = '';
+        setInterval(() => {
+            // Read mode from SomaFace internal state via a quick probe
+            // We peek at the mode dot color based on the last setMode call
+            if (!window.SomaFace) return;
+
+            // The socket_client calls setMode which we can track via
+            // a small interceptor:
+            const m = window._somaCurrentMode || 'idle';
+            if (m !== lastMode) {
+                lastMode = m;
+                modeLabel.textContent = m;
+                const c = modeColors[m] || '#00ff88';
+                modeDot.style.background = c;
+                modeDot.style.boxShadow = `0 0 8px ${c}80`;
+            }
+        }, 300);
+
+        // Intercept setMode to track current mode for the indicator
+        if (window.SomaFace) {
+            const origSetMode = window.SomaFace.setMode;
+            window.SomaFace.setMode = function(mode) {
+                window._somaCurrentMode = mode;
+                origSetMode.call(this, mode);
+            };
+        }
+    </script>
 </body>
 </html>

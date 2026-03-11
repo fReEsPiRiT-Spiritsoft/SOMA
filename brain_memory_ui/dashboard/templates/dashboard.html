@@ -532,6 +532,161 @@
             background: var(--text-muted);
         }
         
+        /* Plugin Management */
+        .plugins-panel {
+            grid-column: 1 / -1;
+        }
+
+        .plugins-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 15px;
+        }
+
+        .plugin-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            transition: border-color 0.2s;
+        }
+
+        .plugin-card.disabled { opacity: 0.5; border-color: #222230; }
+        .plugin-card:hover { border-color: var(--accent-dim); }
+
+        .plugin-card-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .plugin-icon { font-size: 1.5rem; line-height: 1; }
+
+        .plugin-name {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .plugin-status-badge {
+            font-size: 0.6rem;
+            padding: 2px 7px;
+            border-radius: 8px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+
+        .plugin-status-badge.active {
+            background: rgba(0, 255, 136, 0.15);
+            color: var(--accent);
+            border: 1px solid var(--accent-dim);
+        }
+
+        .plugin-status-badge.disabled {
+            background: rgba(80, 80, 100, 0.3);
+            color: var(--text-muted);
+            border: 1px solid #333344;
+        }
+
+        .plugin-description {
+            font-size: 0.78rem;
+            color: var(--text-secondary);
+            line-height: 1.5;
+            min-height: 36px;
+        }
+
+        .plugin-meta {
+            display: flex;
+            gap: 12px;
+            font-size: 0.68rem;
+            color: var(--text-muted);
+        }
+
+        .plugin-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 4px;
+        }
+
+        .btn-plugin {
+            flex: 1;
+            padding: 7px 10px;
+            border-radius: 7px;
+            border: 1px solid var(--border);
+            background: var(--bg-card);
+            color: var(--text-primary);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            cursor: pointer;
+            transition: background 0.15s, border-color 0.15s, color 0.15s;
+        }
+
+        .btn-plugin:hover { border-color: var(--accent-dim); color: var(--accent); }
+        .btn-plugin.btn-toggle-on  { border-color: var(--accent-dim); color: var(--accent); }
+        .btn-plugin.btn-toggle-off { border-color: #555; color: var(--text-muted); }
+
+        .btn-plugin.btn-delete {
+            flex: 0 0 auto;
+            color: var(--danger);
+            border-color: #55222a;
+        }
+        .btn-plugin.btn-delete:hover { background: rgba(255,68,85,0.12); border-color: var(--danger); }
+
+        .plugins-empty {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            padding: 20px;
+            text-align: center;
+        }
+
+        /* Delete Confirm Dialog */
+        .confirm-overlay {
+            position: fixed; inset: 0;
+            background: rgba(0,0,0,0.75);
+            display: flex; align-items: center; justify-content: center;
+            z-index: 500;
+            opacity: 0; pointer-events: none;
+            transition: opacity 0.2s;
+        }
+        .confirm-overlay.show { opacity: 1; pointer-events: all; }
+        .confirm-box {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 28px 32px;
+            max-width: 380px;
+            width: 90%;
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .confirm-title { font-size: 1rem; color: var(--text-primary); }
+        .confirm-sub   { font-size: 0.8rem; color: var(--text-muted); }
+        .confirm-actions { display: flex; gap: 12px; justify-content: center; }
+        .btn-confirm-yes {
+            padding: 9px 22px; border-radius: 8px;
+            background: rgba(255,68,85,0.15); border: 1px solid var(--danger);
+            color: var(--danger); font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem; cursor: pointer;
+        }
+        .btn-confirm-yes:hover { background: rgba(255,68,85,0.3); }
+        .btn-confirm-no {
+            padding: 9px 22px; border-radius: 8px;
+            background: var(--bg-secondary); border: 1px solid var(--border);
+            color: var(--text-primary); font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem; cursor: pointer;
+        }
+        .btn-confirm-no:hover { border-color: var(--accent-dim); color: var(--accent); }
+
         /* Responsive */
         @media (max-width: 1400px) {
             .dashboard {
@@ -754,7 +909,31 @@
             </div>
             <div class="conversation-list" id="conversationList"></div>
         </div>
+
+        <!-- Plugin Management -->
+        <div class="card plugins-panel">
+            <div class="card-header">
+                <span class="card-title">🧩 Evolution Lab – Plugins</span>
+                <span class="card-badge" id="pluginCount">0 geladen</span>
+            </div>
+            <div class="plugins-grid" id="pluginsGrid">
+                <div class="plugins-empty">Lade Plugins…</div>
+            </div>
+        </div>
     </main>
+
+    <!-- Delete Confirmation Dialog -->
+    <div class="confirm-overlay" id="confirmOverlay">
+        <div class="confirm-box">
+            <div style="font-size:2rem;">🗑️</div>
+            <div class="confirm-title">Plugin löschen?</div>
+            <div class="confirm-sub" id="confirmSubText">Diese Aktion kann nicht rückgängig gemacht werden.</div>
+            <div class="confirm-actions">
+                <button class="btn-confirm-no" onclick="closeConfirm()">Abbrechen</button>
+                <button class="btn-confirm-yes" id="confirmYesBtn">Löschen</button>
+            </div>
+        </div>
+    </div>
 
     <script>
         // ═══════════════════════════════════════════════════════════════
@@ -1143,6 +1322,130 @@
         window.onerror = (msg, url, line) => {
             addThought('error', `JS Error: ${msg}`, 'ERROR');
         };
+
+        // ─── Plugin Management ────────────────────────────────────────
+
+        // Relative URL → gleicher Django-Server
+        const DJANGO_API = '/api/dashboard';
+
+        let _pluginDeleteTarget = null;
+
+        function pluginIcon(name) {
+            const icons = {
+                erinnerung: '⏰', datum_uhrzeit: '🕐', wetter: '🌤️',
+                musik: '🎵', licht: '💡', timer: '⏱️',
+                shopping: '🛒', news: '📰', kalender: '📅',
+            };
+            return icons[name] || '🔌';
+        }
+
+        async function fetchPlugins() {
+            try {
+                const res = await fetch(`${DJANGO_API}/plugins/`);
+                const data = await res.json();
+                renderPlugins(data.plugins || []);
+            } catch (e) {
+                document.getElementById('pluginsGrid').innerHTML =
+                    `<div class="plugins-empty">⚠️ Plugins konnten nicht geladen werden</div>`;
+            }
+        }
+
+        function renderPlugins(plugins) {
+            const grid = document.getElementById('pluginsGrid');
+            const active = plugins.filter(p => p.enabled).length;
+            document.getElementById('pluginCount').textContent =
+                `${active} / ${plugins.length} aktiv`;
+
+            if (plugins.length === 0) {
+                grid.innerHTML = `<div class="plugins-empty">Keine Plugins installiert</div>`;
+                return;
+            }
+
+            grid.innerHTML = plugins.map(p => {
+                const icon = pluginIcon(p.name);
+                const statusClass = p.enabled ? 'active' : 'disabled';
+                const statusLabel = p.enabled ? 'aktiv' : 'deaktiviert';
+                const cardClass = p.enabled ? '' : 'disabled';
+                const toggleLabel = p.enabled ? '⏸ Deaktivieren' : '▶ Aktivieren';
+                const toggleClass = p.enabled ? 'btn-toggle-on' : 'btn-toggle-off';
+                return `
+                <div class="plugin-card ${cardClass}" id="plugin-card-${p.name}">
+                    <div class="plugin-card-header">
+                        <span class="plugin-icon">${icon}</span>
+                        <span class="plugin-name" title="${p.name}">${p.name}</span>
+                        <span class="plugin-status-badge ${statusClass}">${statusLabel}</span>
+                    </div>
+                    <div class="plugin-description">${escapeHtml(p.description || '—')}</div>
+                    <div class="plugin-meta">
+                        <span>v${escapeHtml(p.version)}</span>
+                        <span>·</span>
+                        <span>${escapeHtml(p.author)}</span>
+                    </div>
+                    <div class="plugin-actions">
+                        <button class="btn-plugin ${toggleClass}"
+                            onclick="togglePlugin('${p.name}')">${toggleLabel}</button>
+                        <button class="btn-plugin btn-delete"
+                            onclick="confirmDeletePlugin('${p.name}')">🗑</button>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        async function togglePlugin(name) {
+            try {
+                const res = await fetch(`${DJANGO_API}/plugins/${name}/toggle/`, { method: 'POST' });
+                const data = await res.json();
+                if (data.error) {
+                    addThought('error', `Plugin-Toggle Fehler: ${data.error}`, 'PLUGIN');
+                } else {
+                    const msg = data.status === 'enabled'
+                        ? `✅ Plugin '${name}' aktiviert`
+                        : `⏸ Plugin '${name}' deaktiviert`;
+                    addThought('info', msg, 'PLUGIN');
+                    fetchPlugins();
+                }
+            } catch (e) {
+                addThought('error', `Plugin-Toggle Netzwerkfehler: ${e.message}`, 'PLUGIN');
+            }
+        }
+
+        function confirmDeletePlugin(name) {
+            _pluginDeleteTarget = name;
+            document.getElementById('confirmSubText').textContent =
+                `Plugin „${name}" wird dauerhaft gelöscht.`;
+            document.getElementById('confirmYesBtn').onclick = () => deletePlugin(name);
+            document.getElementById('confirmOverlay').classList.add('show');
+        }
+
+        function closeConfirm() {
+            _pluginDeleteTarget = null;
+            document.getElementById('confirmOverlay').classList.remove('show');
+        }
+
+        async function deletePlugin(name) {
+            closeConfirm();
+            try {
+                const res = await fetch(`${DJANGO_API}/plugins/${name}/delete/`, { method: 'POST' });
+                const data = await res.json();
+                if (data.error) {
+                    addThought('error', `Plugin-Delete Fehler: ${data.error}`, 'PLUGIN');
+                } else {
+                    addThought('warn', `🗑 Plugin '${name}' gelöscht`, 'PLUGIN');
+                    fetchPlugins();
+                }
+            } catch (e) {
+                addThought('error', `Plugin-Delete Netzwerkfehler: ${e.message}`, 'PLUGIN');
+            }
+        }
+
+        // Overlay-Click schließt Dialog
+        document.getElementById('confirmOverlay').addEventListener('click', function(e) {
+            if (e.target === this) closeConfirm();
+        });
+
+        // Plugins beim Start und alle 15s neu laden
+        fetchPlugins();
+        setInterval(fetchPlugins, 15000);
     </script>
 <script>
     (function() {

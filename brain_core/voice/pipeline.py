@@ -526,7 +526,12 @@ class VoicePipeline:
             )
 
             # Antwort aussprechen (bereinigt, ohne Tags)
-            await self._emit("tts", f"🔊 Spreche: \"{clean_response[:50]}...\"" if len(clean_response) > 50 else f"🔊 Spreche: \"{clean_response}\"", "TTS")
+            await self._emit(
+                "tts",
+                f"🔊 Spreche: \"{clean_response[:60]}...\"" if len(clean_response) > 60 else f"🔊 Spreche: \"{clean_response}\"",
+                "TTS",
+                {"response": clean_response},
+            )
             speech_emotion = self._select_speech_emotion(emotion_reading)
             await self.tts.speak(clean_response, speech_emotion)
 

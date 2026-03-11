@@ -3,9 +3,12 @@ SOMA-AI Plugin Manager
 ========================
 Dynamischer Loader für KI-generierte Plugins.
 Hot-Reloading via importlib + Sandbox-Isolation.
+Auto-Dependency-Installation via pip.
 
 Datenfluss:
   SOMA braucht neuen Skill ──► LLM generiert Python-Plugin
+       │                              │
+       │                    __dependencies__ lesen → pip install
        │                              │
        │                    evolution_lab/sandbox_env/ (Test)
        │                              │
@@ -23,6 +26,8 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import os
+import re
+import subprocess
 import sys
 import asyncio
 from pathlib import Path
@@ -35,6 +40,9 @@ logger = structlog.get_logger("soma.evolution")
 
 PLUGINS_DIR = Path(__file__).parent / "generated_plugins"
 SANDBOX_DIR = Path(__file__).parent / "sandbox_env"
+
+# Maximale Retry-Versuche wenn der LLM-generierte Code fehlschlägt
+MAX_GENERATION_RETRIES = 2
 
 
 @dataclass
@@ -196,7 +204,12 @@ class PluginManager:
 class PluginGenerator:
     """
     Generiert Plugin-Code via LLM und testet in Sandbox.
-    Vollständiger Flow: Beschreibung → LLM → Syntax-Test → Sandbox → Install → Load
+    Vollständiger Flow: Beschreibung → LLM → Deps installieren → Sandbox → Install → Load
+
+    NEU:
+      - Liest __dependencies__ = ["package1", "package2"] aus generiertem Code
+      - Installiert fehlende Packages via pip automatisch
+      - Bei Fehler: LLM bekommt Fehlermeldung und darf Code korrigieren (max 2 Retries)
     """
 
     def __init__(self, manager: PluginManager, heavy_engine=None):
@@ -214,6 +227,87 @@ class PluginGenerator:
             return prompt_path.read_text(encoding="utf-8")
         return "Schreib ein Python-Plugin gemäß SOMA-Plugin-Standard."
 
+    # ── Dependency Management ────────────────────────────────────────────
+
+    @staticmethod
+    def _extract_dependencies(code: str) -> list[str]:
+        """Liest __dependencies__ = [...] aus dem Plugin-Code."""
+        match = re.search(
+            r'__dependencies__\s*=\s*\[([^\]]*)\]',
+            code,
+        )
+        if not match:
+            return []
+        raw = match.group(1)
+        # Parse die einzelnen Strings: "pkg", 'pkg', 'pkg>=1.0'
+        deps = re.findall(r'''["']([^"']+)["']''', raw)
+        return [d.strip() for d in deps if d.strip()]
+
+    @staticmethod
+    async def _install_dependencies(
+        deps: list[str],
+        emit=None,
+    ) -> tuple[bool, list[str], list[str]]:
+        """
+        Installiert fehlende Packages via pip.
+
+        Returns: (all_ok, installed_list, failed_list)
+        """
+        if not deps:
+            return True, [], []
+
+        installed = []
+        failed = []
+
+        for dep in deps:
+            # Package-Name ohne Version-Constraint für den Import-Check
+            pkg_name = re.split(r'[><=!~]', dep)[0].strip()
+
+            # Prüfen ob schon importierbar
+            try:
+                importlib.import_module(pkg_name.replace("-", "_"))
+                if emit:
+                    await emit(f"  📦 {pkg_name} — bereits vorhanden")
+                installed.append(dep)
+                continue
+            except ImportError:
+                pass
+
+            # pip install ausführen
+            if emit:
+                await emit(f"  📥 Installiere: {dep} ...")
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    sys.executable, "-m", "pip", "install", "--quiet", dep,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+
+                if proc.returncode == 0:
+                    installed.append(dep)
+                    if emit:
+                        await emit(f"  ✅ {dep} installiert")
+                    logger.info("dep_installed", package=dep)
+                else:
+                    err = stderr.decode().strip().split('\n')[-1] if stderr else "unbekannt"
+                    failed.append(dep)
+                    if emit:
+                        await emit(f"  ❌ {dep} fehlgeschlagen: {err}")
+                    logger.warning("dep_install_failed", package=dep, error=err)
+            except asyncio.TimeoutError:
+                failed.append(dep)
+                if emit:
+                    await emit(f"  ⏰ {dep} — Timeout bei Installation")
+            except Exception as exc:
+                failed.append(dep)
+                if emit:
+                    await emit(f"  ❌ {dep} — Fehler: {exc}")
+
+        return len(failed) == 0, installed, failed
+
+    # ── Main Generation Flow ─────────────────────────────────────────────
+
     async def generate_from_description(
         self,
         name: str,
@@ -221,12 +315,8 @@ class PluginGenerator:
         broadcast_callback=None,
     ) -> tuple[bool, str, str]:
         """
-        Kompletter Flow: Beschreibung → LLM → Test → Install → Load
-
-        Args:
-            name: Plugin-Name (snake_case, z.B. 'wetter_ansage')
-            description: Was das Plugin tun soll
-            broadcast_callback: Für Dashboard Live-Updates
+        Kompletter Flow: Beschreibung → LLM → Deps → Test → Install → Load
+        Bei Fehler: LLM bekommt Feedback und darf korrigieren (max Retries).
 
         Returns: (success, message, generated_code)
         """
@@ -248,12 +338,10 @@ class PluginGenerator:
             "error": None,
         }
 
-        # ── 1. LLM generiert den Code ────────────────────────────────────
         if not self._heavy_engine:
             return False, "Kein LLM verfügbar (heavy_engine fehlt)", ""
 
-        await _emit(f"🧠 LLM generiert Code für: {description}")
-
+        # ── LLM generiert den Code (mit Retry-Loop) ──────────────────────
         system_prompt = self._prompt_template
         user_prompt = (
             f"Schreibe ein SOMA-Plugin mit dem Namen '{name}'.\n"
@@ -265,37 +353,84 @@ class PluginGenerator:
             f"Beginne direkt mit dem Docstring oder Import."
         )
 
-        try:
-            raw_code = await self._heavy_engine.generate(
-                prompt=user_prompt,
-                system_prompt=system_prompt,
-                session_id=f"evolution_{name}",
-            )
-        except Exception as exc:
-            msg = f"LLM-Fehler: {exc}"
-            await _emit(f"❌ {msg}")
-            self.last_generation["status"] = "failed"
-            self.last_generation["error"] = msg
-            return False, msg, ""
+        last_error = ""
+        code = ""
 
-        # Code aus Markdown-Blöcken extrahieren falls vorhanden
-        code = self._extract_code(raw_code)
-        self.last_generation["code"] = code
-        await _emit(f"✅ Code generiert ({len(code)} Zeichen)")
+        for attempt in range(1, MAX_GENERATION_RETRIES + 2):  # 1 initial + N retries
+            if attempt == 1:
+                await _emit(f"🧠 LLM generiert Code für: {description}")
+                prompt = user_prompt
+            else:
+                await _emit(f"🔄 Retry {attempt - 1}/{MAX_GENERATION_RETRIES} — LLM korrigiert den Code...")
+                prompt = (
+                    f"Der vorherige Code für das Plugin '{name}' hat einen Fehler:\n\n"
+                    f"FEHLER: {last_error}\n\n"
+                    f"Ursprüngliche Aufgabe: {description}\n\n"
+                    f"Bitte korrigiere den Code. Beachte:\n"
+                    f"- Wenn ein Package nicht existiert, nutze eine Alternative oder "
+                    f"Standard-Bibliothek (subprocess, os, asyncio.create_subprocess_exec).\n"
+                    f"- Deklariere alle externen Abhängigkeiten in __dependencies__ = [...].\n"
+                    f"- Antworte NUR mit dem korrigierten Python-Code, kein Markdown."
+                )
 
-        # ── 2. Syntax-Test ───────────────────────────────────────────────
-        await _emit("🔍 Syntax-Check...")
-        success, message = await self.test_and_install(name, code)
+            try:
+                raw_code = await self._heavy_engine.generate(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    session_id=f"evolution_{name}",
+                )
+            except Exception as exc:
+                msg = f"LLM-Fehler: {exc}"
+                await _emit(f"❌ {msg}")
+                self.last_generation["status"] = "failed"
+                self.last_generation["error"] = msg
+                return False, msg, ""
 
-        if success:
-            self.last_generation["status"] = "installed"
-            await _emit(f"🚀 Plugin '{name}' installiert und geladen!", "EVOLUTION_OK")
-        else:
-            self.last_generation["status"] = "failed"
-            self.last_generation["error"] = message
-            await _emit(f"❌ Fehler: {message}")
+            code = self._extract_code(raw_code)
+            self.last_generation["code"] = code
+            await _emit(f"✅ Code generiert ({len(code)} Zeichen)")
 
-        return success, message, code
+            # ── Dependencies installieren ────────────────────────────────
+            deps = self._extract_dependencies(code)
+            if deps:
+                await _emit(f"📦 Dependencies erkannt: {', '.join(deps)}")
+                all_ok, installed, failed = await self._install_dependencies(deps, emit=_emit)
+                if not all_ok:
+                    last_error = (
+                        f"Folgende Packages konnten NICHT installiert werden: "
+                        f"{', '.join(failed)}. "
+                        f"Diese Packages existieren vermutlich nicht auf PyPI. "
+                        f"Nutze Alternativen oder die Python Standard-Bibliothek."
+                    )
+                    await _emit(f"⚠️ {last_error}")
+                    if attempt <= MAX_GENERATION_RETRIES:
+                        continue  # LLM nochmal ran lassen
+                    else:
+                        self.last_generation["status"] = "failed"
+                        self.last_generation["error"] = last_error
+                        return False, last_error, code
+
+            # ── Syntax + Sandbox Test ────────────────────────────────────
+            await _emit("🔍 Syntax-Check & Sandbox-Test...")
+            success, message = await self.test_and_install(name, code)
+
+            if success:
+                self.last_generation["status"] = "installed"
+                await _emit(f"🚀 Plugin '{name}' installiert und geladen!", "EVOLUTION_OK")
+                return True, message, code
+            else:
+                last_error = message
+                await _emit(f"⚠️ Test fehlgeschlagen: {message}")
+                if attempt <= MAX_GENERATION_RETRIES:
+                    continue  # Nächster Versuch
+                else:
+                    self.last_generation["status"] = "failed"
+                    self.last_generation["error"] = message
+                    await _emit(f"❌ Plugin fehlgeschlagen nach {MAX_GENERATION_RETRIES} Retries: {message}")
+                    return False, message, code
+
+        # Sollte nicht erreicht werden, aber sicherheitshalber
+        return False, last_error, code
 
     async def test_and_install(
         self,
@@ -324,15 +459,28 @@ class PluginGenerator:
             logger.warning("plugin_syntax_error", name=name, error=msg)
             return False, msg
 
-        # 3. Import-Test in isoliertem Namespace
+        # 3. Import-Test in isoliertem Sub-Prozess (sicherer als exec im Hauptprozess)
         try:
-            spec = importlib.util.spec_from_file_location(f"_sandbox_{name}", str(sandbox_path))
-            if spec and spec.loader:
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-                del module
-                # Auch aus sys.modules entfernen
-                sys.modules.pop(f"_sandbox_{name}", None)
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-c",
+                f"import importlib.util, sys; "
+                f"spec = importlib.util.spec_from_file_location('_test', '{sandbox_path}'); "
+                f"mod = importlib.util.module_from_spec(spec); "
+                f"spec.loader.exec_module(mod); "
+                f"print('OK')",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+
+            if proc.returncode != 0:
+                err = stderr.decode().strip().split('\n')[-1] if stderr else "Unbekannter Fehler"
+                msg = f"Runtime-Fehler: {err}"
+                logger.warning("plugin_runtime_error", name=name, error=msg)
+                return False, msg
+
+        except asyncio.TimeoutError:
+            return False, "Sandbox-Test Timeout (>30s)"
         except Exception as exc:
             msg = f"Runtime-Fehler: {exc}"
             logger.warning("plugin_runtime_error", name=name, error=msg)
@@ -352,8 +500,6 @@ class PluginGenerator:
     @staticmethod
     def _extract_code(raw: str) -> str:
         """Extrahiert reinen Python-Code aus LLM-Antwort (entfernt Markdown etc.)."""
-        # ```python ... ``` Blöcke extrahieren
-        import re
         match = re.search(r"```(?:python)?\n?(.*?)```", raw, re.DOTALL)
         if match:
             return match.group(1).strip()
