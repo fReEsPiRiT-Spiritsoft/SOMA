@@ -1,11 +1,14 @@
 """
-Memory Orchestrator — Koordiniert alle 3 Memory-Layer.
-Stellt den Kontext-Block für den LLM-Prompt zusammen.
+Memory Orchestrator — Das Bewusstsein hinter dem Gedaechtnis.
+==============================================================
+Koordiniert alle Memory-Layer + Salience + Diary.
+Stellt den Kontext-Block fuer den LLM-Prompt zusammen.
 
 Garantien:
   - recall_context() < 200ms
-  - store_interaction() fire-and-forget
-  - consolidate() nur im Idle
+  - store_interaction() fire-and-forget (aber Salience-gefilter!)
+  - Diary-Eintraege bei hoher Salience
+  - Consolidation nur im Idle (via BackgroundConsolidator)
 """
 
 from __future__ import annotations
@@ -19,26 +22,41 @@ from typing import Optional
 from brain_core.memory.working_memory import WorkingMemory
 from brain_core.memory.episodic_memory import EpisodicMemory
 from brain_core.memory.semantic_memory import SemanticMemory
+from brain_core.memory.salience_filter import SalienceFilter, SalienceScore
+from brain_core.memory.diary_writer import DiaryWriter
 
 logger = logging.getLogger("soma.memory.orchestrator")
 
 
 class MemoryOrchestrator:
+    """
+    Koordiniert L1/L2/L3 + Salience + Diary.
+    SSOT fuer alle Gedaechtnis-Operationen.
+    """
 
     def __init__(self):
         self.working = WorkingMemory(max_turns=10)
         self.episodic = EpisodicMemory()
         self.semantic = SemanticMemory()
+        self.salience = SalienceFilter()
+        self.diary = DiaryWriter()
         self._initialized = False
         self._consolidation_running = False
+        self._store_count: int = 0
+        self._filtered_count: int = 0
+        self._diary_count: int = 0
 
     async def initialize(self):
         if self._initialized:
             return
         await self.episodic.initialize()
         await self.semantic.initialize()
+        await self.diary.initialize()
         self._initialized = True
-        logger.info("Memory Orchestrator online (3-layer hierarchy)")
+        logger.info(
+            "memory_orchestrator_online",
+            layers="L1+L2+L3+Salience+Diary",
+        )
 
     # ══════════════════════════════════════════════════════════════════
     #  CONTEXT ASSEMBLY — VOR dem LLM-Call
@@ -50,11 +68,11 @@ class MemoryOrchestrator:
         emotion: str = "neutral",
     ) -> str:
         """
-        Baut den kompletten Gedächtnis-Block zusammen.
-        L2 + L3 werden parallel abgerufen.
+        Baut den kompletten Gedaechtnis-Block zusammen.
+        L2 + L3 + Diary werden parallel abgerufen.
 
         Returns:
-            Formatierter String → direkt in den System-Prompt.
+            Formatierter String -> direkt in den System-Prompt.
         """
         if not self._initialized:
             await self.initialize()
@@ -65,15 +83,16 @@ class MemoryOrchestrator:
             max_tokens_estimate=800,
         )
 
-        # L2 + L3 — parallel (~50ms)
+        # L2 + L3 + Diary — parallel (~50ms)
         ep_task = self.episodic.recall(user_text, top_k=4)
         fact_task = self.semantic.recall_facts(user_text, top_k=6)
         personality_task = self.semantic.get_personality_snapshot(
             session["user"]
         )
+        diary_task = self.diary.get_diary_summary_for_prompt(max_entries=3)
 
-        episodes, facts, personality = await asyncio.gather(
-            ep_task, fact_task, personality_task,
+        episodes, facts, personality, diary_block = await asyncio.gather(
+            ep_task, fact_task, personality_task, diary_task,
             return_exceptions=True,
         )
 
@@ -85,6 +104,8 @@ class MemoryOrchestrator:
             facts = []
         if isinstance(personality, BaseException):
             personality = ""
+        if isinstance(diary_block, BaseException):
+            diary_block = ""
 
         # ── Block zusammenbauen ──────────────────────────────────
         now = datetime.now()
@@ -101,7 +122,7 @@ class MemoryOrchestrator:
         if emotion and emotion != "neutral":
             blocks.append(f"[Emotion] Patrick wirkt gerade: {emotion}")
 
-        # Persönlichkeitsprofil (L3)
+        # Persoenlichkeitsprofil (L3)
         if personality and isinstance(personality, str) and len(personality) > 10:
             blocks.append(f"[Langzeit-Wissen]\n{personality}")
 
@@ -117,7 +138,7 @@ class MemoryOrchestrator:
                     "[Relevante Fakten]\n" + "\n".join(fact_lines[:5])
                 )
 
-        # Ähnliche vergangene Gespräche (L2)
+        # Aehnliche vergangene Gespraeche (L2)
         if episodes:
             ep_lines = []
             for ep in episodes:
@@ -133,22 +154,26 @@ class MemoryOrchestrator:
                 ep_lines.append(
                     f"- [{ago}, Stimmung: {ep.emotion}] "
                     f"Patrick: \"{ep.user_text[:80]}\" "
-                    f"→ SOMA: \"{ep.soma_text[:80]}\""
+                    f"-> SOMA: \"{ep.soma_text[:80]}\""
                 )
             if ep_lines:
                 blocks.append(
-                    "[Erinnerungen an ähnliche Gespräche]\n"
+                    "[Erinnerungen an aehnliche Gespraeche]\n"
                     + "\n".join(ep_lines[:4])
                 )
 
-        # Aktuelles Gespräch (L1)
+        # Tagebuch-Eintraege (Selbstreflexion)
+        if diary_block and isinstance(diary_block, str) and len(diary_block) > 10:
+            blocks.append(diary_block)
+
+        # Aktuelles Gespraech (L1)
         if conversation:
-            blocks.append(f"[Aktuelles Gespräch]\n{conversation}")
+            blocks.append(f"[Aktuelles Gespraech]\n{conversation}")
 
         return "\n\n".join(blocks)
 
     # ══════════════════════════════════════════════════════════════════
-    #  STORE — fire-and-forget nach dem LLM-Call
+    #  STORE — fire-and-forget nach dem LLM-Call (mit Salience!)
     # ══════════════════════════════════════════════════════════════════
 
     async def store_interaction(
@@ -156,53 +181,150 @@ class MemoryOrchestrator:
         user_text: str,
         soma_text: str,
         emotion: str = "neutral",
+        arousal: float = 0.0,
+        valence: float = 0.0,
+        stress: float = 0.0,
         intent: str = "",
         topic: str = "",
+        event_type: str = "conversation",
     ):
         """
-        L1 sofort, L2 async (fire-and-forget). Blockiert nie.
+        L1 IMMER sofort.
+        L2 nur wenn Salience > Threshold.
+        Diary nur wenn Salience HOCH.
+        Blockiert nie.
         """
-        # L1: sofort
+        # L1: IMMER — Working Memory muss alles haben
         self.working.add_user_turn(user_text, emotion=emotion, intent=intent)
         self.working.add_soma_turn(soma_text)
 
-        # Importance-Heuristik
-        importance = 0.5
-        if emotion not in ("neutral", ""):
-            importance += 0.2
-        if len(user_text) > 100:
-            importance += 0.1
-        if "?" in user_text:
-            importance += 0.1
+        # Salience bewerten
+        salience = self.salience.evaluate(
+            user_text=user_text,
+            soma_text=soma_text,
+            emotion=emotion,
+            arousal=arousal,
+            valence=valence,
+            stress=stress,
+        )
 
-        # L2: async
+        if not salience.is_salient:
+            self._filtered_count += 1
+            logger.debug(
+                "memory_filtered_out",
+                score=salience.total,
+                reason=salience.reason,
+                text=user_text[:40],
+            )
+            return
+
+        # Importance aus Salience ableiten
+        importance = min(1.0, salience.total + 0.2)
+
+        # L2: Async store (fire-and-forget)
+        self._store_count += 1
         asyncio.create_task(self._store_episode_safe(
-            user_text, soma_text, emotion, topic, min(1.0, importance),
+            user_text=user_text,
+            soma_text=soma_text,
+            emotion=emotion,
+            arousal=arousal,
+            valence=valence,
+            event_type=event_type,
+            topic=topic,
+            importance=importance,
         ))
 
-    async def _store_episode_safe(self, user_text, soma_text, emotion, topic, importance):
+        # Diary: Nur bei hoher Salience
+        if salience.is_highly_salient:
+            self._diary_count += 1
+            asyncio.create_task(self._write_diary_safe(
+                user_text=user_text,
+                soma_text=soma_text,
+                emotion=emotion,
+                arousal=arousal,
+            ))
+
+    async def store_event(
+        self,
+        event_type: str,
+        description: str,
+        user_text: str = "",
+        soma_text: str = "",
+        emotion: str = "neutral",
+        importance: float = 0.8,
+    ):
+        """
+        Speichert ein System-Event (Phone-Call, Plugin, Intervention, etc.).
+        Bypass Salience — Events sind IMMER wichtig.
+        """
+        asyncio.create_task(self._store_episode_safe(
+            user_text=user_text or description,
+            soma_text=soma_text,
+            emotion=emotion,
+            arousal=0.5,
+            valence=0.0,
+            event_type=event_type,
+            topic=description[:60],
+            importance=importance,
+        ))
+
+        # Event-Diary-Eintrag
+        asyncio.create_task(self.diary.write_event_entry(
+            event_type=event_type,
+            description=description,
+            emotion=emotion,
+        ))
+
+    async def _store_episode_safe(
+        self,
+        user_text: str,
+        soma_text: str,
+        emotion: str,
+        arousal: float,
+        valence: float,
+        event_type: str,
+        topic: str,
+        importance: float,
+    ):
         try:
             await self.episodic.store_episode(
                 user_text=user_text,
                 soma_text=soma_text,
                 emotion=emotion,
+                arousal=arousal,
+                valence=valence,
+                event_type=event_type,
                 topic=topic,
                 importance=importance,
             )
         except Exception as e:
             logger.error(f"Failed to store episode: {e}")
 
+    async def _write_diary_safe(
+        self,
+        user_text: str,
+        soma_text: str,
+        emotion: str,
+        arousal: float,
+    ):
+        try:
+            await self.diary.write_interaction_entry(
+                user_text=user_text,
+                soma_text=soma_text,
+                emotion=emotion,
+                arousal=arousal,
+            )
+        except Exception as e:
+            logger.error(f"Failed to write diary: {e}")
+
     # ══════════════════════════════════════════════════════════════════
     #  CONSOLIDATION — Episoden → Fakten (Idle only)
+    #  NOTE: Jetzt vom BackgroundConsolidator direkt gesteuert.
+    #  Diese Methode bleibt als Legacy-Compat.
     # ══════════════════════════════════════════════════════════════════
 
     async def consolidate(self, llm_callable=None):
-        """
-        Destilliert Episoden zu semantischen Fakten.
-        Nur im Idle aufrufen.
-
-        llm_callable: async func(prompt: str) -> str
-        """
+        """Legacy-Compat. Wird vom BackgroundConsolidator aufgerufen."""
         if self._consolidation_running or llm_callable is None:
             return
         self._consolidation_running = True
@@ -215,18 +337,18 @@ class MemoryOrchestrator:
             for ep in recent[:15]:
                 episode_text += (
                     f"- [{ep.emotion}] Patrick: \"{ep.user_text[:100]}\" "
-                    f"→ SOMA: \"{ep.soma_text[:100]}\"\n"
+                    f"-> SOMA: \"{ep.soma_text[:100]}\"\n"
                 )
 
             prompt = (
-                "Analysiere diese Gesprächsfragmente und extrahiere "
+                "Analysiere diese Gespraechsfragmente und extrahiere "
                 "allgemeine Fakten.\n"
                 "Gib NUR Fakten im Format: KATEGORIE|SUBJEKT|FAKT\n"
                 "Kategorien: preference, habit, relationship, knowledge, "
                 "personality\n"
                 "Keine Vermutungen — nur was klar hervorgeht.\n"
                 "Max 8 Fakten.\n\n"
-                f"Gespräche:\n{episode_text}\n\nFakten:"
+                f"Gespraeche:\n{episode_text}\n\nFakten:"
             )
 
             response = await llm_callable(prompt)
@@ -252,7 +374,9 @@ class MemoryOrchestrator:
                             confidence=0.5,
                         )
                         logger.info(
-                            f"Consolidated fact: {subject} → {fact}"
+                            "consolidated_fact",
+                            subject=subject,
+                            fact=fact[:60],
                         )
         except Exception as e:
             logger.error(f"Consolidation failed: {e}")
@@ -264,10 +388,15 @@ class MemoryOrchestrator:
     async def get_memory_stats(self) -> dict:
         ep_stats = await self.episodic.get_stats()
         sem_stats = await self.semantic.get_stats()
+        diary_stats = await self.diary.get_stats()
         return {
             "working_memory_turns": self.working._interaction_count,
             "episodic_episodes": ep_stats.get("total_episodes", 0),
             "semantic_facts": sem_stats.get("total_facts", 0),
+            "diary_entries": diary_stats.get("total_entries", 0),
+            "salience_stored": self._store_count,
+            "salience_filtered": self._filtered_count,
+            "diary_triggers": self._diary_count,
             "session_minutes": self.working.get_session_summary()[
                 "session_minutes"
             ],

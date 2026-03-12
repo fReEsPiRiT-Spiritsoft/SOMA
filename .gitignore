@@ -21,3 +21,5 @@ node_modules/
 .env
 copilot-instructions.md
 .github
+
+soma_instructions.md

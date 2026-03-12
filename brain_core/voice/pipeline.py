@@ -91,13 +91,14 @@ from brain_core.voice.stt import STTEngine, TranscriptionResult
 from brain_core.voice.tts import TTSEngine, SpeechEmotion
 from brain_core.voice.emotion import EmotionEngine, EmotionState, RoomMood
 from brain_core.voice.ambient import AmbientIntelligence, Intervention
-from brain_core.memory import get_memory, MemoryCategory
 from brain_core.memory.integration import (
     on_wake_word as memory_on_wake_word,
     build_context_for_query,
     after_response as memory_after_response,
+    store_system_event as memory_store_event,
 )
 from brain_core.memory.two_phase import get_bridge_response
+from brain_ego.consciousness import PerceptionSnapshot
 
 logger = structlog.get_logger("soma.voice.pipeline")
 
@@ -141,12 +142,13 @@ class VoicePipeline:
         self.tts = TTSEngine(voice=tts_voice, output_device=output_device)
         self.emotion = EmotionEngine(window_sec=60.0)
         self.ambient = AmbientIntelligence(emotion_engine=self.emotion)
-        self.memory = get_memory()  # Persistent Memory System
+        # Memory handled by memory_orchestrator (Salience + Diary)
 
         # ── External References ─────────────────────────────────────
         self._logic_router = logic_router
         self._audio_device = audio_device
         self._broadcast = broadcast_callback
+        self._consciousness = None  # Set by main.py after Ego boot
 
         # ── State ───────────────────────────────────────────────────
         self._running = False
@@ -477,12 +479,8 @@ class VoicePipeline:
             emotion=emotion_reading.emotion.value,
         )
         
-        # ── Memory: Automatisch wichtige Infos speichern ─────────────
-        should_save, category, extracted = self.memory.should_remember(prompt)
-        if should_save and category and extracted:
-            self.memory.remember(extracted, category, source="voice_conversation")
-            logger.info("memory_auto_saved", category=category, content_preview=extracted[:50])
-            await self._emit("memory", f"💾 Gemerkt: {extracted[:50]}...", "MEMORY")
+        # ── Memory: Salience-based storage happens in memory_after_response ──
+        # (Legacy should_remember removed — orchestrator decides via SalienceFilter)
         
         await self._emit("llm", f"🧠 Denke nach: \"{prompt}\"", "LLM", {"prompt": prompt})
 
@@ -610,14 +608,40 @@ class VoicePipeline:
 
             # ── Memory: Interaktion speichern (fire-and-forget) ────────
             try:
+                _arousal = emotion_reading.arousal if emotion_reading else 0.0
+                _valence = emotion_reading.valence if emotion_reading else 0.0
+                _stress = emotion_reading.stress_level if emotion_reading else 0.0
                 asyncio.create_task(memory_after_response(
                     user_text=prompt,
                     soma_text=clean_response,
                     emotion=emotion_str,
                     topic=prompt[:60],
+                    arousal=_arousal,
+                    valence=_valence,
+                    stress=_stress,
                 ))
             except Exception:
                 pass  # Memory-Fehler dürfen Pipeline nie brechen
+
+            # ── Ego: Perception an Consciousness melden ──────────────
+            try:
+                if self._consciousness:
+                    _child = getattr(self, '_child_mode', False)
+                    _room_mood = self.emotion.get_room_mood()
+                    snap = PerceptionSnapshot(
+                        last_user_text=prompt,
+                        last_soma_response=clean_response,
+                        user_emotion=emotion_str,
+                        user_arousal=emotion_reading.arousal if emotion_reading else 0.0,
+                        user_valence=emotion_reading.valence if emotion_reading else 0.0,
+                        room_id="main",
+                        room_mood=_room_mood.value if _room_mood else "neutral",
+                        is_child_present=_child,
+                        ambient_context=self._get_ambient_context_str(),
+                    )
+                    self._consciousness.notify_perception(snap)
+            except Exception:
+                pass  # Ego-Fehler dürfen Pipeline nie brechen
 
         else:
             # Kein Logic Router → Fallback
@@ -828,21 +852,22 @@ class VoicePipeline:
         return "Erinnerungs-Plugin nicht verfügbar."
 
     async def _action_remember(self, params: dict) -> str:
-        """Speichert eine Info via ACTION-Tag direkt im Memory."""
+        """Speichert eine Info via ACTION-Tag direkt im Memory (über Orchestrator)."""
         category = params.get("category", "important")
         content  = params.get("content", "")
         if not content:
             return "Kein Inhalt zum Merken angegeben."
 
-        from brain_core.memory import MemoryCategory
         try:
-            cat = MemoryCategory(category)
-        except ValueError:
-            cat = MemoryCategory.IMPORTANT
-
-        self.memory.remember(content, cat, source="llm_action_tag")
-        logger.info("action_remember_saved", category=category, content_preview=content[:60])
-        return f"Gemerkt in '{category}': {content[:60]}"
+            await memory_store_event(
+                event_type="intervention",
+                description=f"[{category}] {content}",
+            )
+            logger.info("action_remember_saved", category=category, content_preview=content[:60])
+            return f"Gemerkt in '{category}': {content[:60]}"
+        except Exception as exc:
+            logger.warning("action_remember_failed", error=str(exc))
+            return f"Konnte nicht speichern: {exc}"
 
     async def _action_ha_call(self, params: dict) -> str:
         """

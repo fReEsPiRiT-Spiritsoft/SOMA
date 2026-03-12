@@ -1,6 +1,8 @@
 """
-Integration — Drop-in Hooks für die bestehende Pipeline.
-Import + aufrufen, keine Struktur-Änderung nötig.
+Integration — Drop-in Hooks fuer die bestehende Pipeline.
+==========================================================
+Import + aufrufen, keine Struktur-Aenderung noetig.
+Jetzt mit Salience-Filter, Diary-Writer und erweitertem Store.
 """
 
 from __future__ import annotations
@@ -31,10 +33,16 @@ async def init_memory_system() -> MemoryOrchestrator:
     await _orchestrator.initialize()
 
     _preloader = SpeculativePreloader(_orchestrator)
-    _consolidator = BackgroundConsolidator(_orchestrator)
+    _consolidator = BackgroundConsolidator(
+        _orchestrator,
+        diary_writer=_orchestrator.diary,
+    )
     _consolidator.start()
 
-    logger.info("SOMA Memory System fully initialized")
+    logger.info(
+        "memory_system_initialized",
+        components="L1+L2+L3+Salience+Diary+Dreaming+Preloader",
+    )
     return _orchestrator
 
 
@@ -65,7 +73,7 @@ async def on_wake_word():
     """Sofort aufrufen wenn Wake-Word erkannt wird."""
     if _preloader:
         await _preloader.on_wake_word()
-    logger.debug("Wake word → preloading context")
+    logger.debug("Wake word -> preloading context")
 
 
 async def build_context_for_query(
@@ -75,7 +83,7 @@ async def build_context_for_query(
     interaction_count: int = 0,
 ) -> str:
     """
-    Baut den kompletten System-Prompt mit Gedächtnis.
+    Baut den kompletten System-Prompt mit Gedaechtnis.
     Returns: fertiger system_prompt String.
     """
     orchestrator = get_orchestrator()
@@ -101,23 +109,66 @@ async def after_response(
     user_text: str,
     soma_text: str,
     emotion: str = "neutral",
+    arousal: float = 0.0,
+    valence: float = 0.0,
+    stress: float = 0.0,
     intent: str = "",
     topic: str = "",
+    event_type: str = "conversation",
 ):
-    """Nach jedem Response aufrufen. Non-blocking."""
+    """
+    Nach jedem Response aufrufen. Non-blocking.
+    Jetzt mit Salience-Filter: unwichtige Interaktionen werden NICHT gespeichert.
+    """
     orchestrator = get_orchestrator()
     await orchestrator.store_interaction(
         user_text=user_text,
         soma_text=soma_text,
         emotion=emotion,
+        arousal=arousal,
+        valence=valence,
+        stress=stress,
         intent=intent,
         topic=topic,
+        event_type=event_type,
     )
     if _consolidator:
         _consolidator.touch()
 
 
+async def store_system_event(
+    event_type: str,
+    description: str,
+    user_text: str = "",
+    soma_text: str = "",
+    emotion: str = "neutral",
+    importance: float = 0.8,
+):
+    """
+    Speichert ein System-Event (Phone-Call, Plugin, Intervention, etc.).
+    Bypassed Salience-Filter — Events sind IMMER wichtig.
+    """
+    orchestrator = get_orchestrator()
+    await orchestrator.store_event(
+        event_type=event_type,
+        description=description,
+        user_text=user_text,
+        soma_text=soma_text,
+        emotion=emotion,
+        importance=importance,
+    )
+
+
 def set_consolidation_llm(llm_callable):
-    """LLM-Callback für Background-Consolidation setzen."""
+    """LLM-Callback fuer Background-Consolidation + Diary setzen."""
     if _consolidator:
         _consolidator.set_llm(llm_callable)
+    # Diary bekommt auch ein LLM (Light-Engine fuer Speed)
+    if _orchestrator and _orchestrator.diary:
+        _orchestrator.diary.set_llm(llm_callable)
+
+
+def set_diary_llm(llm_callable):
+    """Separates LLM fuer Diary (z.B. Light-Engine statt Heavy)."""
+    if _orchestrator and _orchestrator.diary:
+        _orchestrator.diary.set_llm(llm_callable)

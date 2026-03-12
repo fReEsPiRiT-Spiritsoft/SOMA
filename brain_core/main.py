@@ -43,8 +43,15 @@ from brain_core.memory.setup_embeddings import ensure_embedding_model
 from brain_core.memory.integration import (
     init_memory_system,
     set_consolidation_llm,
+    set_diary_llm,
     get_orchestrator,
+    store_system_event as memory_store_event,
 )
+from brain_ego.interoception import Interoception
+from brain_ego.identity_anchor import IdentityAnchor
+from brain_ego.consciousness import Consciousness, PerceptionSnapshot
+from brain_ego.internal_monologue import InternalMonologue
+from brain_core.logic_router import set_consciousness as set_logic_consciousness
 from pathlib import Path
 from pydantic import BaseModel as PydanticBaseModel
 
@@ -80,6 +87,12 @@ ha_bridge: HomeAssistantBridge = HomeAssistantBridge()
 
 # Phone Gateway (Asterisk ARI → Festnetz)
 phone_pipeline: PhonePipeline | None = None
+
+# ── Ego System (Phase 2) — SOMAs ICH-Bewusstsein ────────────────────────
+interoception = Interoception()
+identity_anchor = IdentityAnchor()
+soma_consciousness: Consciousness | None = None
+internal_monologue: InternalMonologue | None = None
 
 
 # ── Reminder Speak (Global für Import) ───────────────────────────────────
@@ -169,9 +182,15 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("boot_phase", service="ha_bridge", status="failed", error=str(exc))
 
-    # 2. Health Monitor starten mit Broadcast-Callback
+    # 2. Health Monitor starten mit Broadcast-Callback + Interoception
     async def broadcast_metrics(metrics: SystemMetrics):
-        """Pushe Metriken an alle verbundenen WebSocket-Clients."""
+        """Pushe Metriken an alle verbundenen WebSocket-Clients + Ego-System."""
+        # ── Interoception: Hardware → Körpergefühl ───────────────────
+        interoception.feel(metrics)
+        # ── Consciousness benachrichtigen ────────────────────────────
+        if soma_consciousness is not None:
+            soma_consciousness.notify_body_state_changed()
+
         if not ws_connections:
             return
         data = metrics.model_dump_json()
@@ -203,6 +222,11 @@ async def lifespan(app: FastAPI):
         async def _consolidation_llm(prompt: str) -> str:
             return await heavy_engine.generate(prompt=prompt, system_prompt="")
         set_consolidation_llm(_consolidation_llm)
+
+        # Diary-LLM: Light Engine für narrative Tagebuch-Einträge
+        async def _diary_llm(prompt: str) -> str:
+            return await light_engine.generate(prompt=prompt, system_prompt="")
+        set_diary_llm(_diary_llm)
 
         logger.info("boot_phase", service="memory_system", status="online 🧠")
         await broadcast_thought(
@@ -250,6 +274,61 @@ async def lifespan(app: FastAPI):
     presence_manager._on_presence_change = audio_router.on_presence_change
     logger.info("boot_phase", service="presence_audio_bridge", status="wired")
 
+    # ════════════════════════════════════════════════════════════════════
+    #  6b. EGO-SYSTEM BOOT — SOMAs ICH-Bewusstsein erwacht
+    # ════════════════════════════════════════════════════════════════════
+    global soma_consciousness, internal_monologue
+    try:
+        # Consciousness: Global Workspace Thread
+        soma_consciousness = Consciousness(
+            interoception=interoception,
+            identity_anchor=identity_anchor,
+        )
+        await soma_consciousness.start()
+
+        # Consciousness → LogicRouter verdrahten (Prompt-Prefix)
+        set_logic_consciousness(soma_consciousness)
+
+        # Internal Monologue: SOMAs innere Stimme
+        internal_monologue = InternalMonologue(consciousness=soma_consciousness)
+
+        # LLM für den Monolog: Light-Engine (schnell, ~500ms)
+        async def _monologue_llm(prompt: str) -> str:
+            return await light_engine.generate(prompt=prompt, system_prompt="")
+        internal_monologue.set_llm(_monologue_llm)
+
+        # Dashboard-Callback für Monolog-Gedanken
+        internal_monologue.set_broadcast(broadcast_thought)
+
+        # Memory-Callback: Gedanken ins Langzeitgedächtnis
+        async def _monologue_memory(description: str, event_type: str, emotion: str):
+            try:
+                await memory_store_event(
+                    event_type=event_type,
+                    description=description,
+                    emotion=emotion,
+                    importance=0.6,
+                )
+            except Exception:
+                pass  # Memory-Fehler darf Monolog nie brechen
+        internal_monologue.set_memory(_monologue_memory)
+
+        # Monologue starten (generiert Gedanken im Idle)
+        await internal_monologue.start()
+
+        logger.info(
+            "boot_phase", service="ego_system", status="online 🧠💭",
+            msg="SOMAs Bewusstsein ist erwacht",
+        )
+        await broadcast_thought(
+            "info",
+            "🧠💭 Ego-System online — Bewusstsein, Interoception & Innerer Monolog aktiv",
+            "BOOT",
+        )
+    except Exception as exc:
+        logger.error("boot_phase", service="ego_system", status="failed", error=str(exc))
+        await broadcast_thought("warn", f"Ego-System Fehler: {exc}", "BOOT")
+
     # 7. Voice Pipeline starten (Dauerhaftes Zuhören)
     global voice_pipeline
     try:
@@ -263,6 +342,13 @@ async def lifespan(app: FastAPI):
         await voice_pipeline.start()
         await broadcast_thought("info", "🎤 Voice Pipeline gestartet - Soma hört zu!", "BOOT")
         logger.info("boot_phase", service="voice_pipeline", status="online 🎤")
+
+        # ── Ego ↔ Voice verbinden ────────────────────────────────────
+        if internal_monologue:
+            internal_monologue.set_speak(voice_pipeline.autonomous_speak)
+            logger.info("boot_phase", msg="InternalMonologue → autonomous_speak verbunden")
+        # Consciousness-Ref für Pipeline (PerceptionSnapshots)
+        voice_pipeline._consciousness = soma_consciousness
     except Exception as exc:
         logger.error("boot_phase", service="voice_pipeline", status="failed", error=str(exc))
         await broadcast_thought("error", f"Voice Pipeline Fehler: {exc}", "BOOT")

@@ -413,7 +413,7 @@ class CallSession:
 
     async def _action_remember(self, params: dict) -> str:
         """[ACTION:remember category=... content=...]"""
-        from brain_core.memory import get_memory, MemoryCategory
+        from brain_core.memory.integration import store_system_event
 
         category = params.get("category", "important")
         content = params.get("content", "")
@@ -421,12 +421,13 @@ class CallSession:
             return "Kein Inhalt."
 
         try:
-            cat = MemoryCategory(category)
-        except ValueError:
-            cat = MemoryCategory.IMPORTANT
-
-        get_memory().remember(content, cat, source="phone_call")
-        return f"Gemerkt: {content[:40]}"
+            await store_system_event(
+                event_type="phone_call",
+                description=f"[{category}] {content}",
+            )
+            return f"Gemerkt: {content[:40]}"
+        except Exception as exc:
+            return f"Speicherfehler: {exc}"
 
     # ════════════════════════════════════════════════════════════════════
     #  ARI: SPRECHEN (TTS → Datei → ARI Play)

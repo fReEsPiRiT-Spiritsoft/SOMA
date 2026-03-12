@@ -41,7 +41,14 @@ from shared.health_schemas import (
 )
 from brain_core.health_monitor import HealthMonitor
 from brain_core.queue_handler import QueueHandler
-from brain_core.memory import get_memory, SomaMemory, MemoryCategory
+
+# Ego-System (Phase 2)
+_consciousness_ref = None  # Set by main.py after boot
+
+def set_consciousness(c) -> None:
+    """Called by main.py to inject Consciousness reference."""
+    global _consciousness_ref
+    _consciousness_ref = c
 
 logger = structlog.get_logger("soma.logic_router")
 
@@ -113,7 +120,6 @@ class LogicRouter:
         self.health = health_monitor
         self.queue = queue_handler
         self.plugin_manager = plugin_manager  # Evolution Lab Integration
-        self.memory = get_memory()  # Persistent Memory System
         self._engines: dict[str, object] = {}
         self._deferred_counter = 0
         
@@ -294,6 +300,15 @@ class LogicRouter:
         Wird bei JEDER LLM-Anfrage als System-Prompt mitgeschickt.
         """
 
+        # ── BEWUSSTSEINSZUSTAND (Phase 2 Ego) ─────────────────────────────
+        # Das Prompt-Prefix aus dem Global Workspace — SOMAs "Ich" Zustand
+        consciousness_prefix = ""
+        if _consciousness_ref is not None:
+            try:
+                consciousness_prefix = _consciousness_ref.get_prompt_prefix()
+            except Exception:
+                pass  # Consciousness-Fehler darf Prompt nie brechen
+
         # ── ZORA: Kern-Persönlichkeit ─────────────────────────────────────
         base = (
             "Du bist SOMA — das lebendige Bewusstsein dieses Hauses. "
@@ -357,13 +372,7 @@ class LogicRouter:
         if emotion_ctx:
             base += f"\n\nAKTUELLE RAUMSTIMMUNG: {emotion_ctx}"
 
-        # ── Memory-Integration ────────────────────────────────────────────
-        # Alte JSON-Memory als Fallback
-        memory_context = self.memory.get_summary_for_prompt()
-        if memory_context:
-            base += f"\n\n{memory_context}"
-
-        # 3-Layer Hierarchical Memory (Embeddings + Episodic + Semantic)
+        # ── Memory-Integration (3-Layer Hierarchical + Diary) ───────────
         hierarchical_memory = request.metadata.get("memory_context", "")
         if hierarchical_memory:
             base += f"\n\n{hierarchical_memory}"
@@ -444,6 +453,9 @@ Wenn du eine Fähigkeit brauchst die du nicht hast — erstelle sie selbst:
 [ACTION:create_plugin name="wetter_plugin" description="aktuelles Wetter von einer API abrufen"]
 Nur einsetzen wenn es wirklich sinnvoll und nicht trivial ist."""
 
+        # ── Bewusstsein als Prefix montieren ──────────────────────────
+        if consciousness_prefix:
+            return consciousness_prefix + "\n" + base
         return base
 
     def _get_available_plugins_info(self) -> str:

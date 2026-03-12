@@ -27,6 +27,16 @@ OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 EMBED_MODEL = "nomic-embed-text"   # 768-dim, schnell, lokal via Ollama
 
 
+# Event-Types fuer strukturiertes Tracking
+EVENT_TYPE_CONVERSATION = "conversation"   # Normales Gespraech
+EVENT_TYPE_PHONE_CALL = "phone_call"       # Telefon-Session
+EVENT_TYPE_PLUGIN = "plugin"               # Plugin-Generierung/Ausfuehrung
+EVENT_TYPE_INTERVENTION = "intervention"   # Ambient-Intervention (Streit, Stress)
+EVENT_TYPE_REMINDER = "reminder"           # Erinnerung ausgeloest
+EVENT_TYPE_SYSTEM = "system"               # System-Events (Boot, Fehler)
+EVENT_TYPE_AUTONOMOUS = "autonomous"       # SOMA hat von selbst gesprochen
+
+
 @dataclass
 class Episode:
     id: int
@@ -34,8 +44,11 @@ class Episode:
     user_text: str
     soma_text: str
     emotion: str
-    topic: str
-    summary: str
+    arousal: float = 0.0
+    valence: float = 0.0
+    event_type: str = EVENT_TYPE_CONVERSATION
+    topic: str = ""
+    summary: str = ""
     embedding: Optional[np.ndarray] = None
     relevance: float = 0.0
 
@@ -79,6 +92,9 @@ class EpisodicMemory:
                 user_text   TEXT NOT NULL,
                 soma_text   TEXT DEFAULT '',
                 emotion     TEXT DEFAULT 'neutral',
+                arousal     REAL DEFAULT 0.0,
+                valence     REAL DEFAULT 0.0,
+                event_type  TEXT DEFAULT 'conversation',
                 topic       TEXT DEFAULT '',
                 summary     TEXT DEFAULT '',
                 embedding   BLOB,
@@ -89,8 +105,36 @@ class EpisodicMemory:
             CREATE INDEX IF NOT EXISTS idx_episodes_time
             ON episodes(timestamp DESC)
         """)
+        # ── Schema-Migration: Spalten nachtraeglich hinzufuegen ──
+        self._migrate_columns(conn)
+        # Index fuer event_type NACH Migration erstellen
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_episodes_event_type
+            ON episodes(event_type)
+        """)
         conn.commit()
         return conn
+
+    @staticmethod
+    def _migrate_columns(conn):
+        """Fuegt neue Spalten hinzu falls sie fehlen (bestehende DB)."""
+        existing = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(episodes)").fetchall()
+        }
+        migrations = [
+            ("arousal", "REAL DEFAULT 0.0"),
+            ("valence", "REAL DEFAULT 0.0"),
+            ("event_type", "TEXT DEFAULT 'conversation'"),
+        ]
+        for col_name, col_def in migrations:
+            if col_name not in existing:
+                conn.execute(
+                    f"ALTER TABLE episodes ADD COLUMN {col_name} {col_def}"
+                )
+                logging.getLogger("soma.memory.episodic").info(
+                    f"Migrated episodes table: added {col_name}"
+                )
 
     # ── Embedding via Ollama ─────────────────────────────────────────
 
@@ -129,6 +173,9 @@ class EpisodicMemory:
         user_text: str,
         soma_text: str,
         emotion: str = "neutral",
+        arousal: float = 0.0,
+        valence: float = 0.0,
+        event_type: str = EVENT_TYPE_CONVERSATION,
         topic: str = "",
         summary: str = "",
         importance: float = 0.5,
@@ -147,6 +194,9 @@ class EpisodicMemory:
             "user_text": user_text,
             "soma_text": soma_text[:2000],
             "emotion": emotion,
+            "arousal": arousal,
+            "valence": valence,
+            "event_type": event_type,
             "topic": topic,
             "summary": summary or user_text[:200],
             "embedding": blob,
@@ -158,11 +208,11 @@ class EpisodicMemory:
             return
         self._conn.execute("""
             INSERT INTO episodes
-                (timestamp, user_text, soma_text, emotion, topic,
-                 summary, embedding, importance)
+                (timestamp, user_text, soma_text, emotion, arousal, valence,
+                 event_type, topic, summary, embedding, importance)
             VALUES
-                (:timestamp, :user_text, :soma_text, :emotion, :topic,
-                 :summary, :embedding, :importance)
+                (:timestamp, :user_text, :soma_text, :emotion, :arousal, :valence,
+                 :event_type, :topic, :summary, :embedding, :importance)
         """, row)
         self._conn.commit()
 
@@ -194,9 +244,13 @@ class EpisodicMemory:
             ep = Episode(
                 id=row[0], timestamp=row[1],
                 user_text=row[2], soma_text=row[3],
-                emotion=row[4], topic=row[5], summary=row[6],
+                emotion=row[4],
+                arousal=row[5] if row[5] else 0.0,
+                valence=row[6] if row[6] else 0.0,
+                event_type=row[7] or "conversation",
+                topic=row[8] or "", summary=row[9] or "",
                 embedding=(
-                    np.frombuffer(row[7], dtype=np.float32) if row[7] else None
+                    np.frombuffer(row[10], dtype=np.float32) if row[10] else None
                 ),
             )
             # Score: 70% Semantik + 20% Recency + 10% Importance
@@ -207,7 +261,7 @@ class EpisodicMemory:
             age_hours = (now - ep.timestamp) / 3600
             recency_score = 2.0 ** (-age_hours / 24.0)   # Halbwertszeit 24h
 
-            importance = row[8] if len(row) > 8 else 0.5
+            importance = row[11] if len(row) > 11 else 0.5
             ep.relevance = (
                 0.70 * sem_score
                 + 0.20 * recency_score
@@ -221,18 +275,21 @@ class EpisodicMemory:
     def _fetch_candidates(self, max_age_hours: float) -> list:
         if not self._conn:
             return []
+        cols = (
+            "id, timestamp, user_text, soma_text, emotion, "
+            "arousal, valence, event_type, "
+            "topic, summary, embedding, importance"
+        )
         if max_age_hours > 0:
             cutoff = time.time() - (max_age_hours * 3600)
             return self._conn.execute(
-                "SELECT id, timestamp, user_text, soma_text, emotion, "
-                "topic, summary, embedding, importance "
+                f"SELECT {cols} "
                 "FROM episodes WHERE timestamp > ? "
                 "ORDER BY timestamp DESC LIMIT 200",
                 (cutoff,),
             ).fetchall()
         return self._conn.execute(
-            "SELECT id, timestamp, user_text, soma_text, emotion, "
-            "topic, summary, embedding, importance "
+            f"SELECT {cols} "
             "FROM episodes ORDER BY timestamp DESC LIMIT 200",
         ).fetchall()
 
