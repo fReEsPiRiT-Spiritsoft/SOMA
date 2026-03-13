@@ -415,7 +415,7 @@ class CallSession:
                 break
 
             logger.info("phone_user_said", text=text[:80])
-            await self._emit(f"🎤 Anrufer: \"{text[:60]}\"", "PHONE_STT")
+            await self._emit(f"🎤 Anrufer: \"{text}\"", "PHONE_STT")
 
             # Phase 7: Caller-Turn ins Transkript
             self._transcript.add_turn("caller", text)

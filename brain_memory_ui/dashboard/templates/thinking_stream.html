@@ -74,14 +74,30 @@
         .thought {
             padding: 8px 12px;
             margin-bottom: 4px;
-            border-left: 2px solid #1a1a2e;
+            border-left: 3px solid #1a1a2e;
             font-size: 0.85rem;
             color: #888;
             animation: fadeIn 0.3s ease;
+            white-space: pre-wrap;
+            word-break: break-word;
+            overflow-wrap: anywhere;
+            line-height: 1.5;
         }
-        .thought.info { border-color: #00ff88; color: #aaa; }
-        .thought.warn { border-color: #ffaa00; color: #ffaa00; }
-        .thought.error { border-color: #ff4444; color: #ff4444; }
+        .thought.info   { border-color: #00ff88; color: #aaa; }
+        .thought.warn   { border-color: #ffaa00; color: #ffaa00; }
+        .thought.error  { border-color: #ff4444; color: #ff4444; }
+        .thought.action { border-color: #aa44ff; color: #cc88ff; }
+        /* Spezifische Tag-Farben */
+        .thought[data-tag="LLM"],
+        .thought[data-tag="HEAVY"],
+        .thought[data-tag="LIGHT"],
+        .thought[data-tag="ENGINE"] { border-color: #0088ff; color: #88ccff; }
+        .thought[data-tag="STT"]    { border-color: #00ffcc; color: #aaffee; }
+        .thought[data-tag="TTS"]    { border-color: #ffdd00; color: #ffee88; }
+        .thought[data-tag="ROUTER"] { border-color: #ff8800; color: #ffbb66; }
+        .thought[data-tag="ACTION"],
+        .thought[data-tag="MEDIA"]  { border-color: #aa44ff; color: #cc88ff; }
+        .thought[data-tag="EVOLUTION"] { border-color: #ff44aa; color: #ff88cc; }
         @keyframes fadeIn {
             from { opacity: 0; transform: translateX(-10px); }
             to { opacity: 1; transform: translateX(0); }
@@ -130,10 +146,11 @@
                 // Unterscheide zwischen System-Metriken und KI-Gedanken
                 if (data.thought_type && data.content) {
                     // KI-Gedanke von broadcast_thought()
-                    const level = data.thought_type === 'error' ? 'error' : 
-                                  data.thought_type === 'warning' ? 'warn' : 'info';
+                    const level = data.thought_type === 'error' ? 'error' :
+                                  data.thought_type === 'warning' ? 'warn' :
+                                  data.thought_type === 'action' ? 'action' : 'info';
                     const tag = data.tag ? `[${data.tag}] ` : '';
-                    addThought(level, `${tag}${data.content}`);
+                    addThought(level, `${tag}${data.content}`, data.tag);
                 } else if (data.cpu_percent !== undefined || data.ram_percent !== undefined) {
                     // System-Metriken von broadcast_metrics()
                     updateMetrics(data);
@@ -162,15 +179,16 @@
             else if (m.load_level === 'high') dot.classList.add('warn');
         }
 
-        function addThought(level, msg) {
+        function addThought(level, msg, tag) {
             const el = document.createElement('div');
             el.className = `thought ${level}`;
+            if (tag) el.dataset.tag = tag;
             el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
             stream.prepend(el);
             if (stream.children.length > 200) stream.lastChild.remove();
         }
 
-        addThought('info', 'SOMA Thinking Stream initialisiert...');
+        addThought('info', 'SOMA Thinking Stream initialisiert...', 'SYSTEM');
         connect();
     </script>
 </body>

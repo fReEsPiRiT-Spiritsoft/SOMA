@@ -170,7 +170,7 @@ class LogicRouter:
         # Broadcast: Anfrage empfangen
         await _broadcast_thought(
             "info",
-            f"Anfrage empfangen: '{request.prompt[:60]}...'" if len(request.prompt) > 60 else f"Anfrage: '{request.prompt}'",
+            f"Anfrage: '{request.prompt}'",
             "ROUTER",
             {"load_level": load_level.value, "user": request.user_id, "room": request.room_id}
         )
@@ -234,7 +234,7 @@ class LogicRouter:
 
             await _broadcast_thought(
                 "info", 
-                f"Antwort generiert in {round(latency, 1)}ms: '{response_text[:80]}...'" if len(response_text) > 80 else f"Antwort: '{response_text}'", 
+                f"Antwort generiert in {round(latency, 1)}ms: '{response_text}'",
                 "ENGINE"
             )
 
@@ -511,21 +511,32 @@ Du hast xdg-open, optional mpv+yt-dlp. Es funktioniert TATSÄCHLICH — vertrau 
 
 [ACTION:youtube query="aligatoah songs"]
 [ACTION:youtube artist="Aligatoah" song="Triebkraft Gegenwart"]
-[ACTION:youtube query="entspannungsmusik"]
-[ACTION:media_play artist="Rammstein" song="Du Hast"]
-[ACTION:open_url url="https://open.spotify.com"]
-[ACTION:open_url url="https://www.youtube.com"]
 [ACTION:media_stop]
+[ACTION:open_url url="https://open.spotify.com"]
+
+── WEB-SUCHE (Aktuelle Infos, Preise, News, Wetter, Sport) ──
+Wenn die Frage aktuelle Informationen erfordert, die du nicht kennst → IMMER suchen!
+Das Ergebnis wird automatisch abgerufen und du bekommst die Daten zum Beantworten.
+Format IMMER: key="value" — KEIN Python-Dict-Stil!
+
+[ACTION:search query="bitcoin kurs aktuell"]
+[ACTION:search query="wetter münchen heute"]
+[ACTION:search query="bundesliga ergebnisse heute"]
+[ACTION:fetch_url url="https://example.com" question="Was ist der aktuelle Preis?"]
+
+Wann suchen:
+  - Aktuelle Kurse, Preise, Wetter, News, Sportergebnisse
+  - Personen, Firmen, aktuelle Ereignisse
+  - Alles was sich täglich ändert
 
 Beispiele:
-  Nutzer: 'Starte YouTube mit Aligatoah'  → Soma: 'Starte! 🎵[ACTION:youtube query="aligatoah"]'
-  Nutzer: 'Spiel Triebkraft Gegenwart'    → Soma: 'Laeuft![ACTION:youtube artist="Aligatoah" song="Triebkraft Gegenwart"]'
-  Nutzer: 'Oeffne Spotify'               → Soma: 'Spotify oeffnet sich.[ACTION:open_url url="https://open.spotify.com"]'
-  Nutzer: 'Stell die Musik aus'          → Soma: 'Stoppe.[ACTION:media_stop]'
-  Nutzer: 'Spiel irgendwas entspannendes'→ Soma: 'Laeuft! 🎵[ACTION:youtube query="entspannende musik playlist"]'
+  Nutzer: 'Wie steht Bitcoin gerade?'  → Soma: 'Schaue nach![ACTION:search query="bitcoin kurs aktuell EUR"]'
+  Nutzer: 'Wetter morgen in Hamburg'   → Soma: 'Gleich![ACTION:search query="wetter hamburg morgen"]'
+  Nutzer: 'Wer hat gestern gewonnen?'  → Soma: 'Suche kurz.[ACTION:search query="bundesliga ergebnisse gestern"]'
 
-⚠️ KRITISCH: Niemals sagen du haettest etwas getan ohne den Action-Tag zu setzen!
-  FALSCH: Ich habe YouTube gestartet und das Lied gefunden. (ohne Action-Tag = Luege!)
+⚠️ KRITISCH: Niemals mit veralteten/erfundenen Daten antworten wenn du suchen könntest!
+⚠️ KRITISCH: Niemals sagen du hättest etwas getan ohne den Action-Tag zu setzen!
+  FALSCH: Ich habe YouTube gestartet und das Lied gefunden. (ohne Action-Tag = Lüge!)
   RICHTIG: Starte jetzt! 🎵[ACTION:youtube query="aligatoah"]"""
 
         # ── Bewusstsein als Prefix montieren ──────────────────────────

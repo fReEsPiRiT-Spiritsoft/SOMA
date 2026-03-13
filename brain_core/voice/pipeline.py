@@ -646,7 +646,7 @@ class VoicePipeline:
             # Dashboard: LLM Antwort
             await self._emit(
                 "llm", 
-                f"💬 Antwort ({response.engine_used}): \"{clean_response[:100]}...\"" if len(clean_response) > 100 else f"💬 Antwort ({response.engine_used}): \"{clean_response}\"",
+                f"💬 Antwort ({response.engine_used}): \"{clean_response}\"",
                 response.engine_used.upper(),
                 {"response": clean_response, "engine": response.engine_used, "latency_ms": response.latency_ms,
                  "actions_executed": action_log}
@@ -655,7 +655,7 @@ class VoicePipeline:
             # Antwort aussprechen (bereinigt, ohne Tags)
             await self._emit(
                 "tts",
-                f"🔊 Spreche: \"{clean_response[:60]}...\"" if len(clean_response) > 60 else f"🔊 Spreche: \"{clean_response}\"",
+                f"🔊 Spreche: \"{clean_response}\"",
                 "TTS",
                 {"response": clean_response},
             )
@@ -763,7 +763,7 @@ class VoicePipeline:
         """
         if emotion is None:
             emotion = SpeechEmotion.alert()
-        await self._emit("tts", f"🔔 Autonom: \"{text[:60]}\"", "PROACTIVE")
+        await self._emit("tts", f"🔔 Autonom: \"{text}\"", "PROACTIVE")
         logger.info("autonomous_speak", text=text[:80])
         await self.tts.speak(text, emotion, priority=True)
 
@@ -840,6 +840,16 @@ class VoicePipeline:
                     # Laufende Wiedergabe stoppen
                     result = await self._action_media_stop()
                     executed.append(f"media_stop: {result}")
+
+                elif action_type in ("search", "web_search"):
+                    # Web-Suche + Re-Ask: LLM beantwortet Frage mit echten Daten
+                    result = await self._action_search(params)
+                    executed.append(f"search: {result}")
+
+                elif action_type == "fetch_url":
+                    # URL-Inhalt abrufen + als Kontext nutzen
+                    result = await self._action_fetch_url(params)
+                    executed.append(f"fetch_url: {result}")
 
                 else:
                     logger.warning("action_tag_unknown", action=action_type)
@@ -1163,7 +1173,7 @@ class VoicePipeline:
         if not url:
             return "Keine URL angegeben."
 
-        await self._emit("action", f"🌐 Öffne: {url[:60]}", "MEDIA")
+        await self._emit("action", f"🌐 Öffne: {url}", "MEDIA")
         logger.info("action_open_url", url=url[:80])
 
         return await self._xdg_open(url)
@@ -1180,6 +1190,135 @@ class VoicePipeline:
 
         await self._emit("action", "⏹️ Wiedergabe gestoppt", "MEDIA")
         return result
+
+    async def _action_search(self, params: dict) -> str:
+        """
+        Web-Suche via DuckDuckGo + Re-Ask des LLM mit den echten Ergebnissen.
+        [ACTION:search query="bitcoin kurs aktuell"]
+        """
+        query = (
+            params.get("query")
+            or params.get("action", "").replace("_", " ")
+            or params.get("q", "")
+        ).strip()
+
+        if not query:
+            return "Kein Suchbegriff angegeben."
+
+        await self._emit("action", f"🔍 Suche: '{query}'", "SEARCH")
+        logger.info("action_search_start", query=query)
+
+        # ── Web-Suche via DuckDuckGo (kein API-Key nötig) ────────────
+        search_results = await self._ddg_search(query, max_results=5)
+
+        if not search_results:
+            return f"Keine Suchergebnisse für '{query}' gefunden."
+
+        results_text = "\n".join(
+            f"- {r['title']}: {r['body']} ({r['url']})"
+            for r in search_results
+        )
+        await self._emit(
+            "action",
+            f"🔍 {len(search_results)} Ergebnisse → Re-Ask LLM...",
+            "SEARCH",
+        )
+
+        # ── Re-Ask: LLM beantwortet die Frage mit echten Daten ───────
+        if not self._logic_router:
+            return results_text
+
+        from brain_core.logic_router import SomaRequest
+        enriched_prompt = (
+            f"Beantworte die folgende Frage auf Basis der Suchergebnisse.\n"
+            f"Frage: {query}\n\n"
+            f"Aktuelle Suchergebnisse vom Internet:\n{results_text}\n\n"
+            f"Gib eine präzise, direkte Antwort. Kein [ACTION:...] Tag."
+        )
+        try:
+            re_ask = await self._logic_router.route(
+                SomaRequest(
+                    prompt=enriched_prompt,
+                    session_id="search_reask",
+                )
+            )
+            final_answer = re_ask.response.strip()
+        except Exception as exc:
+            logger.error("search_reask_failed", error=str(exc))
+            final_answer = results_text  # Fallback: Rohe Ergebnisse vorlesen
+
+        await self._emit("llm", f"🔍 Suchantwort: \"{final_answer}\"", "SEARCH")
+
+        # Antwort direkt sprechen (der ursprüngliche clean_response ist leer/useless)
+        await self.tts.speak(final_answer, self._select_speech_emotion(None))
+        return final_answer
+
+    async def _action_fetch_url(self, params: dict) -> str:
+        """
+        Ruft den Inhalt einer URL ab und lässt das LLM darüber antworten.
+        [ACTION:fetch_url url="https://..." question="Was steht dort?"]
+        """
+        url      = params.get("url", "")
+        question = params.get("question", "Fasse den Inhalt zusammen.")
+        if not url:
+            return "Keine URL angegeben."
+
+        await self._emit("action", f"🌐 Lade: {url}", "FETCH")
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0 SOMA-AI/1.0"})
+                resp.raise_for_status()
+                # Einfaches Text-Stripping (kein BeautifulSoup nötig)
+                import re as _re
+                text = _re.sub(r'<[^>]+>', ' ', resp.text)
+                text = _re.sub(r'\s+', ' ', text).strip()[:4000]
+        except Exception as exc:
+            return f"Fehler beim Laden von {url}: {exc}"
+
+        if not self._logic_router:
+            return text[:500]
+
+        from brain_core.logic_router import SomaRequest
+        re_ask_prompt = f"{question}\n\nSeiteninhalt:\n{text}"
+        try:
+            re_ask = await self._logic_router.route(SomaRequest(prompt=re_ask_prompt, session_id="fetch_reask"))
+            answer = re_ask.response.strip()
+        except Exception as exc:
+            answer = text[:500]
+
+        await self.tts.speak(answer, self._select_speech_emotion(None))
+        return answer
+
+    @staticmethod
+    async def _ddg_search(query: str, max_results: int = 5) -> list[dict]:
+        """
+        DuckDuckGo-Suche via HTML-Scraping (kein API-Key, keine Bibliothek nötig).
+        Gibt Liste von {title, body, url} zurück.
+        """
+        import httpx, re as _re, urllib.parse
+        encoded = urllib.parse.quote_plus(query)
+        url = f"https://html.duckduckgo.com/html/?q={encoded}"
+        headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) SOMA-AI/1.0"}
+        results = []
+        try:
+            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+                resp = await client.get(url, headers=headers)
+                resp.raise_for_status()
+                html = resp.text
+            # Titel extrahieren
+            titles  = _re.findall(r'class="result__title"[^>]*>.*?<a[^>]*>([^<]+)<', html)
+            snippets = _re.findall(r'class="result__snippet"[^>]*>([^<]+)<', html)
+            urls    = _re.findall(r'class="result__url"[^>]*>([^<]+)<', html)
+            for i in range(min(max_results, len(titles), len(snippets))):
+                results.append({
+                    "title": titles[i].strip(),
+                    "body":  snippets[i].strip(),
+                    "url":   urls[i].strip() if i < len(urls) else "",
+                })
+        except Exception as exc:
+            logger.warning("ddg_search_failed", error=str(exc))
+        return results
 
     @staticmethod
     async def _xdg_open(url: str) -> str:
