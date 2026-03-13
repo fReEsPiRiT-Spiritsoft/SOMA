@@ -126,7 +126,21 @@
             ws = new WebSocket(WS_URL);
             ws.onmessage = (e) => {
                 const data = JSON.parse(e.data);
-                updateMetrics(data);
+                
+                // Unterscheide zwischen System-Metriken und KI-Gedanken
+                if (data.thought_type && data.content) {
+                    // KI-Gedanke von broadcast_thought()
+                    const level = data.thought_type === 'error' ? 'error' : 
+                                  data.thought_type === 'warning' ? 'warn' : 'info';
+                    const tag = data.tag ? `[${data.tag}] ` : '';
+                    addThought(level, `${tag}${data.content}`);
+                } else if (data.cpu_percent !== undefined || data.ram_percent !== undefined) {
+                    // System-Metriken von broadcast_metrics()
+                    updateMetrics(data);
+                } else {
+                    // Fallback: als Info-Gedanke behandeln
+                    addThought('info', JSON.stringify(data));
+                }
             };
             ws.onclose = () => {
                 addThought('warn', 'WebSocket getrennt – Reconnect in 3s...');

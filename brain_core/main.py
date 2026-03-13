@@ -36,9 +36,13 @@ from brain_core.engines.heavy_llama import HeavyLlamaEngine
 from brain_core.engines.nano_intent import NanoIntentEngine
 from brain_core.engines.light_phi import LightPhiEngine
 from brain_core.discovery.ha_bridge import HomeAssistantBridge
+from brain_core.discovery.mqtt_listener import MQTTListener
+from brain_core.discovery.mDNS_scanner import MDNSScanner
+from brain_core.discovery.orchestrator import DiscoveryOrchestrator
 from brain_core.phone.phone_pipeline import PhonePipeline
 from shared.health_schemas import SystemMetrics, SystemHealthReport
 from evolution_lab.plugin_manager import PluginManager, PluginGenerator
+from evolution_lab.self_improver import SelfImprovementEngine, ProposalStatus
 from brain_core.memory.setup_embeddings import ensure_embedding_model
 from brain_core.memory.integration import (
     init_memory_system,
@@ -52,6 +56,12 @@ from brain_ego.identity_anchor import IdentityAnchor
 from brain_ego.consciousness import Consciousness, PerceptionSnapshot
 from brain_ego.internal_monologue import InternalMonologue
 from brain_core.logic_router import set_consciousness as set_logic_consciousness
+from brain_core.logic_router import set_broadcast_function
+from executive_arm.policy_engine import PolicyEngine
+from executive_arm.filesystem_map import FilesystemMap
+from executive_arm.terminal import SecureTerminal
+from executive_arm.toolset import Toolset
+from executive_arm.agency import SomaAgent
 from pathlib import Path
 from pydantic import BaseModel as PydanticBaseModel
 
@@ -81,9 +91,15 @@ voice_pipeline: VoicePipeline | None = None
 # Evolution Lab
 plugin_manager = PluginManager()
 plugin_generator: PluginGenerator | None = None
+self_improver: SelfImprovementEngine | None = None
 
 # Home Assistant Bridge — LLM steuert Smart Home via [ACTION:ha_call]
 ha_bridge: HomeAssistantBridge = HomeAssistantBridge()
+
+# Discovery Services (Phase 6)
+mqtt_listener = MQTTListener()
+mdns_scanner = MDNSScanner()
+discovery_orchestrator: DiscoveryOrchestrator | None = None
 
 # Phone Gateway (Asterisk ARI → Festnetz)
 phone_pipeline: PhonePipeline | None = None
@@ -93,6 +109,13 @@ interoception = Interoception()
 identity_anchor = IdentityAnchor()
 soma_consciousness: Consciousness | None = None
 internal_monologue: InternalMonologue | None = None
+
+# ── Executive Arm (Phase 3) — SOMAs HANDLUNGSFÄHIGKEIT ──────────────────
+policy_engine = PolicyEngine(identity_anchor=identity_anchor)
+filesystem_map = FilesystemMap()
+secure_terminal = SecureTerminal(policy_engine=policy_engine)
+soma_toolset: Toolset | None = None
+soma_agent: SomaAgent | None = None
 
 
 # ── Reminder Speak (Global für Import) ───────────────────────────────────
@@ -248,6 +271,9 @@ async def lifespan(app: FastAPI):
     logic_router.register_engine("light", light_engine)
     logic_router.register_engine("nano", nano_engine)
 
+    # LogicRouter mit Broadcast-Funktionalität verbinden
+    set_broadcast_function(broadcast_thought)
+
     # 5. Queue Worker starten (verarbeitet deferred requests)
     async def process_deferred(req):
         from shared.health_schemas import DeferredRequest
@@ -358,7 +384,7 @@ async def lifespan(app: FastAPI):
     await broadcast_thought("info", "🧠 SOMA-AI ist online und bereit!", "SYSTEM")
 
     # ── Evolution Lab initialisieren ─────────────────────────────────────
-    global plugin_generator
+    global plugin_generator, self_improver
     plugin_generator = PluginGenerator(
         manager=plugin_manager,
         heavy_engine=heavy_engine,
@@ -367,6 +393,24 @@ async def lifespan(app: FastAPI):
     loaded = plugin_manager.list_loaded()
     logger.info("evolution_lab_ready", plugins_loaded=len(loaded))
     await broadcast_thought("info", f"🧬 Evolution Lab bereit – {len(loaded)} Plugins geladen", "EVOLUTION")
+
+    # ── Self-Improvement Engine (Phase 5) ────────────────────────────────
+    async def _self_improve_llm(prompt: str, system_prompt: str = "") -> str:
+        return await heavy_engine.generate(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            session_id="self_improvement",
+            options_override={"temperature": 0.2},
+        )
+
+    self_improver = SelfImprovementEngine(
+        soma_root=Path(__file__).resolve().parent.parent,
+        llm_fn=_self_improve_llm,
+        policy_engine=policy_engine,
+        memory_fn=memory_store_event if memory_store_event else None,
+        broadcast_fn=lambda t, m, tag: broadcast_thought(t, m, tag),
+    )
+    logger.info("self_improvement_engine_ready")
     
     # ── Erinnerungs-Plugin mit TTS verbinden ─────────────────────────────
     if voice_pipeline and "erinnerung" in plugin_manager._plugins:
@@ -389,16 +433,23 @@ async def lifespan(app: FastAPI):
     global phone_pipeline
     try:
         if voice_pipeline:
+            # Phase 7: Memory + Summary Callbacks für Call → Memory
+            async def _phone_summarize(prompt: str) -> str:
+                """Nutzt light_engine für schnelle Zusammenfassungen."""
+                return await light_engine.generate(prompt=prompt, system_prompt="")
+
             phone_pipeline = PhonePipeline(
                 stt_engine=voice_pipeline.stt,
                 tts_engine=voice_pipeline.tts,
                 logic_router=logic_router,
                 ha_bridge=ha_bridge,
                 broadcast_callback=broadcast_thought,
+                memory_fn=memory_store_event,
+                summarize_fn=_phone_summarize,
             )
             await phone_pipeline.start()
-            logger.info("boot_phase", service="phone_gateway", status="starting 📞")
-            await broadcast_thought("info", "📞 Festnetz-Gateway startet (Asterisk ARI)", "PHONE")
+            logger.info("boot_phase", service="phone_gateway", status="starting 📞 (Phase 7: Call→Memory)")
+            await broadcast_thought("info", "📞 Festnetz-Gateway startet (Phase 7: Call→Memory)", "PHONE")
         else:
             logger.warning("phone_gateway_skipped",
                            reason="Voice Pipeline nicht verfügbar")
@@ -407,10 +458,122 @@ async def lifespan(app: FastAPI):
                      status="failed", error=str(exc))
         phone_pipeline = None
 
+    # ════════════════════════════════════════════════════════════════════
+    #  7b. DISCOVERY ORCHESTRATOR — Phase 6: Zero-Config Hardware
+    # ════════════════════════════════════════════════════════════════════
+    global discovery_orchestrator
+    try:
+        discovery_orchestrator = DiscoveryOrchestrator(
+            mqtt_listener=mqtt_listener,
+            mdns_scanner=mdns_scanner,
+            ha_bridge=ha_bridge,
+        )
+
+        # Device-Events → Dashboard
+        async def _on_device_discovered(device):
+            await broadcast_thought(
+                "info",
+                f"🔌 Neues Gerät: {device.name} ({device.protocol.value}) — {device.status.value}",
+                "DISCOVERY",
+            )
+
+        async def _on_device_lost(device):
+            await broadcast_thought(
+                "warn",
+                f"⚠️ Gerät offline: {device.name} ({device.device_id})",
+                "DISCOVERY",
+            )
+
+        discovery_orchestrator.set_callbacks(
+            on_discovered=_on_device_discovered,
+            on_lost=_on_device_lost,
+        )
+
+        await discovery_orchestrator.start()
+        logger.info(
+            "boot_phase", service="discovery_orchestrator", status="online 🔌",
+            devices=len(discovery_orchestrator.get_all_devices()),
+        )
+        await broadcast_thought(
+            "info",
+            f"🔌 Discovery online — {len(discovery_orchestrator.get_all_devices())} Geräte registriert",
+            "BOOT",
+        )
+    except Exception as exc:
+        logger.error("boot_phase", service="discovery_orchestrator", status="failed", error=str(exc))
+        await broadcast_thought("warn", f"Discovery Fehler: {exc}", "BOOT")
+
+    # ════════════════════════════════════════════════════════════════════
+    #  8. EXECUTIVE ARM BOOT — SOMA kann HANDELN
+    # ════════════════════════════════════════════════════════════════════
+    global soma_toolset, soma_agent
+    try:
+        # PolicyEngine Callbacks: Memory + Dashboard
+        async def _policy_memory(desc: str, etype: str, emotion: str, imp: float):
+            try:
+                await memory_store_event(
+                    event_type=etype, description=desc,
+                    emotion=emotion, importance=imp,
+                )
+            except Exception:
+                pass
+
+        policy_engine.set_memory(_policy_memory)
+        policy_engine.set_broadcast(broadcast_thought)
+
+        # FilesystemMap: Scan + Live-Watch
+        await filesystem_map.scan()
+        await filesystem_map.start_watcher()
+
+        # Toolset: alle Tools verdrahten
+        soma_toolset = Toolset(
+            policy_engine=policy_engine,
+            terminal=secure_terminal,
+            filesystem_map=filesystem_map,
+        )
+
+        # Agent: State-Machine mit LLM-Planung
+        soma_agent = SomaAgent(
+            toolset=soma_toolset,
+            identity_anchor=identity_anchor,
+            policy_engine=policy_engine,
+        )
+
+        # LLM fuer Agent: Heavy Engine (14B — braucht gutes Reasoning)
+        async def _agent_llm(system_prompt: str, user_prompt: str) -> str:
+            return await heavy_engine.generate(
+                prompt=user_prompt, system_prompt=system_prompt,
+            )
+
+        soma_agent.set_llm(_agent_llm)
+        soma_agent.set_broadcast(broadcast_thought)
+        soma_agent.set_memory(_policy_memory)
+
+        logger.info(
+            "boot_phase", service="executive_arm", status="online 🦾",
+            tools=soma_toolset.tool_names,
+        )
+        await broadcast_thought(
+            "info",
+            f"🦾 Executive Arm online — {len(soma_toolset.tool_names)} Tools, Agent bereit",
+            "BOOT",
+        )
+    except Exception as exc:
+        logger.error(
+            "boot_phase", service="executive_arm",
+            status="failed", error=str(exc),
+        )
+        await broadcast_thought(
+            "warn", f"Executive Arm Fehler: {exc}", "BOOT",
+        )
+
     yield  # ── App läuft ──
 
     # ── Shutdown ─────────────────────────────────────────────────────────
     logger.info("soma_shutting_down")
+    if discovery_orchestrator:
+        await discovery_orchestrator.stop()
+    filesystem_map.stop_watcher()
     if phone_pipeline:
         await phone_pipeline.stop()
     if voice_pipeline:
@@ -483,15 +646,48 @@ async def serve_audio(filename: str):
 
 @app.get("/api/v1/phone/status")
 async def get_phone_status():
-    """Phone Gateway Status."""
+    """Phone Gateway Status (Phase 7: erweitert mit Stats)."""
     if not phone_pipeline:
-        return {"status": "not_started", "active_calls": 0}
+        return {"status": "not_started", "active_calls": 0, "total_calls": 0}
     return {
         "status": "running" if phone_pipeline.is_running else "stopped",
         "active_calls": phone_pipeline.active_calls,
         "asterisk_host": settings.asterisk_host,
         "asterisk_ari_port": settings.asterisk_ari_port,
+        **phone_pipeline.stats,
     }
+
+
+@app.get("/api/v1/phone/history")
+async def get_phone_history(limit: int = 20):
+    """Phase 7: Anruf-Historie — letzte N Anrufe."""
+    if not phone_pipeline:
+        return {"calls": [], "total": 0}
+    history = phone_pipeline.get_call_history(limit=min(limit, 100))
+    return {
+        "calls": history,
+        "total": len(history),
+        "stats": phone_pipeline.stats,
+    }
+
+
+@app.get("/api/v1/phone/history/{session_id}")
+async def get_phone_call_detail(session_id: str):
+    """Phase 7: Detail-Ansicht eines einzelnen Anrufs inkl. Transkript."""
+    if not phone_pipeline:
+        raise HTTPException(status_code=503, detail="Phone Gateway not running")
+    record = phone_pipeline.get_call_record(session_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Call {session_id} not found")
+    return record.to_dict()
+
+
+@app.get("/api/v1/phone/stats")
+async def get_phone_stats():
+    """Phase 7: Anruf-Statistiken."""
+    if not phone_pipeline:
+        return {"total_calls": 0, "active_calls": 0, "is_running": False}
+    return phone_pipeline.stats
 
 
 @app.get("/api/v1/health")
@@ -639,6 +835,248 @@ async def reload_plugin(plugin_name: str):
     meta = await plugin_manager.reload_plugin(plugin_name)
     return {"success": meta.is_loaded, "error": meta.error, "name": meta.name}
 
+
+# ── Self-Improvement Endpoints (Phase 5) ────────────────────────────────
+
+class SelfImproveAnalyzeRequest(PydanticBaseModel):
+    file_path: str
+
+
+class SelfImproveSuggestRequest(PydanticBaseModel):
+    file_path: str
+    focus: str = ""
+
+
+class SelfImproveActionRequest(PydanticBaseModel):
+    proposal_id: str
+
+
+@app.post("/api/v1/evolution/self-improve/analyze")
+async def self_improve_analyze(req: SelfImproveAnalyzeRequest):
+    """SOMA analysiert eine eigene Datei (readonly)."""
+    if not self_improver:
+        raise HTTPException(503, "Self-Improvement Engine nicht initialisiert")
+    result = await self_improver.analyze_file(req.file_path)
+    return result
+
+
+@app.post("/api/v1/evolution/self-improve/suggest")
+async def self_improve_suggest(req: SelfImproveSuggestRequest):
+    """SOMA generiert einen konkreten Verbesserungsvorschlag."""
+    if not self_improver:
+        raise HTTPException(503, "Self-Improvement Engine nicht initialisiert")
+    proposal = await self_improver.suggest_improvement(
+        rel_path=req.file_path,
+        focus=req.focus,
+    )
+    return proposal.to_dict()
+
+
+@app.get("/api/v1/evolution/self-improve/proposals")
+async def self_improve_list_proposals():
+    """Alle Verbesserungsvorschlage anzeigen."""
+    if not self_improver:
+        raise HTTPException(503, "Self-Improvement Engine nicht initialisiert")
+    proposals = self_improver.list_proposals()
+    return {
+        "proposals": [p.to_dict() for p in proposals],
+        "stats": self_improver.stats,
+    }
+
+
+@app.post("/api/v1/evolution/self-improve/apply")
+async def self_improve_apply(req: SelfImproveActionRequest):
+    """Genehmigten Verbesserungsvorschlag anwenden (.bak + modify + test)."""
+    if not self_improver:
+        raise HTTPException(503, "Self-Improvement Engine nicht initialisiert")
+    proposal = await self_improver.apply_improvement(req.proposal_id)
+    return proposal.to_dict()
+
+
+@app.post("/api/v1/evolution/self-improve/reject")
+async def self_improve_reject(req: SelfImproveActionRequest):
+    """Verbesserungsvorschlag ablehnen."""
+    if not self_improver:
+        raise HTTPException(503, "Self-Improvement Engine nicht initialisiert")
+    proposal = await self_improver.reject_proposal(req.proposal_id)
+    return proposal.to_dict()
+
+
+@app.post("/api/v1/evolution/self-improve/rollback")
+async def self_improve_rollback(req: SelfImproveActionRequest):
+    """Angewandte Verbesserung rueckgaengig machen."""
+    if not self_improver:
+        raise HTTPException(503, "Self-Improvement Engine nicht initialisiert")
+    proposal = await self_improver.rollback(req.proposal_id)
+    return proposal.to_dict()
+
+
+@app.get("/api/v1/evolution/self-improve/files")
+async def self_improve_list_files():
+    """Liste aller analysierbaren Dateien."""
+    if not self_improver:
+        raise HTTPException(503, "Self-Improvement Engine nicht initialisiert")
+    return {"files": self_improver.get_analyzable_files()}
+
+
+@app.get("/api/v1/evolution/self-improve/history")
+async def self_improve_history():
+    """Historie der Selbst-Verbesserungen."""
+    if not self_improver:
+        raise HTTPException(503, "Self-Improvement Engine nicht initialisiert")
+    return {
+        "history": self_improver.get_history(),
+        "stats": self_improver.stats,
+    }
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  Phase 6: Spatial Awareness & Discovery Endpoints
+# ════════════════════════════════════════════════════════════════════════
+
+
+# ── Presence Endpoints ──────────────────────────────────────────────────
+
+@app.get("/api/v1/spatial/presence")
+async def get_all_presence():
+    """Alle User-Positionen mit Wahrscheinlichkeitsvektoren."""
+    presences = presence_manager.get_all_presences()
+    return {
+        "presences": presences,
+        "active_rooms": presence_manager.get_active_rooms(),
+        "stats": presence_manager.stats,
+    }
+
+
+@app.get("/api/v1/spatial/presence/{user_id}")
+async def get_user_presence(user_id: str):
+    """Position und Wahrscheinlichkeitsvektor eines bestimmten Users."""
+    room = presence_manager.get_user_room(user_id)
+    if room is None:
+        raise HTTPException(404, f"User '{user_id}' nicht getrackt")
+    vector = presence_manager.get_user_probability_vector(user_id)
+    session = presence_manager.sessions.get_user_session(user_id)
+    return {
+        "user_id": user_id,
+        "current_room": room,
+        "probability_vector": vector.model_dump() if vector else None,
+        "session": session.model_dump() if session else None,
+    }
+
+
+@app.get("/api/v1/spatial/rooms")
+async def get_active_rooms():
+    """Alle aktiven Räume mit ihren Nutzern und Sessions."""
+    rooms = presence_manager.get_active_rooms()
+    result = {}
+    for room_id in rooms:
+        users = presence_manager.get_room_users(room_id)
+        sessions = presence_manager.sessions.get_room_sessions(room_id)
+        result[room_id] = {
+            "room_id": room_id,
+            "users": users,
+            "sessions": [s.model_dump() for s in sessions],
+            "user_count": len(users),
+        }
+    return {"rooms": result, "active_count": len(rooms)}
+
+
+@app.get("/api/v1/spatial/sessions")
+async def get_all_sessions():
+    """Alle aktiven Konversations-Sessions."""
+    sessions = presence_manager.sessions.get_all_active()
+    return {
+        "sessions": [s.model_dump() for s in sessions],
+        "stats": presence_manager.sessions.stats,
+    }
+
+
+class ManualPresenceRequest(PydanticBaseModel):
+    user_id: str
+    room_id: str
+
+
+@app.post("/api/v1/spatial/presence/manual")
+async def set_manual_presence(req: ManualPresenceRequest):
+    """Manueller Raumwechsel (Dashboard oder Voice-Command)."""
+    event = await presence_manager.set_manual_room(req.user_id, req.room_id)
+    return {
+        "event": event.model_dump(),
+        "current_room": req.room_id,
+    }
+
+
+# ── Discovery Endpoints ─────────────────────────────────────────────────
+
+@app.get("/api/v1/discovery/devices")
+async def get_all_devices():
+    """Alle entdeckten Geräte in der Registry."""
+    if not discovery_orchestrator:
+        raise HTTPException(503, "Discovery nicht initialisiert")
+    devices = discovery_orchestrator.get_all_devices()
+    return {
+        "devices": [d.model_dump() for d in devices],
+        "stats": discovery_orchestrator.stats,
+    }
+
+
+@app.get("/api/v1/discovery/devices/{device_id}")
+async def get_device(device_id: str):
+    """Details eines bestimmten Geräts."""
+    if not discovery_orchestrator:
+        raise HTTPException(503, "Discovery nicht initialisiert")
+    device = discovery_orchestrator.get_device(device_id)
+    if not device:
+        raise HTTPException(404, f"Gerät '{device_id}' nicht gefunden")
+    return device.model_dump()
+
+
+@app.post("/api/v1/discovery/scan")
+async def trigger_discovery_scan():
+    """Manuellen mDNS + HA Scan auslösen."""
+    if not discovery_orchestrator:
+        raise HTTPException(503, "Discovery nicht initialisiert")
+    results = await discovery_orchestrator.force_scan()
+    return {
+        "scan_results": results,
+        "total_devices": len(discovery_orchestrator.get_all_devices()),
+    }
+
+
+@app.get("/api/v1/discovery/ha/entities")
+async def get_ha_entities():
+    """Home Assistant Entitäten aus dem Cache."""
+    cache = ha_bridge._entities_cache
+    return {
+        "entities": cache,
+        "count": len(cache),
+    }
+
+
+@app.post("/api/v1/discovery/ha/sync")
+async def force_ha_sync():
+    """Home Assistant Entitäten-Sync erzwingen."""
+    if not discovery_orchestrator:
+        raise HTTPException(503, "Discovery nicht initialisiert")
+    count = await discovery_orchestrator._sync_ha_entities()
+    return {"synced": count}
+
+
+class DeviceRoomAssignRequest(PydanticBaseModel):
+    device_id: str
+    room_id: str
+
+
+@app.post("/api/v1/discovery/devices/assign-room")
+async def assign_device_room(req: DeviceRoomAssignRequest):
+    """Gerät einem Raum zuweisen."""
+    if not discovery_orchestrator:
+        raise HTTPException(503, "Discovery nicht initialisiert")
+    device = await discovery_orchestrator.assign_room(req.device_id, req.room_id)
+    if not device:
+        raise HTTPException(404, f"Gerät '{req.device_id}' nicht gefunden")
+    return device.model_dump()
+
 # ── Intent Statistics Endpoints ─────────────────────────────────────────
 
 @app.get("/api/v1/intent/stats")
@@ -685,7 +1123,190 @@ async def get_dashboard_data():
         "atmosphere": atmosphere,
         "queue_size": await queue_handler.queue_size(),
         "active_rooms": presence_manager.get_active_rooms(),
+        # Phase 8: Ego-Daten im Full-Dashboard
+        "ego": _build_ego_snapshot(),
+        "phone": {
+            "active_calls": phone_pipeline.active_calls if phone_pipeline else 0,
+            "total_calls": phone_pipeline.stats.get("total_calls", 0) if phone_pipeline else 0,
+        },
+        "memory": await _build_memory_snapshot(),
+        "agent": {
+            "is_running": soma_agent.is_running if soma_agent else False,
+            "current_goal": soma_agent.current_goal if soma_agent else None,
+        },
     }
+
+
+# ── Phase 8: Ego & Consciousness Endpoints ──────────────────────────────
+
+
+def _build_ego_snapshot() -> dict:
+    """
+    Phase 8: Baut einen vollständigen Ego-Snapshot aus allen drei Subsystemen.
+    Das ist SOMAs INNERES — Bewusstsein + Körpergefühl + Gedanken.
+    """
+    snapshot: dict = {"status": "offline"}
+
+    # ── Interoception: Körpergefühl (SomaEmotionalVector) ────────────
+    try:
+        body = interoception.current
+        snapshot["interoception"] = {
+            "frustration": round(body.frustration, 3),
+            "congestion": round(body.congestion, 3),
+            "survival_anxiety": round(body.survival_anxiety, 3),
+            "physical_stress": round(body.physical_stress, 3),
+            "exhaustion": round(body.exhaustion, 3),
+            "calm": round(body.calm, 3),
+            "vitality": round(body.vitality, 3),
+            "clarity": round(body.clarity, 3),
+            "dominant_feeling": body.dominant_feeling,
+            "arousal": round(body.arousal, 3),
+            "valence": round(body.valence, 3),
+            "narrative": body.to_narrative(),
+        }
+    except Exception:
+        snapshot["interoception"] = {"status": "unavailable"}
+
+    # ── Consciousness: Bewusstseinszustand ────────────────────────────
+    if soma_consciousness is not None:
+        try:
+            state = soma_consciousness.state
+            snapshot["consciousness"] = {
+                "mood": state.mood,
+                "attention_focus": state.attention_focus,
+                "current_thought": state.current_thought[:200] if state.current_thought else "",
+                "body_feeling": state.body_feeling[:200] if state.body_feeling else "",
+                "body_arousal": round(state.body_arousal, 3),
+                "body_valence": round(state.body_valence, 3),
+                "uptime_feeling": state.uptime_feeling,
+                "diary_insight": state.diary_insight[:200] if state.diary_insight else "",
+                "recent_memory": state.recent_memory_summary[:200] if state.recent_memory_summary else "",
+                "update_count": state.update_count,
+                "generation_ms": round(state.generation_ms, 1),
+                "perception": {
+                    "last_user_text": state.perception.last_user_text[:120] if state.perception.last_user_text else "",
+                    "last_soma_response": state.perception.last_soma_response[:120] if state.perception.last_soma_response else "",
+                    "user_emotion": state.perception.user_emotion,
+                    "user_arousal": round(state.perception.user_arousal, 3),
+                    "user_valence": round(state.perception.user_valence, 3),
+                    "room_id": state.perception.room_id,
+                    "room_mood": state.perception.room_mood,
+                    "is_child_present": state.perception.is_child_present,
+                    "people_present": state.perception.people_present,
+                    "seconds_since_interaction": round(state.perception.seconds_since_last_interaction, 1),
+                },
+            }
+            snapshot["status"] = "online"
+        except Exception:
+            snapshot["consciousness"] = {"status": "unavailable"}
+    else:
+        snapshot["consciousness"] = {"status": "not_started"}
+
+    # ── InternalMonologue: Gedanken-Stats ─────────────────────────────
+    if internal_monologue is not None:
+        snapshot["monologue"] = internal_monologue.stats
+    else:
+        snapshot["monologue"] = {"status": "not_started"}
+
+    return snapshot
+
+
+async def _build_memory_snapshot() -> dict:
+    """Phase 8: Memory-Stats für Dashboard."""
+    try:
+        orchestrator = get_orchestrator()
+        return await orchestrator.get_memory_stats()
+    except Exception:
+        return {"status": "unavailable"}
+
+
+@app.get("/api/v1/ego/consciousness")
+async def get_consciousness_state():
+    """
+    Phase 8: SOMAs vollständiger Bewusstseinszustand.
+    Der Global Workspace — was SOMA gerade denkt, fühlt, wahrnimmt.
+    """
+    if soma_consciousness is None:
+        return {"status": "not_started"}
+
+    state = soma_consciousness.state
+    return {
+        "status": "online",
+        "mood": state.mood,
+        "attention_focus": state.attention_focus,
+        "current_thought": state.current_thought,
+        "body_feeling": state.body_feeling,
+        "body_arousal": round(state.body_arousal, 3),
+        "body_valence": round(state.body_valence, 3),
+        "uptime_feeling": state.uptime_feeling,
+        "diary_insight": state.diary_insight,
+        "recent_memory": state.recent_memory_summary,
+        "identity": state.identity[:200] if state.identity else "",
+        "update_count": state.update_count,
+        "generation_ms": round(state.generation_ms, 1),
+        "prompt_prefix_length": len(state.to_prompt_prefix()),
+        "perception": {
+            "last_user_text": state.perception.last_user_text,
+            "last_soma_response": state.perception.last_soma_response,
+            "user_emotion": state.perception.user_emotion,
+            "user_arousal": round(state.perception.user_arousal, 3),
+            "user_valence": round(state.perception.user_valence, 3),
+            "room_id": state.perception.room_id,
+            "room_mood": state.perception.room_mood,
+            "is_child_present": state.perception.is_child_present,
+            "people_present": state.perception.people_present,
+            "seconds_since_interaction": round(state.perception.seconds_since_last_interaction, 1),
+        },
+    }
+
+
+@app.get("/api/v1/ego/interoception")
+async def get_interoception_state():
+    """
+    Phase 8: SOMAs Körpergefühl — Hardware als Propriozeption.
+    CPU, RAM, VRAM, Temperatur → Emotionale Vektoren.
+    """
+    body = interoception.current
+    return {
+        "status": "online",
+        "emotions": {
+            "frustration": round(body.frustration, 3),
+            "congestion": round(body.congestion, 3),
+            "survival_anxiety": round(body.survival_anxiety, 3),
+            "physical_stress": round(body.physical_stress, 3),
+            "exhaustion": round(body.exhaustion, 3),
+            "calm": round(body.calm, 3),
+            "vitality": round(body.vitality, 3),
+            "clarity": round(body.clarity, 3),
+        },
+        "dominant_feeling": body.dominant_feeling,
+        "arousal": round(body.arousal, 3),
+        "valence": round(body.valence, 3),
+        "narrative": body.to_narrative(),
+        "compact": body.to_compact(),
+    }
+
+
+@app.get("/api/v1/ego/monologue")
+async def get_monologue_state():
+    """
+    Phase 8: SOMAs innere Stimme — Gedanken-Statistiken.
+    """
+    if internal_monologue is None:
+        return {"status": "not_started"}
+    return {
+        "status": "online",
+        **internal_monologue.stats,
+    }
+
+
+@app.get("/api/v1/ego/snapshot")
+async def get_ego_snapshot():
+    """
+    Phase 8: Vollständiger Ego-Snapshot — Consciousness + Interoception + Monologue.
+    Ein einziger Call für das gesamte Innenleben.
+    """
+    return _build_ego_snapshot()
 
 
 # ── Voice Pipeline Endpoints ────────────────────────────────────────────
@@ -718,6 +1339,37 @@ async def get_atmosphere():
     }
 
 
+# ── Phase 4: Emotion Vector Endpoint ────────────────────────────────────
+
+@app.get("/api/v1/voice/emotion")
+async def get_voice_emotion():
+    """
+    Phase 4: Aktueller VoiceEmotionVector.
+    Liefert die 6-dimensionale Stimmanalyse + Meta-Features.
+    Wird vom Shader-Client gepolled (oder via WebSocket empfangen).
+    """
+    if not voice_pipeline:
+        return {"status": "offline", "emotion": {"dominant": "neutral", "confidence": 0}}
+
+    ev = voice_pipeline.current_emotion_vector
+    smoothed = voice_pipeline.pitch_analyzer.get_smoothed_emotion()
+
+    return {
+        "status": "online",
+        "current": ev.as_dict,
+        "smoothed": smoothed.as_dict,
+        "is_detected": ev.is_detected,
+        "features": {
+            "f0_hz": ev.f0_hz,
+            "jitter_percent": ev.jitter_percent,
+            "shimmer_percent": ev.shimmer_percent,
+            "speaking_rate": ev.speaking_rate,
+            "energy_rms": ev.energy_rms,
+            "spectral_centroid_hz": ev.spectral_centroid_hz,
+        },
+    }
+
+
 @app.get("/api/v1/memory/stats")
 async def get_memory_stats():
     """Gedächtnis-Statistiken (3-Layer Hierarchy)."""
@@ -726,6 +1378,84 @@ async def get_memory_stats():
         return await orchestrator.get_memory_stats()
     except RuntimeError:
         return {"error": "Memory system not initialized"}
+
+
+# ── Executive Arm Endpoints (Phase 3) ───────────────────────────────────
+
+class AgentRequest(PydanticBaseModel):
+    goal: str
+
+
+@app.post("/api/v1/agent/run")
+async def agent_run(req: AgentRequest):
+    """SOMA fuehrt ein Ziel autonom aus (multi-step Agent)."""
+    if not soma_agent:
+        raise HTTPException(503, "Executive Arm nicht initialisiert")
+
+    result = await soma_agent.run(req.goal)
+    return {
+        "run_id": result.run_id,
+        "goal": result.goal,
+        "status": result.status.value,
+        "steps": [
+            {
+                "step": s.step_number,
+                "action": s.action,
+                "tool": s.tool_name,
+                "result": s.tool_result[:200],
+                "reasoning": s.reasoning[:200],
+                "allowed": s.was_allowed,
+                "error": s.error,
+                "duration_ms": s.duration_ms,
+            }
+            for s in result.steps
+        ],
+        "final_result": result.final_result,
+        "error": result.error,
+        "duration_ms": result.total_duration_ms,
+    }
+
+
+@app.post("/api/v1/agent/cancel")
+async def agent_cancel():
+    """Breche laufenden Agent-Run ab."""
+    if not soma_agent:
+        raise HTTPException(503, "Executive Arm nicht initialisiert")
+    ok = await soma_agent.cancel()
+    return {"cancelled": ok}
+
+
+@app.get("/api/v1/agent/status")
+async def agent_status():
+    """Agent-Status + Statistiken."""
+    if not soma_agent:
+        return {"status": "offline"}
+    return {
+        "is_running": soma_agent.is_running,
+        "current_goal": soma_agent.current_goal,
+        "current_step": soma_agent.current_step,
+        "stats": soma_agent.stats,
+    }
+
+
+@app.get("/api/v1/agent/history")
+async def agent_history():
+    """Letzte Agent-Runs."""
+    if not soma_agent:
+        return {"runs": []}
+    return {"runs": soma_agent.get_run_history()}
+
+
+@app.get("/api/v1/executive/policy/audit")
+async def policy_audit():
+    """PolicyEngine Audit-Log (letzte 50 Eintraege)."""
+    return {"entries": policy_engine.get_audit_log(limit=50)}
+
+
+@app.get("/api/v1/executive/filesystem")
+async def get_filesystem_tree():
+    """SOMAs Sicht auf die eigene Dateistruktur."""
+    return {"tree": filesystem_map.to_tree()}
 
 
 # ── WebSocket: Live Thinking Stream ─────────────────────────────────────

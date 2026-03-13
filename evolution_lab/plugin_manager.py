@@ -36,13 +36,17 @@ from dataclasses import dataclass, field
 
 import structlog
 
+from evolution_lab.code_validator import CodeValidator, ValidationReport, Severity
+from evolution_lab.sandbox_runner import SandboxRunner, SandboxResult, SandboxMode
+
 logger = structlog.get_logger("soma.evolution")
 
 PLUGINS_DIR = Path(__file__).parent / "generated_plugins"
 SANDBOX_DIR = Path(__file__).parent / "sandbox_env"
 
 # Maximale Retry-Versuche wenn der LLM-generierte Code fehlschlägt
-MAX_GENERATION_RETRIES = 2
+# Phase 5: Erhoeht auf 3 — LLM bekommt Validator + Sandbox Feedback
+MAX_GENERATION_RETRIES = 3
 
 
 @dataclass
@@ -218,6 +222,10 @@ class PluginGenerator:
         self.sandbox_dir.mkdir(parents=True, exist_ok=True)
         self._heavy_engine = heavy_engine  # LLM für Code-Generierung
         self._prompt_template = self._load_prompt_template()
+        # Phase 5: Code-Validator (Forbidden Patterns + AST + Black)
+        self._validator = CodeValidator(format_code=True)
+        # Phase 5: Sandbox-Runner (Docker mit Subprocess-Fallback)
+        self._sandbox = SandboxRunner(sandbox_dir=self.sandbox_dir)
         # Status-Tracking für Dashboard
         self.last_generation: dict = {}
 
@@ -394,6 +402,44 @@ class PluginGenerator:
             self.last_generation["code"] = code
             await _emit(f"✅ Code generiert ({len(code)} Zeichen)")
 
+            # ── Phase 5: Code-Validierung (Forbidden Patterns + AST) ──
+            await _emit("🛡️ Sicherheits-Validierung (Forbidden Patterns + AST)...")
+            report = self._validator.validate(code, check_structure=True)
+
+            if not report.is_safe:
+                last_error = (
+                    f"Code-Sicherheitsvalidierung fehlgeschlagen:\n"
+                    f"{report.error_summary}\n"
+                    f"Entferne alle gefährlichen Patterns und nutze sichere Alternativen."
+                )
+                await _emit(f"⚠️ Sicherheits-Check fehlgeschlagen: {report.critical_count} kritisch, {report.high_count} hoch")
+                if attempt <= MAX_GENERATION_RETRIES:
+                    continue
+                else:
+                    self.last_generation["status"] = "failed"
+                    self.last_generation["error"] = last_error
+                    return False, last_error, code
+
+            if not report.is_valid_structure:
+                last_error = (
+                    f"Plugin-Struktur ungültig:\n"
+                    f"{report.error_summary}\n"
+                    f"Stelle sicher: __version__, __author__, __description__ und async def execute() existieren."
+                )
+                await _emit(f"⚠️ Struktur-Check fehlgeschlagen")
+                if attempt <= MAX_GENERATION_RETRIES:
+                    continue
+                else:
+                    self.last_generation["status"] = "failed"
+                    self.last_generation["error"] = last_error
+                    return False, last_error, code
+
+            # Black-formatierten Code verwenden wenn verfuegbar
+            if report.formatted_code:
+                code = report.formatted_code
+                self.last_generation["code"] = code
+                await _emit("🎨 Code mit Black formatiert")
+
             # ── Dependencies installieren ────────────────────────────────
             deps = self._extract_dependencies(code)
             if deps:
@@ -414,26 +460,47 @@ class PluginGenerator:
                         self.last_generation["error"] = last_error
                         return False, last_error, code
 
-            # ── Syntax + Sandbox Test ────────────────────────────────────
-            await _emit("🔍 Syntax-Check & Sandbox-Test...")
-            success, message = await self.test_and_install(name, code)
+            # ── Syntax + Sandbox Test (Phase 5: Echte Isolation) ───────
+            await _emit("🔒 Sandbox-Test (isolierte Ausführung)...")
+            sandbox_result = await self._sandbox.run(
+                code=code,
+                plugin_name=name,
+                deps=deps if deps else None,
+            )
 
-            if success:
+            if sandbox_result.success:
+                # Sandbox bestanden → In generated_plugins/ installieren
+                await _emit(f"✅ Sandbox-Test bestanden ({sandbox_result.mode.value}, {sandbox_result.duration_sec:.1f}s)")
+                plugin_path = self.manager.plugins_dir / f"{name}.py"
+                plugin_path.write_text(code, encoding="utf-8")
+                logger.info("plugin_installed", name=name, path=str(plugin_path))
+
+                meta = await self.manager.load_plugin(name)
+                if not meta.is_loaded:
+                    last_error = f"Installiert aber Lade-Fehler: {meta.error}"
+                    await _emit(f"⚠️ {last_error}")
+                    if attempt <= MAX_GENERATION_RETRIES:
+                        continue
+                    else:
+                        self.last_generation["status"] = "failed"
+                        self.last_generation["error"] = last_error
+                        return False, last_error, code
+
                 self.last_generation["status"] = "installed"
                 await _emit(f"🚀 Plugin '{name}' installiert und geladen!", "EVOLUTION_OK")
                 self._heavy_engine.drop_session(f"evolution_{name}")
-                return True, message, code
+                return True, f"Plugin '{name}' erfolgreich generiert, validiert, getestet und geladen.", code
             else:
-                last_error = message
-                await _emit(f"⚠️ Test fehlgeschlagen: {message}")
+                last_error = sandbox_result.feedback_for_llm or sandbox_result.error
+                await _emit(f"⚠️ Sandbox-Test fehlgeschlagen: {sandbox_result.error}")
                 if attempt <= MAX_GENERATION_RETRIES:
                     continue  # Nächster Versuch
                 else:
                     self.last_generation["status"] = "failed"
-                    self.last_generation["error"] = message
-                    await _emit(f"❌ Plugin fehlgeschlagen nach {MAX_GENERATION_RETRIES} Retries: {message}")
+                    self.last_generation["error"] = sandbox_result.error
+                    await _emit(f"❌ Plugin fehlgeschlagen nach {MAX_GENERATION_RETRIES} Retries: {sandbox_result.error}")
                     self._heavy_engine.drop_session(f"evolution_{name}")
-                    return False, message, code
+                    return False, sandbox_result.error, code
 
         # Sollte nicht erreicht werden, aber sicherheitshalber
         return False, last_error, code

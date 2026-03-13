@@ -29,7 +29,7 @@ from typing import Callable, Optional
 import structlog
 
 from brain_core.config import settings
-from brain_core.phone.call_session import CallSession, CallRecord
+from brain_core.phone.call_session import CallSession
 
 logger = structlog.get_logger("soma.phone")
 
@@ -49,26 +49,16 @@ class PhonePipeline:
         logic_router,
         ha_bridge,
         broadcast_callback: Optional[Callable] = None,
-        memory_fn: Optional[Callable] = None,        # Phase 7: Memory store
-        summarize_fn: Optional[Callable] = None,      # Phase 7: LLM summary
     ):
         self._stt = stt_engine
         self._tts = tts_engine
         self._router = logic_router
         self._ha = ha_bridge
         self._broadcast = broadcast_callback
-        self._memory_fn = memory_fn
-        self._summarize_fn = summarize_fn
 
         self._sessions: dict[str, CallSession] = {}
         self._running = False
         self._ws_task: Optional[asyncio.Task] = None
-
-        # Phase 7: Call History + Stats
-        self._call_history: list[CallRecord] = []
-        self._max_history = 100  # Maximal 100 Anrufe in Memory halten
-        self._total_calls = 0
-        self._total_duration = 0.0
 
         # Shared dirs für Recordings und TTS-Sounds
         self._rec_dir = Path(settings.phone_recordings_dir)
@@ -230,49 +220,10 @@ class PhonePipeline:
             broadcast=self._broadcast,
             ha_speaker_entity=getattr(settings, "ha_speaker_entity", "media_player.all"),
             soma_local_url=soma_url,
-            memory_fn=self._memory_fn,
-            summarize_fn=self._summarize_fn,
-            on_call_ended=self._on_call_ended,
         )
 
         self._sessions[channel_id] = session
         asyncio.create_task(session.run())
-
-    # ════════════════════════════════════════════════════════════════════
-    #  PHASE 7: CALL HISTORY & STATS
-    # ════════════════════════════════════════════════════════════════════
-
-    async def _on_call_ended(self, record: CallRecord) -> None:
-        """
-        Phase 7: Callback wenn ein Anruf beendet ist.
-        Speichert den CallRecord in der History.
-        """
-        self._call_history.append(record)
-        self._total_calls += 1
-        self._total_duration += record.duration_sec
-
-        # History-Limit einhalten
-        if len(self._call_history) > self._max_history:
-            self._call_history = self._call_history[-self._max_history:]
-
-        logger.info(
-            "call_history_updated",
-            total=self._total_calls,
-            history_size=len(self._call_history),
-            last_caller=record.caller_id,
-            last_duration=f"{record.duration_sec:.0f}s",
-        )
-
-    def get_call_history(self, limit: int = 20) -> list[dict]:
-        """Phase 7: Letzte N Anrufe als Liste."""
-        return [r.to_dict() for r in self._call_history[-limit:]]
-
-    def get_call_record(self, session_id: str) -> CallRecord | None:
-        """Phase 7: Einzelnen Anruf nach session_id finden."""
-        for record in reversed(self._call_history):
-            if record.session_id == session_id:
-                return record
-        return None
 
     # ════════════════════════════════════════════════════════════════════
     #  STATUS
@@ -285,34 +236,3 @@ class PhonePipeline:
     @property
     def is_running(self) -> bool:
         return self._running
-
-    @property
-    def call_history_list(self) -> list[CallRecord]:
-        """Phase 7: Direkt-Zugriff auf die CallRecord-Liste."""
-        return self._call_history
-
-    @property
-    def stats(self) -> dict:
-        """Phase 7: Anruf-Statistiken."""
-        avg_duration = (
-            self._total_duration / self._total_calls
-            if self._total_calls > 0
-            else 0.0
-        )
-
-        # Emotion-Verteilung aus History
-        emotion_counts: dict[str, int] = {}
-        for rec in self._call_history:
-            emotion_counts[rec.dominant_emotion] = (
-                emotion_counts.get(rec.dominant_emotion, 0) + 1
-            )
-
-        return {
-            "total_calls": self._total_calls,
-            "active_calls": self.active_calls,
-            "history_size": len(self._call_history),
-            "total_duration_sec": round(self._total_duration, 1),
-            "avg_duration_sec": round(avg_duration, 1),
-            "is_running": self.is_running,
-            "emotion_distribution": emotion_counts,
-        }

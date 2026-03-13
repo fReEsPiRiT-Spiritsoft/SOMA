@@ -33,6 +33,14 @@
         audioLevel: 0.0,      // raw audio 0-1
         modeId:       0.0,    // interpolierter Modus-Index für Orb-Shader
         targetModeId: 0.0,    // Ziel  (0=idle 1=listen 2=speak 3=think 4=crit)
+
+        // ── Phase 4: Emotion Overlay ────────────────────────────
+        emotionR: 0.0, emotionG: 0.0, emotionB: 0.0,
+        targetEmotionR: 0.0, targetEmotionG: 0.0, targetEmotionB: 0.0,
+        emotionIntensity: 0.0,
+        targetEmotionIntensity: 0.0,
+        emotionPulseSpeed: 0.0,
+        targetEmotionPulseSpeed: 0.0,
     };
 
     // ══════════════════════════════════════════════════════════════════
@@ -69,6 +77,10 @@
         uniform float u_energy;
         uniform vec3  u_color;
         uniform vec2  u_res;
+        // Phase 4: Emotion Overlay
+        uniform vec3  u_emotion;       // Emotion-Farbe (RGB)
+        uniform float u_emotionInt;    // Intensitaet 0-1
+        uniform float u_emotionPulse;  // Puls-Geschwindigkeit
 
         varying vec2 vUv;
 
@@ -184,7 +196,18 @@
             // ── Hintergrund-Atem ────────────────────────────────
             float bgBreath = sin(t * 0.3) * 0.008 + 0.012;
             col += u_color * bgBreath * v;
-
+            // ── Phase 4: Emotion Overlay ────────────────────────────
+            // Emotion-Farbe wird als sanfter Shimmer ueber die Mode-Farbe gelegt.
+            // Staerke pulsiert — gestresst = schnell, muede = langsam.
+            if (u_emotionInt > 0.01) {
+                float ePulse = 0.5 + 0.5 * sin(t * (0.5 + u_emotionPulse * 3.0));
+                float eShimmer = snoise(vec2(uv.x * 4.0, t * (0.3 + u_emotionPulse)));
+                float eBlend = u_emotionInt * (0.6 + 0.4 * ePulse) * (0.8 + 0.2 * eShimmer);
+                col = mix(col, col * 0.5 + u_emotion * (0.5 + eBlend * 0.5), eBlend * 0.4);
+                // Emotion-Glow am Rand
+                float eGlow = u_emotionInt * 0.015 / (abs(dist - 0.005) + 0.015);
+                col += u_emotion * eGlow * ePulse * 0.3;
+            }
             gl_FragColor = vec4(col, 1.0);
         }
     `;
@@ -202,6 +225,10 @@
         uniform vec3  u_color;
         uniform vec2  u_res;
         uniform float u_mode;   // 0=idle  1=listen  2=speak  3=think  4=crit
+        // Phase 4: Emotion Overlay
+        uniform vec3  u_emotion;       // Emotion-Farbe (RGB)
+        uniform float u_emotionInt;    // Intensitaet 0-1
+        uniform float u_emotionPulse;  // Puls-Geschwindigkeit
 
         varying vec2 vUv;
 
@@ -354,6 +381,26 @@
             float breath = 0.5 + 0.5 * sin(t * bs);
             col *= 0.85 + 0.15 * breath;
 
+            // ── Phase 4: Emotion Overlay auf dem Orb ────────────
+            // Emotion beeinflusst: Kern-Farbe, Glow, Tentakel-Intensitaet
+            if (u_emotionInt > 0.01) {
+                float ePulse = 0.5 + 0.5 * sin(t * (0.8 + u_emotionPulse * 4.0));
+                float eShimmer = snoise(vec2(angle * 2.0, t * (0.4 + u_emotionPulse * 2.0)));
+                float eBlend = u_emotionInt * (0.5 + 0.5 * ePulse);
+
+                // Kern-Tonung: Emotion-Farbe mischen
+                float kernMask = smoothstep(r + 0.05, r - 0.05, dist);
+                col = mix(col, col * 0.6 + u_emotion * (0.4 + kernMask * 0.3), eBlend * 0.35);
+
+                // Emotion-Aureole: pulsierender Ring in Emotion-Farbe
+                float eRing = 0.012 / (abs(dist - r - 0.08 - ePulse * 0.04) + 0.012);
+                col += u_emotion * eRing * eBlend * 0.5;
+
+                // Shimmer auf den Tentakeln
+                float eRayGlow = max(0.0, eShimmer) * u_emotionInt * 0.08;
+                col += u_emotion * eRayGlow * smoothstep(r + 0.3, r, dist);
+            }
+
             float scan = sin(vUv.y * u_res.y * 1.2) * 0.012 + 0.988;
             col *= scan;
 
@@ -371,12 +418,16 @@
 
     function makeUniforms() {
         return {
-            u_time:   { value: 0.0 },
-            u_amp:    { value: 0.15 },
-            u_energy: { value: 0.0 },
-            u_color:  { value: new THREE.Vector3(0.0, 1.0, 0.53) },
-            u_res:    { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
-            u_mode:   { value: 0.0 },
+            u_time:         { value: 0.0 },
+            u_amp:          { value: 0.15 },
+            u_energy:       { value: 0.0 },
+            u_color:        { value: new THREE.Vector3(0.0, 1.0, 0.53) },
+            u_res:          { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+            u_mode:         { value: 0.0 },
+            // Phase 4: Emotion Overlay
+            u_emotion:      { value: new THREE.Vector3(0.0, 0.0, 0.0) },
+            u_emotionInt:   { value: 0.0 },
+            u_emotionPulse: { value: 0.0 },
         };
     }
 
@@ -425,6 +476,24 @@
     };
 
     // ══════════════════════════════════════════════════════════════════
+    //  PHASE 4: EMOTION COLOR PRESETS
+    //  Jede Emotion hat eine Farbe + Puls-Geschwindigkeit.
+    //  Diese werden ON TOP der Mode-Farbe geblended.
+    // ══════════════════════════════════════════════════════════════════
+
+    const EMOTION_COLORS = {
+        neutral:  { r: 0.00, g: 0.00, b: 0.00, pulse: 0.0 },   // Kein Overlay
+        happy:    { r: 1.00, g: 0.85, b: 0.20, pulse: 0.4 },   // Warmes Gold
+        sad:      { r: 0.30, g: 0.25, b: 0.80, pulse: 0.15 },  // Gedaempftes Blau-Lila
+        stressed: { r: 1.00, g: 0.20, b: 0.15, pulse: 0.9 },   // Roetliches Schimmern
+        tired:    { r: 0.40, g: 0.35, b: 0.55, pulse: 0.1 },   // Gedaempft Mauve
+        angry:    { r: 1.00, g: 0.05, b: 0.10, pulse: 1.0 },   // Tief-Rot, schnell
+        anxious:  { r: 0.80, g: 0.50, b: 0.15, pulse: 0.7 },   // Amber (unruhig)
+        excited:  { r: 1.00, g: 0.60, b: 0.00, pulse: 0.6 },   // Leuchtendes Orange
+        calm:     { r: 0.20, g: 0.80, b: 0.60, pulse: 0.15 },  // Sanftes Tuerkis
+    };
+
+    // ══════════════════════════════════════════════════════════════════
     //  PUBLIC API  →  window.SomaFace
     // ══════════════════════════════════════════════════════════════════
 
@@ -440,6 +509,44 @@
             state.targetG         = p.g;
             state.targetB         = p.b;
             state.targetModeId    = p.modeId;
+        },
+
+        /**
+         * Phase 4: Setzt die aktuelle Emotion (Overlay auf Mode-Farbe).
+         *
+         * @param {string} emotion - "happy"|"sad"|"stressed"|"tired"|"angry"|"anxious"|"excited"|"calm"|"neutral"
+         * @param {number} intensity - 0.0 (kein Overlay) bis 1.0 (voll)
+         */
+        setEmotion(emotion, intensity) {
+            const e = EMOTION_COLORS[emotion] || EMOTION_COLORS.neutral;
+            const intens = Math.max(0, Math.min(1, intensity || 0));
+            state.targetEmotionR = e.r;
+            state.targetEmotionG = e.g;
+            state.targetEmotionB = e.b;
+            state.targetEmotionIntensity = intens;
+            state.targetEmotionPulseSpeed = e.pulse;
+        },
+
+        /**
+         * Phase 4: Setzt Emotion aus einem VoiceEmotionVector dict.
+         * Automatisch die dominante Emotion mit Konfidenz als Intensitaet.
+         *
+         * @param {Object} vec - { happy, sad, stressed, tired, angry, neutral, dominant, confidence }
+         */
+        setEmotionFromVector(vec) {
+            if (!vec || !vec.dominant || vec.dominant === 'neutral') {
+                this.setEmotion('neutral', 0);
+                return;
+            }
+            const conf = vec.confidence || 0;
+            if (conf < 0.3) {
+                this.setEmotion('neutral', 0);
+                return;
+            }
+            // Intensitaet = dominanter Emotions-Wert * Konfidenz
+            const domVal = vec[vec.dominant] || 0;
+            const intensity = Math.min(1.0, domVal * conf * 1.5);
+            this.setEmotion(vec.dominant, intensity);
         },
 
         /** Direkte Audio-Pegel Zufuehrung (0-1) */
@@ -507,6 +614,14 @@
         state.colorG     += (state.targetG - state.colorG) * delta * colorSpeed;
         state.colorB     += (state.targetB - state.colorB) * delta * colorSpeed;
 
+        // Phase 4: Emotion Overlay Interpolation (etwas langsamer fuer sanfte Uebergaenge)
+        const emotionSpeed = 4.0;
+        state.emotionR        += (state.targetEmotionR        - state.emotionR)        * delta * emotionSpeed;
+        state.emotionG        += (state.targetEmotionG        - state.emotionG)        * delta * emotionSpeed;
+        state.emotionB        += (state.targetEmotionB        - state.emotionB)        * delta * emotionSpeed;
+        state.emotionIntensity += (state.targetEmotionIntensity - state.emotionIntensity) * delta * emotionSpeed;
+        state.emotionPulseSpeed += (state.targetEmotionPulseSpeed - state.emotionPulseSpeed) * delta * emotionSpeed;
+
         // ── Uniforms updaten ────────────────────────────────────
         const mat = (state.vizMode === 'wave') ? waveMat : orbMat;
         mat.uniforms.u_time.value   = smoothTime;
@@ -514,6 +629,14 @@
         mat.uniforms.u_energy.value = state.energy;
         mat.uniforms.u_color.value.set(state.colorR, state.colorG, state.colorB);
         orbMat.uniforms.u_mode.value = state.modeId;
+
+        // Phase 4: Emotion Uniforms auf BEIDE Shader setzen
+        waveMat.uniforms.u_emotion.value.set(state.emotionR, state.emotionG, state.emotionB);
+        waveMat.uniforms.u_emotionInt.value   = state.emotionIntensity;
+        waveMat.uniforms.u_emotionPulse.value = state.emotionPulseSpeed;
+        orbMat.uniforms.u_emotion.value.set(state.emotionR, state.emotionG, state.emotionB);
+        orbMat.uniforms.u_emotionInt.value    = state.emotionIntensity;
+        orbMat.uniforms.u_emotionPulse.value  = state.emotionPulseSpeed;
 
         renderer.render(scene, camera);
     }

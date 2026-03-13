@@ -27,7 +27,7 @@ Datenfluss:
 from __future__ import annotations
 
 import uuid
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING, Callable, Any, Awaitable
 
 import structlog
 
@@ -49,6 +49,22 @@ def set_consciousness(c) -> None:
     """Called by main.py to inject Consciousness reference."""
     global _consciousness_ref
     _consciousness_ref = c
+
+# Broadcast-Funktion für Thinking Stream
+_broadcast_fn: Optional[Callable[[str, str, str, Optional[dict]], Awaitable[None]]] = None
+
+def set_broadcast_function(fn) -> None:
+    """Called by main.py to inject broadcast_thought reference."""
+    global _broadcast_fn
+    _broadcast_fn = fn
+
+async def _broadcast_thought(thought_type: str, content: str, tag: str = "BRAIN", extra: dict = None):
+    """Helper: Broadcastet Gedanken zum Dashboard - mit Fallback."""
+    if _broadcast_fn:
+        try:
+            await _broadcast_fn(thought_type, content, tag, extra)
+        except Exception:
+            pass  # Broadcast-Fehler dürfen Logik nie unterbrechen
 
 logger = structlog.get_logger("soma.logic_router")
 
@@ -151,6 +167,14 @@ class LogicRouter:
         metrics = self.health.last_metrics
         load_level = metrics.load_level if metrics else SystemLoadLevel.IDLE
 
+        # Broadcast: Anfrage empfangen
+        await _broadcast_thought(
+            "info",
+            f"Anfrage empfangen: '{request.prompt[:60]}...'" if len(request.prompt) > 60 else f"Anfrage: '{request.prompt}'",
+            "ROUTER",
+            {"load_level": load_level.value, "user": request.user_id, "room": request.room_id}
+        )
+
         logger.info(
             "routing_request",
             request_id=request.request_id,
@@ -161,26 +185,41 @@ class LogicRouter:
 
         # ── CRITICAL: Ab in die Queue ────────────────────────────────────
         if load_level == SystemLoadLevel.CRITICAL:
+            await _broadcast_thought("warning", f"System überlastet - Queue Request (Load: {load_level.value})", "ROUTER")
             return await self._defer_request(request, load_level)
 
         # ── Engine Selection ─────────────────────────────────────────────
         engine_name = self._select_engine(load_level, request)
         engine = self._engines.get(engine_name)
 
+        await _broadcast_thought(
+            "info", 
+            f"Engine gewählt: {engine_name} (Load: {load_level.value})", 
+            "ROUTER"
+        )
+
         if not engine:
             logger.error("no_engine_available", requested=engine_name)
+            await _broadcast_thought("error", f"Engine '{engine_name}' nicht verfügbar!", "ROUTER")
             # Fallback: Versuche Nano, dann defer
             engine = self._engines.get("nano")
             engine_name = "nano"
             if not engine:
+                await _broadcast_thought("error", "Alle Engines offline - Defer Request", "ROUTER")
                 return await self._defer_request(request, load_level)
+            await _broadcast_thought("info", "Fallback zu Nano-Engine", "ROUTER")
 
         # ── Plugin Context Injection ─────────────────────────────────────
         # Führe relevante Plugins aus und füge Output zum System-Prompt hinzu
         plugin_context = await self._execute_relevant_plugins(request.prompt)
+        if plugin_context.strip():
+            await _broadcast_thought("info", f"Plugin-Kontext hinzugefügt ({len(plugin_context)} Zeichen)", "PLUGINS")
+        
         system_prompt = self._build_system_prompt(request) + plugin_context
 
         # ── Generate ─────────────────────────────────────────────────────
+        await _broadcast_thought("info", f"Generiere Antwort mit {engine_name}...", "ENGINE")
+        
         try:
             response_text = await engine.generate(  # type: ignore[attr-defined]
                 prompt=request.prompt,
@@ -192,6 +231,12 @@ class LogicRouter:
             
             # ── Update Stats ────────────────────────────────────────
             self._update_stats(engine_name, latency, request.prompt)
+
+            await _broadcast_thought(
+                "info", 
+                f"Antwort generiert in {round(latency, 1)}ms: '{response_text[:80]}...'" if len(response_text) > 80 else f"Antwort: '{response_text}'", 
+                "ENGINE"
+            )
 
             return SomaResponse(
                 request_id=request.request_id,
@@ -208,6 +253,7 @@ class LogicRouter:
                 engine=engine_name,
                 error=str(exc),
             )
+            await _broadcast_thought("error", f"Engine {engine_name} Fehler: {str(exc)[:100]}", "ENGINE")
             # Fallback: Defer statt Error
             return await self._defer_request(request, load_level)
 
@@ -276,6 +322,12 @@ class LogicRouter:
 
         # Rotierende Feedback-Messages
         msg_idx = self._deferred_counter % len(DEFERRED_MESSAGES)
+
+        await _broadcast_thought(
+            "warning",
+            f"Request #{self._deferred_counter} in Queue eingereiht - Queue Size: {await self.queue.queue_size()}",
+            "QUEUE"
+        )
 
         logger.info(
             "request_deferred",
@@ -451,7 +503,30 @@ Falls entity_id unbekannt: nutze plausiblen Namen (light.wohnzimmer, light.schla
 ── NEUES PLUGIN ENTWICKELN ──
 Wenn du eine Fähigkeit brauchst die du nicht hast — erstelle sie selbst:
 [ACTION:create_plugin name="wetter_plugin" description="aktuelles Wetter von einer API abrufen"]
-Nur einsetzen wenn es wirklich sinnvoll und nicht trivial ist."""
+Nur einsetzen wenn es wirklich sinnvoll und nicht trivial ist.
+
+── MEDIEN & YOUTUBE (WICHTIG: Immer ausführen, nie nur ankündigen!) ──
+Wenn jemand YouTube, Musik oder einen Künstler/Lied erwähnt → SOFORT handeln mit Action-Tag!
+Du hast xdg-open, optional mpv+yt-dlp. Es funktioniert TATSÄCHLICH — vertrau dir selbst!
+
+[ACTION:youtube query="aligatoah songs"]
+[ACTION:youtube artist="Aligatoah" song="Triebkraft Gegenwart"]
+[ACTION:youtube query="entspannungsmusik"]
+[ACTION:media_play artist="Rammstein" song="Du Hast"]
+[ACTION:open_url url="https://open.spotify.com"]
+[ACTION:open_url url="https://www.youtube.com"]
+[ACTION:media_stop]
+
+Beispiele:
+  Nutzer: 'Starte YouTube mit Aligatoah'  → Soma: 'Starte! 🎵[ACTION:youtube query="aligatoah"]'
+  Nutzer: 'Spiel Triebkraft Gegenwart'    → Soma: 'Laeuft![ACTION:youtube artist="Aligatoah" song="Triebkraft Gegenwart"]'
+  Nutzer: 'Oeffne Spotify'               → Soma: 'Spotify oeffnet sich.[ACTION:open_url url="https://open.spotify.com"]'
+  Nutzer: 'Stell die Musik aus'          → Soma: 'Stoppe.[ACTION:media_stop]'
+  Nutzer: 'Spiel irgendwas entspannendes'→ Soma: 'Laeuft! 🎵[ACTION:youtube query="entspannende musik playlist"]'
+
+⚠️ KRITISCH: Niemals sagen du haettest etwas getan ohne den Action-Tag zu setzen!
+  FALSCH: Ich habe YouTube gestartet und das Lied gefunden. (ohne Action-Tag = Luege!)
+  RICHTIG: Starte jetzt! 🎵[ACTION:youtube query="aligatoah"]"""
 
         # ── Bewusstsein als Prefix montieren ──────────────────────────
         if consciousness_prefix:

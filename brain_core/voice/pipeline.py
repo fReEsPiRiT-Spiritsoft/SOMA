@@ -91,6 +91,10 @@ from brain_core.voice.stt import STTEngine, TranscriptionResult
 from brain_core.voice.tts import TTSEngine, SpeechEmotion
 from brain_core.voice.emotion import EmotionEngine, EmotionState, RoomMood
 from brain_core.voice.ambient import AmbientIntelligence, Intervention
+from brain_core.safety.pitch_analyzer import (
+    PitchAnalyzer,
+    VoiceEmotionVector,
+)
 from brain_core.memory.integration import (
     on_wake_word as memory_on_wake_word,
     build_context_for_query,
@@ -141,7 +145,10 @@ class VoicePipeline:
         self.stt = STTEngine(model_size=stt_model)
         self.tts = TTSEngine(voice=tts_voice, output_device=output_device)
         self.emotion = EmotionEngine(window_sec=60.0)
+        self.pitch_analyzer = PitchAnalyzer(sample_rate=VAD_SAMPLE_RATE)
         self.ambient = AmbientIntelligence(emotion_engine=self.emotion)
+        # Phase 4: Aktueller Emotion-Vector (fuer Shader + Dashboard)
+        self._current_emotion_vector: VoiceEmotionVector = VoiceEmotionVector()
         # Memory handled by memory_orchestrator (Salience + Diary)
 
         # ── External References ─────────────────────────────────────
@@ -364,13 +371,61 @@ class VoicePipeline:
                 sample_rate=VAD_SAMPLE_RATE,
                 duration_sec=segment.duration_sec,
             )
-            
+
+            # ── 1b. Phase 4: Tiefe Stimmanalyse (Jitter/Shimmer/Rate) ──
+            try:
+                audio_float = segment.audio.astype(np.float32) / 32768.0
+                pitch_result = self.pitch_analyzer.analyze(
+                    audio_data=audio_float,
+                    sample_rate=VAD_SAMPLE_RATE,
+                    duration_sec=segment.duration_sec,
+                )
+                voice_emotion = pitch_result.emotion_vector
+                self._current_emotion_vector = voice_emotion
+
+                # Kind erkannt → Child-Safe Mode aktivieren
+                if pitch_result.is_child:
+                    self._child_mode = True
+
+                # Emotion-Vector ans Dashboard + Shader senden
+                if voice_emotion.is_detected:
+                    await self._emit(
+                        "emotion_vector",
+                        f"🧬 {voice_emotion.dominant_emotion} "
+                        f"(conf={voice_emotion.confidence:.0%})",
+                        "PITCH",
+                        voice_emotion.as_dict,
+                    )
+
+                # L1 Working Memory: Aktuelle Emotion setzen
+                try:
+                    from brain_core.memory.integration import get_orchestrator
+                    orch = get_orchestrator()
+                    orch.working.set_context(
+                        "emotion_vector", voice_emotion.as_dict,
+                    )
+                    orch.working.set_context(
+                        "voice_stress", voice_emotion.stressed,
+                    )
+                except Exception:
+                    pass  # Memory evtl. noch nicht initialisiert
+
+            except Exception as pitch_err:
+                logger.debug("pitch_analysis_skipped", error=str(pitch_err))
+                voice_emotion = VoiceEmotionVector()
+
             # Dashboard: Emotion Event
             await self._emit(
                 "emotion",
-                f"Emotion: {emotion_reading.emotion.value} | Stress: {emotion_reading.stress_level:.0%}",
+                f"Emotion: {emotion_reading.emotion.value} | "
+                f"Stress: {emotion_reading.stress_level:.0%} | "
+                f"Voice: {voice_emotion.dominant_emotion}",
                 "VAD",
-                {"emotion": emotion_reading.emotion.value, "stress": emotion_reading.stress_level}
+                {
+                    "emotion": emotion_reading.emotion.value,
+                    "stress": emotion_reading.stress_level,
+                    "voice_emotion": voice_emotion.as_dict,
+                },
             )
 
             # ── 2. Emotion an AmbientIntelligence weitergeben ──────────
@@ -397,6 +452,7 @@ class VoicePipeline:
                 "text": transcription.text,
                 "emotion": emotion_reading.emotion.value,
                 "is_soma_addressed": transcription.contains_soma,
+                "emotion_vector": voice_emotion.as_dict if voice_emotion.is_detected else None,
             })
             
             # Dashboard: Was wurde gehört?
@@ -611,6 +667,9 @@ class VoicePipeline:
                 _arousal = emotion_reading.arousal if emotion_reading else 0.0
                 _valence = emotion_reading.valence if emotion_reading else 0.0
                 _stress = emotion_reading.stress_level if emotion_reading else 0.0
+                # Phase 4: Voice Emotion Vector als Metadata
+                _ev = self._current_emotion_vector
+                _emotion_meta = _ev.as_dict if _ev.is_detected else {}
                 asyncio.create_task(memory_after_response(
                     user_text=prompt,
                     soma_text=clean_response,
@@ -619,6 +678,7 @@ class VoicePipeline:
                     arousal=_arousal,
                     valence=_valence,
                     stress=_stress,
+                    emotion_vector=_emotion_meta,
                 ))
             except Exception:
                 pass  # Memory-Fehler dürfen Pipeline nie brechen
@@ -760,6 +820,26 @@ class VoicePipeline:
                     # LLM entscheidet eigenständig ein Plugin zu erstellen
                     result = await self._action_create_plugin(params)
                     executed.append(f"create_plugin: {result}")
+
+                elif action_type == "youtube":
+                    # YouTube-Suche öffnen / Lied abspielen
+                    result = await self._action_youtube(params)
+                    executed.append(f"youtube: {result}")
+
+                elif action_type == "open_url":
+                    # Beliebige URL im Browser öffnen
+                    result = await self._action_open_url(params)
+                    executed.append(f"open_url: {result}")
+
+                elif action_type == "media_play":
+                    # Musik nach Künstler/Lied suchen und abspielen
+                    result = await self._action_media_play(params)
+                    executed.append(f"media_play: {result}")
+
+                elif action_type == "media_stop":
+                    # Laufende Wiedergabe stoppen
+                    result = await self._action_media_stop()
+                    executed.append(f"media_stop: {result}")
 
                 else:
                     logger.warning("action_tag_unknown", action=action_type)
@@ -1033,6 +1113,93 @@ class VoicePipeline:
             self._plugin_background_worker(name, description, is_edit=False)
         )
         return f"Plugin '{name}' wird im Hintergrund erstellt..."
+
+    async def _action_youtube(self, params: dict) -> str:
+        """
+        Öffnet YouTube mit einer Suchanfrage.
+        [ACTION:youtube query="aligatoah songs"]
+        [ACTION:youtube artist="Aligatoah" song="Triebkraft Gegenwart"]
+        """
+        try:
+            from evolution_lab.generated_plugins import media_player
+        except ImportError:
+            # Direkt-Fallback ohne Plugin
+            import urllib.parse, asyncio
+            query = params.get("query") or (
+                f"{params.get('artist', '')} {params.get('song', '')}".strip()
+            ) or "musik"
+            encoded = urllib.parse.quote_plus(query)
+            url = f"https://www.youtube.com/results?search_query={encoded}"
+            return await self._xdg_open(url)
+
+        artist = params.get("artist", "")
+        song   = params.get("song", "")
+        query  = params.get("query", "")
+
+        if not query:
+            query = f"{artist} {song}".strip() if (artist or song) else "musik"
+
+        await self._emit("action", f"🎵 YouTube: '{query}'", "MEDIA")
+        logger.info("action_youtube", query=query)
+
+        # mpv + yt-dlp vorhanden → direkte Audio-Wiedergabe (kein Browser-Popup)
+        result = await media_player.youtube_search(query, use_mpv=True)
+        return result
+
+    async def _action_media_play(self, params: dict) -> str:
+        """
+        Spielt Musik nach Künstler/Lied via YouTube.
+        [ACTION:media_play artist="Aligatoah" song="Triebkraft Gegenwart"]
+        [ACTION:media_play query="Aligatoah greatest hits"]
+        """
+        return await self._action_youtube(params)
+
+    async def _action_open_url(self, params: dict) -> str:
+        """
+        Öffnet eine beliebige URL im Standard-Browser.
+        [ACTION:open_url url="https://www.spotify.com"]
+        """
+        url = params.get("url", "")
+        if not url:
+            return "Keine URL angegeben."
+
+        await self._emit("action", f"🌐 Öffne: {url[:60]}", "MEDIA")
+        logger.info("action_open_url", url=url[:80])
+
+        return await self._xdg_open(url)
+
+    async def _action_media_stop(self) -> str:
+        """Stoppt laufende Medienwiedergabe (mpv)."""
+        try:
+            from evolution_lab.generated_plugins import media_player
+            result = await media_player.stop_playback()
+        except ImportError:
+            import subprocess
+            subprocess.run(["pkill", "-f", "mpv"], capture_output=True, timeout=3)
+            result = "Wiedergabe gestoppt."
+
+        await self._emit("action", "⏹️ Wiedergabe gestoppt", "MEDIA")
+        return result
+
+    @staticmethod
+    async def _xdg_open(url: str) -> str:
+        """Öffnet eine URL via xdg-open (Linux Browser-Opener)."""
+        import asyncio, shutil
+        if not shutil.which("xdg-open"):
+            return f"xdg-open nicht gefunden. URL: {url}"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "xdg-open", url,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=3.0)
+            except asyncio.TimeoutError:
+                pass  # Normal – xdg-open öffnet Browser und endet sofort
+            return f"Geöffnet: {url[:80]}"
+        except Exception as exc:
+            return f"Fehler: {exc}"
 
     # ══════════════════════════════════════════════════════════════════
     #  PROAKTIVE INTERVENTION
@@ -1507,16 +1674,22 @@ class VoicePipeline:
         return " ".join(words).strip()
 
     def _select_speech_emotion(self, emotion_reading) -> SpeechEmotion:
-        """Wähle TTS-Emotion basierend auf erkannter User-Emotion."""
-        emotion = emotion_reading.emotion
+        """
+        Phase 4: Waehle TTS-Prosodie basierend auf User-Emotion.
 
-        if emotion in (EmotionState.SAD, EmotionState.ANXIOUS):
-            return SpeechEmotion.gentle()
-        if emotion in (EmotionState.ANGRY, EmotionState.STRESSED):
-            return SpeechEmotion.calm()
-        if emotion in (EmotionState.HAPPY, EmotionState.EXCITED):
-            return SpeechEmotion.energetic()
-        return SpeechEmotion()  # Neutral
+        Priorisierung:
+          1. VoiceEmotionVector (feingranular, gewichtet) → wenn detected
+          2. EmotionState (diskret) → Fallback
+          3. Default neutral → wenn nichts erkannt
+        """
+        # Phase 4: VoiceEmotionVector → feingranulare Interpolation
+        ev = self._current_emotion_vector
+        if ev.is_detected:
+            return SpeechEmotion.from_voice_emotion(ev.as_dict)
+
+        # Fallback: Diskrete Emotion-State Zuordnung
+        emotion = emotion_reading.emotion
+        return SpeechEmotion.from_emotion(emotion.value)
 
     def _check_dismiss(self, text: str):
         """Prüfe ob Nutzer Soma zum Schweigen bringt."""
@@ -1549,6 +1722,11 @@ class VoicePipeline:
         return self._running
 
     @property
+    def current_emotion_vector(self) -> VoiceEmotionVector:
+        """Phase 4: Aktueller Voice Emotion Vector (fuer Shader/Dashboard)."""
+        return self._current_emotion_vector
+
+    @property
     def stats(self) -> dict:
         s = dict(self._stats)
         if s["uptime_start"]:
@@ -1564,4 +1742,7 @@ class VoicePipeline:
             "argument_likelihood": self.emotion.atmosphere.argument_likelihood,
         }
         s["ambient"] = self.ambient.stats
+        # Phase 4: Voice Emotion Vector
+        ev = self._current_emotion_vector
+        s["voice_emotion"] = ev.as_dict if ev.is_detected else {"dominant": "neutral", "confidence": 0}
         return s

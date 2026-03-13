@@ -187,16 +187,27 @@ class MemoryOrchestrator:
         intent: str = "",
         topic: str = "",
         event_type: str = "conversation",
+        emotion_vector: dict | None = None,
     ):
         """
         L1 IMMER sofort.
         L2 nur wenn Salience > Threshold.
         Diary nur wenn Salience HOCH.
         Blockiert nie.
+
+        Phase 4: emotion_vector (dict) wird in L1 + L2 gespeichert.
         """
         # L1: IMMER — Working Memory muss alles haben
         self.working.add_user_turn(user_text, emotion=emotion, intent=intent)
         self.working.add_soma_turn(soma_text)
+
+        # Phase 4: Emotion Vector in L1 Working Memory setzen
+        if emotion_vector:
+            self.working.set_context("emotion_vector", emotion_vector)
+            self.working.set_context(
+                "voice_dominant_emotion",
+                emotion_vector.get("dominant", "neutral"),
+            )
 
         # Salience bewerten
         salience = self.salience.evaluate(
@@ -223,6 +234,19 @@ class MemoryOrchestrator:
 
         # L2: Async store (fire-and-forget)
         self._store_count += 1
+        # Phase 4: Emotion Vector als Summary-Enrichment fuer L2
+        _summary_extra = ""
+        if emotion_vector:
+            dom = emotion_vector.get("dominant", "neutral")
+            conf = emotion_vector.get("confidence", 0)
+            _summary_extra = (
+                f" [Voice: {dom} ({conf:.0%})"
+                f" H={emotion_vector.get('happy', 0):.1f}"
+                f" S={emotion_vector.get('sad', 0):.1f}"
+                f" St={emotion_vector.get('stressed', 0):.1f}"
+                f" T={emotion_vector.get('tired', 0):.1f}"
+                f" A={emotion_vector.get('angry', 0):.1f}]"
+            )
         asyncio.create_task(self._store_episode_safe(
             user_text=user_text,
             soma_text=soma_text,
@@ -230,7 +254,7 @@ class MemoryOrchestrator:
             arousal=arousal,
             valence=valence,
             event_type=event_type,
-            topic=topic,
+            topic=topic + _summary_extra,
             importance=importance,
         ))
 

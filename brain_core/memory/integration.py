@@ -115,10 +115,12 @@ async def after_response(
     intent: str = "",
     topic: str = "",
     event_type: str = "conversation",
+    emotion_vector: dict | None = None,
 ):
     """
     Nach jedem Response aufrufen. Non-blocking.
     Jetzt mit Salience-Filter: unwichtige Interaktionen werden NICHT gespeichert.
+    Phase 4: emotion_vector (dict) wird als Metadata an L2 durchgereicht.
     """
     orchestrator = get_orchestrator()
     await orchestrator.store_interaction(
@@ -131,6 +133,7 @@ async def after_response(
         intent=intent,
         topic=topic,
         event_type=event_type,
+        emotion_vector=emotion_vector,
     )
     if _consolidator:
         _consolidator.touch()

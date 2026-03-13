@@ -43,9 +43,21 @@ DEFAULT_VOICE = "de_DE-thorsten-high"  # Thorsten: natürliche deutsche Stimme
 
 @dataclass
 class SpeechEmotion:
-    """Emotionale Modulation der Sprachausgabe."""
+    """
+    Emotionale Modulation der Sprachausgabe.
+
+    Phase 4: Erweitert mit from_emotion() — automatisches Prosodie-Mapping
+    basierend auf dem emotionalen Zustand des Nutzers.
+
+    Somas Stimme reagiert empathisch:
+      - User happy    → Soma wird lebhafter (schneller, hoeherer Pitch)
+      - User sad      → Soma wird sanfter (langsamer, tieferer Pitch, leiser)
+      - User stressed → Soma wird beruhigend (ruhig, kurz, Pausen)
+      - User angry    → Soma bleibt sachlich-neutral (kein Gegendruck!)
+      - User tired    → Soma wird ruhig und warm (langsam, leise)
+    """
     speed: float = 1.3        # 0.5 = langsam (beruhigend), 1.5 = schnell
-    pitch: float = 1.0        # 0.8 = tief (ernst), 1.2 = hoch (fröhlich)
+    pitch: float = 1.0        # 0.8 = tief (ernst), 1.2 = hoch (froehlich)
     volume: float = 1.0       # 0.5 = leise (nacht), 1.0 = normal
 
     @classmethod
@@ -67,6 +79,103 @@ class SpeechEmotion:
     def alert(cls) -> SpeechEmotion:
         """Aufmerksamkeit (z.B. wichtige Info)."""
         return cls(speed=1.0, pitch=1.1, volume=1.0)
+
+    # ── Phase 4: Emotion-State Auto-Mapping ─────────────────────────
+
+    @classmethod
+    def warm(cls) -> SpeechEmotion:
+        """Warm und freundlich (guter Zustand des Users)."""
+        return cls(speed=1.0, pitch=1.02, volume=0.95)
+
+    @classmethod
+    def empathetic(cls) -> SpeechEmotion:
+        """Empathisch (User ist muede/erschoepft)."""
+        return cls(speed=0.82, pitch=0.92, volume=0.75)
+
+    @classmethod
+    def neutral_sachlich(cls) -> SpeechEmotion:
+        """Sachlich-neutral (User ist wuetend → kein Gegendruck!)."""
+        return cls(speed=0.95, pitch=0.98, volume=0.85)
+
+    @classmethod
+    def from_emotion(cls, emotion_state: str) -> SpeechEmotion:
+        """
+        Phase 4: Automatisches Prosodie-Mapping.
+
+        Reagiert empathisch auf den emotionalen Zustand des Nutzers:
+          happy/excited → lebhafter, hoeherer Pitch (Mitfreude)
+          sad           → sanfter, langsamer, leiser (Trost)
+          stressed      → beruhigend, ruhig (Deeskalation)
+          angry         → sachlich-neutral (kein Gegendruck!)
+          anxious       → warm, ruhig, reassuring
+          tired         → empathisch, leise, langsam
+          calm          → warm, normal
+          neutral       → Standard
+
+        Args:
+            emotion_state: EmotionState value string
+        """
+        _map = {
+            "happy": cls.energetic,
+            "excited": cls.energetic,
+            "sad": cls.gentle,
+            "stressed": cls.calm,
+            "angry": cls.neutral_sachlich,
+            "anxious": cls.calm,
+            "calm": cls.warm,
+            "neutral": lambda: cls(speed=1.0, pitch=1.0, volume=0.95),
+        }
+        factory = _map.get(emotion_state, lambda: cls())
+        return factory()
+
+    @classmethod
+    def from_voice_emotion(
+        cls,
+        emotion_vector: dict,
+    ) -> SpeechEmotion:
+        """
+        Phase 4: Feingranulares Mapping aus VoiceEmotionVector.
+
+        Statt diskreter Zuweisung: gewichtete Interpolation
+        zwischen Prosodie-Presets basierend auf dem Emotion-Mix.
+
+        Args:
+            emotion_vector: Dict mit {happy, sad, stressed, tired, angry, neutral}
+        """
+        if not emotion_vector:
+            return cls()
+
+        # Presets als Zahlenwerte
+        presets = {
+            "happy":    {"speed": 1.1,  "pitch": 1.05, "volume": 1.0},
+            "sad":      {"speed": 0.8,  "pitch": 0.9,  "volume": 0.7},
+            "stressed": {"speed": 0.85, "pitch": 0.95, "volume": 0.9},
+            "tired":    {"speed": 0.82, "pitch": 0.92, "volume": 0.75},
+            "angry":    {"speed": 0.95, "pitch": 0.98, "volume": 0.85},
+            "neutral":  {"speed": 1.0,  "pitch": 1.0,  "volume": 0.95},
+        }
+
+        speed = 0.0
+        pitch = 0.0
+        volume = 0.0
+        total_weight = 0.0
+
+        for emo, preset in presets.items():
+            w = float(emotion_vector.get(emo, 0.0))
+            if w > 0.05:  # Nur relevante Emotionen
+                speed += preset["speed"] * w
+                pitch += preset["pitch"] * w
+                volume += preset["volume"] * w
+                total_weight += w
+
+        if total_weight < 0.1:
+            return cls()
+
+        return cls(
+            speed=round(speed / total_weight, 2),
+            pitch=round(pitch / total_weight, 2),
+            volume=round(volume / total_weight, 2),
+        )
 
 
 class TTSEngine:
