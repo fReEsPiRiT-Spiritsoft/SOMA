@@ -185,9 +185,6 @@ Das Herzstück von SOMA. Kein Marketing — Architektur.
 - **Thinking Stream** — Live-Visualisierung der Gedankengänge
 - **WebSocket** — Echtzeit-Dashboard auf Tablet/Browser
 
----
-
-## 🔭 Was SOMA werden wird
 
 ### Phase 3 — Executive Agency 🤖
 > SOMA denkt nicht nur — es **handelt**
