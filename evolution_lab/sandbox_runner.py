@@ -249,14 +249,44 @@ class SandboxRunner:
         with tempfile.TemporaryDirectory(prefix=f"soma_sandbox_{plugin_name}_") as tmpdir:
             tmppath = Path(tmpdir)
 
-            # Plugin-Code und Test-Script schreiben
-            (tmppath / f"{plugin_name}.py").write_text(code, encoding="utf-8")
-            (tmppath / "_sandbox_test.py").write_text(test_script, encoding="utf-8")
+            # Verzeichnis und Dateien world-readable machen damit
+            # der 'nobody'-User im Container (UID 65534) darauf zugreifen kann.
+            # tempfile erstellt Verzeichnisse mit 0o700 — das muss 0o755 sein.
+            tmppath.chmod(0o755)
 
-            # pip install Befehle vorbereiten
+            # Plugin-Code und Test-Script schreiben
+            code_file = tmppath / f"{plugin_name}.py"
+            test_file = tmppath / "_sandbox_test.py"
+            code_file.write_text(code, encoding="utf-8")
+            test_file.write_text(test_script, encoding="utf-8")
+            code_file.chmod(0o644)
+            test_file.chmod(0o644)
+
+            # pip install Befehle vorbereiten.
+            # Stdlib-Module (json, os, asyncio...) aus deps herausfiltern —
+            # die sind im Container eingebaut und existieren nicht auf PyPI.
+            # Wegen --read-only Root-FS muss pip nach /tmp/pkg_deps installieren.
             pip_cmd = ""
             if deps:
-                pip_cmd = f"pip install --quiet {' '.join(deps)} && "
+                stdlib_names: frozenset[str] = getattr(
+                    sys, "stdlib_module_names",  # Python 3.10+
+                    frozenset(),
+                )
+                import re as _re
+                pypi_deps = [
+                    d for d in deps
+                    if _re.split(r"[><=!~]", d)[0].strip().replace("-", "_")
+                    not in stdlib_names
+                ]
+                if pypi_deps:
+                    pkg_str = " ".join(pypi_deps)
+                    # --target /tmp/pkg_deps: Schreibt ins /tmp (einziges beschreibbares
+                    # Verzeichnis wenn Root-FS read-only ist).
+                    # PYTHONPATH=/tmp/pkg_deps: Damit Python die Packages findet.
+                    pip_cmd = (
+                        f"pip install --quiet --target /tmp/pkg_deps {pkg_str} && "
+                        f"PYTHONPATH=/tmp/pkg_deps "
+                    )
 
             # Docker-Befehl zusammenbauen
             docker_args = [
@@ -266,7 +296,7 @@ class SandboxRunner:
                 "--memory=256m",                     # Max 256MB RAM
                 "--cpus=1.0",                        # Max 1 CPU Core
                 "--read-only",                       # Read-Only Root-FS
-                "--tmpfs", "/tmp:size=64m",          # Beschreibbares /tmp
+                "--tmpfs", "/tmp:size=128m",         # Beschreibbares /tmp (pip + pkg_deps)
                 "-v", f"{tmpdir}:/sandbox:ro",       # Code als Read-Only mounten
                 "-w", "/sandbox",                    # Arbeitsverzeichnis
                 "--user", "nobody",                  # Kein Root im Container

@@ -1,7 +1,7 @@
 """
 L3: Semantic Memory — Abstrahierte Fakten über die Welt.
-"Patrick trinkt morgens Kaffee", "Patrick hasst Spam-Mails"
-Wird durch Background-Consolidation aus Episoden destilliert.
+Fakten wie "Der Nutzer trinkt morgens Kaffee" werden durch
+Background-Consolidation aus Episoden destilliert.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ EMBED_MODEL = "nomic-embed-text"
 class Fact:
     id: int
     category: str    # preference, habit, relationship, knowledge, personality
-    subject: str     # "Patrick", "SOMA", "Wohnzimmer"
+    subject: str     # Nutzername, "SOMA", "Wohnzimmer"
     fact: str        # "trinkt morgens Kaffee"
     confidence: float
     source_count: int
@@ -193,10 +193,37 @@ class SemanticMemory:
             "FROM facts ORDER BY confidence DESC LIMIT 100",
         ).fetchall()
 
+    def _fetch_by_category(self, category: str) -> list:
+        """Alle Fakten einer bestimmten Kategorie laden."""
+        if not self._conn:
+            return []
+        return self._conn.execute(
+            "SELECT id, category, subject, fact, confidence, "
+            "source_count, last_confirmed, embedding "
+            "FROM facts WHERE category = ? "
+            "ORDER BY confidence DESC LIMIT 50",
+            (category,),
+        ).fetchall()
+
     # ── Personality Snapshot ─────────────────────────────────────────
 
-    async def get_personality_snapshot(self, subject: str = "Patrick") -> str:
-        """Alle Fakten über eine Person als kompakter Prompt-Block."""
+    async def get_user_preferences(self) -> list[Fact]:
+        """Alle Nutzer-Präferenzen (IMMER laden, nicht Similarity-gefiltert).
+        Diese werden bei JEDER Antwort im Prompt injiziert."""
+        loop = asyncio.get_event_loop()
+        rows = await loop.run_in_executor(None, self._fetch_by_category, "preference")
+        facts = []
+        for row in rows:
+            facts.append(Fact(
+                id=row[0], category=row[1], subject=row[2], fact=row[3],
+                confidence=row[4], source_count=row[5], last_confirmed=row[6],
+                embedding=None,
+            ))
+        return facts
+
+    async def get_personality_snapshot(self, subject: str = "Nutzer") -> str:
+        """Alle Fakten über eine Person als kompakter Prompt-Block.
+        Preferences werden hier ausgelassen — die kommen separat."""
         loop = asyncio.get_event_loop()
         rows = await loop.run_in_executor(None, self._fetch_facts, subject)
         if not rows:
@@ -204,11 +231,15 @@ class SemanticMemory:
         lines = []
         for row in rows:
             conf = row[4]
+            cat = row[1]
+            # Preferences kommen in eigener Sektion → hier ausschließen
+            if cat == "preference":
+                continue
             if conf >= 0.4:
                 lines.append(f"- {row[3]} (Sicherheit: {conf:.0%})")
         if not lines:
             return ""
-        return f"Bekannte Fakten über {subject}:\n" + "\n".join(lines[:15])
+        return f"Bekannte Fakten über {subject}:\n" + "\n".join(lines[:20])
     # ── Category Query & Delete (für Plugins) ─────────────────────────────
 
     async def get_facts_by_category(self, category: str) -> list["Fact"]:

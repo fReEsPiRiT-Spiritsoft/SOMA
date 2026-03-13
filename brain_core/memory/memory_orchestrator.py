@@ -24,6 +24,7 @@ from brain_core.memory.episodic_memory import EpisodicMemory
 from brain_core.memory.semantic_memory import SemanticMemory
 from brain_core.memory.salience_filter import SalienceFilter, SalienceScore
 from brain_core.memory.diary_writer import DiaryWriter
+from brain_core.memory.user_identity import get_user_name_sync
 
 logger = logging.getLogger("soma.memory.orchestrator")
 
@@ -83,16 +84,17 @@ class MemoryOrchestrator:
             max_tokens_estimate=800,
         )
 
-        # L2 + L3 + Diary — parallel (~50ms)
+        # L2 + L3 + Diary + Preferences — parallel (~50ms)
         ep_task = self.episodic.recall(user_text, top_k=4)
         fact_task = self.semantic.recall_facts(user_text, top_k=6)
         personality_task = self.semantic.get_personality_snapshot(
             session["user"]
         )
         diary_task = self.diary.get_diary_summary_for_prompt(max_entries=3)
+        prefs_task = self.semantic.get_user_preferences()
 
-        episodes, facts, personality, diary_block = await asyncio.gather(
-            ep_task, fact_task, personality_task, diary_task,
+        episodes, facts, personality, diary_block, user_prefs = await asyncio.gather(
+            ep_task, fact_task, personality_task, diary_task, prefs_task,
             return_exceptions=True,
         )
 
@@ -106,6 +108,9 @@ class MemoryOrchestrator:
             personality = ""
         if isinstance(diary_block, BaseException):
             diary_block = ""
+        if isinstance(user_prefs, BaseException):
+            logger.warning(f"Preference recall failed: {user_prefs}")
+            user_prefs = []
 
         # ── Block zusammenbauen ──────────────────────────────────
         now = datetime.now()
@@ -119,8 +124,27 @@ class MemoryOrchestrator:
         )
 
         # Emotion
+        user_name = get_user_name_sync()
         if emotion and emotion != "neutral":
-            blocks.append(f"[Emotion] Patrick wirkt gerade: {emotion}")
+            blocks.append(f"[Emotion] {user_name} wirkt gerade: {emotion}")
+
+        # ── NUTZER-PRÄFERENZEN (IMMER dabei, NICHT optional!) ─────
+        # Diese Regeln gelten für JEDE Antwort, unabhängig vom Thema.
+        if user_prefs:
+            pref_lines = []
+            seen = set()
+            for p in user_prefs:
+                # Deduplizierung
+                key = p.fact.lower().strip()
+                if key in seen:
+                    continue
+                seen.add(key)
+                pref_lines.append(f"- {p.fact}")
+            if pref_lines:
+                blocks.append(
+                    "[NUTZER-PRÄFERENZEN — Befolge diese IMMER]\n"
+                    + "\n".join(pref_lines[:10])
+                )
 
         # Persoenlichkeitsprofil (L3)
         if personality and isinstance(personality, str) and len(personality) > 10:
@@ -153,7 +177,7 @@ class MemoryOrchestrator:
                     ago = f"vor {int(age / 24)} Tagen"
                 ep_lines.append(
                     f"- [{ago}, Stimmung: {ep.emotion}] "
-                    f"Patrick: \"{ep.user_text[:80]}\" "
+                    f"{user_name}: \"{ep.user_text[:80]}\" "
                     f"-> SOMA: \"{ep.soma_text[:80]}\""
                 )
             if ep_lines:
@@ -358,9 +382,10 @@ class MemoryOrchestrator:
                 return
 
             episode_text = ""
+            user_name = get_user_name_sync()
             for ep in recent[:15]:
                 episode_text += (
-                    f"- [{ep.emotion}] Patrick: \"{ep.user_text[:100]}\" "
+                    f"- [{ep.emotion}] {user_name}: \"{ep.user_text[:100]}\" "
                     f"-> SOMA: \"{ep.soma_text[:100]}\"\n"
                 )
 

@@ -9,6 +9,8 @@ import random
 import time
 from datetime import datetime
 
+from brain_core.memory.user_identity import get_user_name_sync
+
 
 # Persönlichkeits-Facetten die stündlich rotieren
 PERSONALITY_FACETS = [
@@ -30,14 +32,14 @@ DAYTIME_VIBES = {
 
 EMOTION_INSTRUCTIONS = {
     "stressed": (
-        "Patrick wirkt gestresst. Sei besonders ruhig und hilfsbereit. "
+        "Der Nutzer wirkt gestresst. Sei besonders ruhig und hilfsbereit. "
         "Frag ob du helfen kannst."
     ),
-    "happy":   "Patrick ist gut drauf. Sei locker und positiv.",
-    "sad":     "Patrick wirkt niedergeschlagen. Sei einfühlsam, nicht aufdringlich.",
-    "tired":   "Patrick klingt müde. Fasse dich kurz, sei sanft.",
-    "excited": "Patrick ist begeistert. Teile seine Energie!",
-    "angry":   "Patrick wirkt gereizt. Sei sachlich und deeskalierend.",
+    "happy":   "Der Nutzer ist gut drauf. Sei locker und positiv.",
+    "sad":     "Der Nutzer wirkt niedergeschlagen. Sei einfühlsam, nicht aufdränglich.",
+    "tired":   "Der Nutzer klingt müde. Fasse dich kurz, sei sanft.",
+    "excited": "Der Nutzer ist begeistert. Teile seine Energie!",
+    "angry":   "Der Nutzer wirkt gereizt. Sei sachlich und deeskalierend.",
 }
 
 
@@ -64,10 +66,11 @@ def build_system_prompt(
     Wird vom MemoryOrchestrator mit dem fertigen Gedächtnis-Block gespeist.
     """
     daytime = _get_daytime()
+    user_name = get_user_name_sync()
 
     parts = [
         "Du bist SOMA — ein intelligentes, lokal laufendes KI-System.",
-        "Du gehörst Patrick und bist sein persönlicher Assistent im Smart Home.",
+        "Du bist das Bewusstsein dieses Hauses und persönlicher Assistent deiner Bewohner.",
         "Du sprichst Deutsch, natürlich und menschlich — nie robotisch.",
         "Du antwortest präzise und kompakt. Kein Fülltext.",
         "",
@@ -93,7 +96,7 @@ def build_system_prompt(
     if interaction_count == 0:
         parts.append(
             "\nDas ist der Beginn einer neuen Unterhaltung. "
-            "Begrüße Patrick NICHT mit 'Hallo' — reagiere direkt auf das "
+            "Begrüße den Nutzer NICHT mit 'Hallo' — reagiere direkt auf das "
             "was er sagt. Sei natürlich."
         )
     elif interaction_count > 10:

@@ -5,7 +5,7 @@ SOMA Hierarchical Memory System
 
   L1: Working Memory  — RAM, 0ms, letzte N Turns
   L2: Episodic Memory — SQLite + Embeddings, ~50ms, konkrete Erlebnisse
-  L3: Semantic Memory  — Abstrahierte Fakten, ~50ms, "Patrick mag Kaffee"
+  L3: Semantic Memory  — Abstrahierte Fakten, ~50ms, "Der Nutzer mag Kaffee"
 
 Plus:
   - Salience Filter (nur wichtige Events speichern)

@@ -16,6 +16,12 @@ if [ -z "${VODAFONE_SIP_HOST}" ]; then
     echo "   Trage in .env ein: VODAFONE_SIP_HOST=sipgate.de"
 fi
 
+if [ -z "${LINPHONE_SIP_PASS}" ]; then
+    echo "⚠  WARNING: LINPHONE_SIP_PASS nicht gesetzt."
+    echo "   Trage in .env ein: LINPHONE_SIP_PASS=dein_sicheres_passwort"
+    echo "   Linphone-App: SIP-Adresse = sip:soma@<SOMA_IP>, Port 5060"
+fi
+
 # Auto-detect LAN IP for RTP/media routing (used in pjsip.conf)
 if [ -z "${SOMA_LOCAL_IP}" ]; then
     SOMA_LOCAL_IP=$(hostname -I | awk '{print $1}')

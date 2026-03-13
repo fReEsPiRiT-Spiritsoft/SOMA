@@ -31,11 +31,15 @@ class WorkingMemory:
         self._turns: deque[Turn] = deque(maxlen=max_turns)
         self._current_emotion: str = "neutral"
         self._current_intent: str = ""
-        self._user_name: str = "Patrick"
+        self._user_name: str = "du"  # Dynamisch — wird aus Gedächtnis geladen
         self._session_start: float = time.time()
         self._interaction_count: int = 0
         self._last_topic: str = ""
         self._active_context: dict = {}
+
+    def set_user_name(self, name: str):
+        """Wird aufgerufen sobald der Nutzername bekannt ist."""
+        self._user_name = name
 
     # ── Turns ────────────────────────────────────────────────────────
 
@@ -71,7 +75,7 @@ class WorkingMemory:
         used = 0
 
         for turn in reversed(self._turns):
-            prefix = "Patrick" if turn.role == "user" else "SOMA"
+            prefix = self._user_name if turn.role == "user" else "SOMA"
             line = f"{prefix}: {turn.text}"
             if used + len(line) > char_budget:
                 break

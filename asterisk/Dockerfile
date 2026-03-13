@@ -1,4 +1,6 @@
-FROM debian:bookworm-slim
+# Asterisk wurde aus Debian Bookworm (12) entfernt.
+# Debian Bullseye (11) enthält Asterisk 16 LTS — unterstützt ARI, PJSIP, alles.
+FROM debian:bullseye-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 

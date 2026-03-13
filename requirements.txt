@@ -62,3 +62,8 @@ aiohttp>=3.9.0
 
 yt-dlp==2026.2.4
 yt-dlp-ejs==0.4.0
+# ── SOMA Internet-Zugriff (WebSearch) ────────────────────────────
+ddgs>=9.0.0              # DuckDuckGo Suche (kein API-Key nötig)
+beautifulsoup4>=4.12.0   # HTML-Parsing (Fallback-Scraper)
+lxml>=5.0.0              # Schneller HTML/XML-Parser
+trafilatura>=2.0.0       # Saubere Textextraktion aus Webseiten

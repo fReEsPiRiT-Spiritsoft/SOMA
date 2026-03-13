@@ -257,6 +257,30 @@ async def lifespan(app: FastAPI):
             "🧠 Memory System online — 3 Gedächtnis-Ebenen aktiv",
             "BOOT",
         )
+
+        # ── User Identity: Nutzer aus Gedächtnis laden ─────────────
+        from brain_core.memory.user_identity import (
+            get_user_name, is_onboarding_needed, set_user_name,
+        )
+        user_name = await get_user_name()
+        if user_name and user_name != "du":
+            # Nutzername dem WorkingMemory geben
+            memory_orchestrator.working.set_user_name(user_name)
+            logger.info("boot_user_identity", name=user_name)
+            await broadcast_thought(
+                "info",
+                f"👤 Nutzer erkannt: {user_name}",
+                "BOOT",
+            )
+        else:
+            needs_onboarding = await is_onboarding_needed()
+            if needs_onboarding:
+                logger.info("boot_onboarding_needed", reason="empty_memory")
+                await broadcast_thought(
+                    "info",
+                    "🆕 Erstes Erwachen — Onboarding wird beim ersten Gespräch gestartet",
+                    "BOOT",
+                )
     except Exception as exc:
         logger.error("boot_phase", service="memory_system", status="failed", error=str(exc))
         await broadcast_thought("warn", f"Memory System Fehler: {exc}", "BOOT")
@@ -275,24 +299,67 @@ async def lifespan(app: FastAPI):
     set_broadcast_function(broadcast_thought)
 
     # 5. Queue Worker starten (verarbeitet deferred requests)
+    # ── Process Callback: Verarbeitet geparkte Anfragen mit Heavy-Engine ──
     async def process_deferred(req):
-        from shared.health_schemas import DeferredRequest
-        soma_req = SomaRequest(
-            request_id=req.request_id,
-            user_id=req.user_id,
-            room_id=req.room_id,
+        """Deferred Request mit Heavy-Engine verarbeiten.
+
+        Nutzt den gespeicherten System-Prompt aus dem ursprünglichen Request
+        damit Kontext (Memory, Plugins, Emotion) erhalten bleibt.
+        """
+        # System-Prompt aus Metadata (gespeichert beim Defer)
+        saved_system_prompt = req.metadata.get("system_prompt", "")
+        saved_session_id = req.metadata.get("session_id", "") or None
+
+        if not saved_system_prompt:
+            # Fallback: System-Prompt neu bauen (ohne Memory-Kontext)
+            soma_req = SomaRequest(
+                request_id=req.request_id,
+                user_id=req.user_id,
+                room_id=req.room_id,
+                prompt=req.prompt,
+                priority=req.priority,
+            )
+            saved_system_prompt = logic_router._build_system_prompt(soma_req)
+
+        # IMMER Heavy-Engine — genau dafür ist die Queue da
+        return await heavy_engine.generate(
             prompt=req.prompt,
-            priority=req.priority,
-        )
-        # Bei deferred: immer Heavy wenn möglich
-        engine = heavy_engine if health_monitor.last_metrics and \
-            health_monitor.last_metrics.ram_percent < 80 else nano_engine
-        return await engine.generate(
-            prompt=soma_req.prompt,
-            system_prompt=logic_router._build_system_prompt(soma_req),
+            system_prompt=saved_system_prompt,
+            session_id=saved_session_id,
         )
 
+    # ── Result Callback: Deferred Ergebnis dem Nutzer aussprechen ──
+    async def deliver_deferred_result(request_id: str, result: str):
+        """Wenn ein deferred Request fertig ist → Ergebnis via TTS aussprechen.
+
+        Verarbeitet auch ACTION-Tags in der Antwort (Erinnerungen, HA-Calls etc.)
+        damit geparkte Anfragen voll funktional bleiben.
+        """
+        if voice_pipeline:
+            try:
+                await voice_pipeline.deliver_deferred_result(result)
+                logger.info(
+                    "deferred_result_delivered",
+                    request_id=request_id,
+                    result_len=len(result),
+                )
+            except Exception as exc:
+                logger.error(
+                    "deferred_result_delivery_failed",
+                    request_id=request_id,
+                    error=str(exc),
+                )
+        else:
+            logger.warning("deferred_result_no_pipeline", request_id=request_id)
+
+    # ── Ready-Check: Worker wartet bis Heavy-Engine frei ist ──
+    def heavy_is_free() -> bool:
+        """True wenn Heavy-Engine gerade NICHT generiert."""
+        return not getattr(heavy_engine, "is_generating", False)
+
     queue_handler.set_process_callback(process_deferred)
+    queue_handler.set_result_callback(deliver_deferred_result)
+    queue_handler.set_ready_check(heavy_is_free)
     await queue_handler.start_worker()
     logger.info("boot_phase", service="queue_worker", status="started")
 
@@ -338,6 +405,52 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass  # Memory-Fehler darf Monolog nie brechen
         internal_monologue.set_memory(_monologue_memory)
+
+        # ── Action-Intent-Callback: Gedanken → Aktion ────────────────
+        # Wenn SOMA in einem Gedanken eine Idee erkennt (Plugin/Self-Improve),
+        # wird dieser Callback aufgerufen. Er startet die Aktion asynchron.
+        async def _monologue_action(intent_type: str, thought: str) -> None:
+            """Bruecke: innerer Gedanke → Evolution Lab."""
+            try:
+                if intent_type == "plugin_idea" and plugin_generator:
+                    # Gedanken-Text als Plugin-Beschreibung nutzen
+                    # Name aus den ersten Woertern ableiten
+                    words = thought.lower().split()[:4]
+                    import re as _re
+                    raw_name = "_".join(w for w in words if w.isalpha())
+                    plugin_name = _re.sub(r"[^a-z_]", "", raw_name)[:30] or "auto_idea"
+                    await broadcast_thought(
+                        "evolution",
+                        f"💡 Monolog-Idee → Plugin '{plugin_name}': {thought[:80]}...",
+                        "MONOLOGUE_ACTION",
+                    )
+                    asyncio.create_task(
+                        plugin_generator.generate_from_description(
+                            name=plugin_name,
+                            description=thought,
+                            broadcast_callback=broadcast_thought,
+                        )
+                    )
+                elif intent_type == "improve_idea" and self_improver:
+                    await broadcast_thought(
+                        "evolution",
+                        f"🔧 Monolog-Idee → Self-Improve: {thought[:80]}...",
+                        "MONOLOGUE_ACTION",
+                    )
+                    # self_improver.suggest_from_thought() – als Proposal,
+                    # User muss immer noch genehmigen (kein Silent-Commit)
+                    asyncio.create_task(
+                        self_improver.suggest_from_thought(thought)
+                        if hasattr(self_improver, "suggest_from_thought")
+                        else asyncio.sleep(0)
+                    )
+            except Exception as exc:
+                logger.warning("monologue_action_error", error=str(exc))
+
+        internal_monologue.set_action(_monologue_action)
+
+        # Pause-Check: Monolog pausiert wenn Heavy-LLM generiert
+        internal_monologue.set_pause_check(lambda: heavy_engine.is_generating)
 
         # Monologue starten (generiert Gedanken im Idle)
         await internal_monologue.start()

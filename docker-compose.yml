@@ -111,6 +111,9 @@ services:
       - VODAFONE_SIP_USER=${VODAFONE_SIP_USER:-soma}
       - VODAFONE_SIP_PASS=${VODAFONE_SIP_PASS:-changeme_in_env}
       - ASTERISK_ARI_PASS=${ASTERISK_ARI_PASS:-soma_ari_secret}
+      # Linphone: Lokaler SIP-Client (Smartphone/Tablet via LAN/VPN)
+      # Linphone App: SIP-Adresse = sip:soma@<SOMA_IP>, Passwort = LINPHONE_SIP_PASS
+      - LINPHONE_SIP_PASS=${LINPHONE_SIP_PASS:-soma_linphone_secret}
     volumes:
       - ./asterisk/config:/etc/asterisk           # Asterisk config files
       - ./data/phone_recordings:/var/spool/asterisk/recording  # Caller recordings → STT

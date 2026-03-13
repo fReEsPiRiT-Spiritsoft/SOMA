@@ -20,6 +20,8 @@ from typing import Optional, Callable, Awaitable, TYPE_CHECKING
 
 import numpy as np
 
+from brain_core.memory.user_identity import get_user_name_sync
+
 if TYPE_CHECKING:
     from brain_core.memory.memory_orchestrator import MemoryOrchestrator
     from brain_core.memory.diary_writer import DiaryWriter
@@ -161,9 +163,10 @@ class BackgroundConsolidator:
 
                 # Episode-Texte zusammenfassen
                 episode_text = ""
+                user_name = get_user_name_sync()
                 for ep in cluster:
                     episode_text += (
-                        f"- [{ep.emotion}] Patrick: \"{ep.user_text[:100]}\" "
+                        f"- [{ep.emotion}] {user_name}: \"{ep.user_text[:100]}\" "
                         f"-> SOMA: \"{ep.soma_text[:100]}\"\n"
                     )
 
@@ -207,6 +210,16 @@ class BackgroundConsolidator:
                             "knowledge", "personality",
                         }
                         if category in valid_cats and len(fact) > 5:
+                            # ── Anti-Halluzinations-Validierung ──
+                            if not self._validate_extracted_fact(
+                                fact, subject, episode_text,
+                            ):
+                                logger.warning(
+                                    "consolidation_fact_REJECTED",
+                                    fact=fact[:60],
+                                    reason="failed validation",
+                                )
+                                continue
                             await self._memory.semantic.learn_fact(
                                 category=category,
                                 subject=subject,
@@ -269,6 +282,65 @@ class BackgroundConsolidator:
 
         return [c for c in clusters if len(c) >= MIN_CLUSTER_SIZE]
 
+    @staticmethod
+    def _validate_extracted_fact(
+        fact: str, subject: str, episode_text: str,
+    ) -> bool:
+        """
+        Validiert ob ein aus Episoden extrahierter Fakt plausibel ist.
+        
+        Regeln:
+        1. Fakt muss auf Deutsch sein (System-Sprache)
+        2. Fakt darf nicht selbst-referenziell sein (SOMA lobt sich nicht)
+        3. Mindestens 1 Schlüsselwort aus den Episoden muss im Fakt vorkommen
+        4. Fakt darf kein Widerspruch zu bekanntem Wissen sein
+        """
+        import re
+        
+        fact_lower = fact.lower()
+        
+        # Regel 1: Deutsche Sprache prüfen — englische Fakten ablehnen
+        english_indicators = [
+            " the ", " is ", " has ", " was ", " are ", " with ",
+            " from ", " that ", " this ", " his ", " her ", " they ",
+            "developed a ", "discussed ", "wants to ", "considers ",
+            "frequently ", "seeks ",
+        ]
+        english_count = sum(1 for e in english_indicators if e in f" {fact_lower} ")
+        if english_count >= 2:
+            logger.debug(f"fact_rejected_english: {fact[:60]}")
+            return False
+        
+        # Regel 2: SOMA-Selbstlob/-Selbstreferenz ablehnen
+        if subject.lower() == "soma":
+            self_praise = [
+                "stolz", "proud", "capabilities", "fähigkeiten",
+                "intelligent", "smart", "great",
+            ]
+            if any(sp in fact_lower for sp in self_praise):
+                logger.debug(f"fact_rejected_self_praise: {fact[:60]}")
+                return False
+        
+        # Regel 3: Fakt muss Bezug zu Episoden haben
+        # Mindestens 1 bedeutsames Wort (>4 Zeichen) aus dem Fakt
+        # muss in den Quell-Episoden vorkommen
+        episode_lower = episode_text.lower()
+        fact_words = set(
+            w for w in re.findall(r'\b\w+\b', fact_lower)
+            if len(w) > 4
+        )
+        overlap = sum(1 for w in fact_words if w in episode_lower)
+        if overlap == 0 and len(fact_words) > 2:
+            logger.debug(f"fact_rejected_no_overlap: {fact[:60]}")
+            return False
+        
+        # Regel 4: Zu kurze oder zu generische Fakten ablehnen
+        if len(fact.split()) < 3:
+            logger.debug(f"fact_rejected_too_short: {fact[:60]}")
+            return False
+        
+        return True
+
     # ══════════════════════════════════════════════════════════════════
     #  PHASE 2: DREAMING — Tages-Reflexion + Diary
     # ══════════════════════════════════════════════════════════════════
@@ -291,6 +363,7 @@ class BackgroundConsolidator:
 
             summaries = []
             source_ids = []
+            user_name = get_user_name_sync()
             for ep in episodes:
                 age_h = (time.time() - ep.timestamp) / 3600
                 ago = (
@@ -300,7 +373,7 @@ class BackgroundConsolidator:
                 )
                 summaries.append(
                     f"- [{ago}, {ep.emotion}] "
-                    f"Patrick: \"{ep.user_text[:80]}\" "
+                    f"{user_name}: \"{ep.user_text[:80]}\" "
                     f"-> Ich: \"{ep.soma_text[:80]}\""
                 )
                 source_ids.append(str(ep.id))

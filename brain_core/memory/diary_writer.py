@@ -13,7 +13,7 @@ Diary-Eintraege werden:
 
 Format:
   Kein JSON. Kein SQL. Fliesstext mit Timestamp + Emotion.
-  "Heute Abend hat Patrick mich nach dem Wetter gefragt.
+  "Heute Abend hat jemand mich nach dem Wetter gefragt.
    Er klang muede. Ich habe ihm geraten, frueh schlafen zu gehen."
 """
 
@@ -63,9 +63,9 @@ Erwaehne die Emotion die du wahrgenommen hast.
 KEIN JSON. KEIN Markdown. Nur natuerlicher Fliesstext.
 
 Interaktion:
-- Patrick sagte: "{user_text}"
+- Der Nutzer sagte: "{user_text}"
 - Ich antwortete: "{soma_text}"
-- Patricks Stimmung: {emotion}
+- Stimmung des Nutzers: {emotion}
 - Uhrzeit: {time_str}
 
 Mein Tagebucheintrag:"""
@@ -76,7 +76,7 @@ Hier sind einige Dinge die heute passiert sind:
 {episode_summaries}
 
 Schreibe eine kurze Zusammenfassung (3-5 Saetze) als Tagebucheintrag.
-Was hast du heute gelernt? Wie hat Patrick sich gefuehlt?
+Was hast du heute gelernt? Wie hat der Nutzer sich gefuehlt?
 Gibt es Muster die du erkennst?
 Schreibe in der Ich-Form. Natuerlich und reflektierend.
 
@@ -328,7 +328,7 @@ class DiaryWriter:
     async def write_insight(self, insight_text: str) -> Optional[DiaryEntry]:
         """
         Schreibt eine Erkenntnis — wenn SOMA etwas 'versteht'.
-        Z.B. nach Consolidation: "Patrick scheint montags immer muede zu sein."
+        Z.B. nach Consolidation: "Der Nutzer scheint montags immer muede zu sein."
         """
         entry = DiaryEntry(
             timestamp=time.time(),
@@ -447,7 +447,7 @@ class DiaryWriter:
 
         mood_part = f" Er wirkte {emotion_desc}." if emotion_desc else ""
         return (
-            f"Um {time_str} hat Patrick mit mir gesprochen.{mood_part} "
+            f"Um {time_str} hat jemand mit mir gesprochen.{mood_part} "
             f"Er sagte: \"{user_text[:100]}\". "
             f"Ich habe geantwortet: \"{soma_text[:100]}\"."
         )

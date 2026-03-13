@@ -2,7 +2,7 @@
 L2: Episodic Memory — Konkrete Erlebnisse mit Zeitstempel + Embedding.
 Gespeichert in SQLite. Vector-Search via numpy Dot-Product.
 
-"Patrick war am Montag gestresst und hat über Arbeit geredet."
+"Der Nutzer war am Montag gestresst und hat über Arbeit geredet."
 """
 
 from __future__ import annotations

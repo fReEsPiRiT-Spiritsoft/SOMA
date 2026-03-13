@@ -57,6 +57,7 @@ class QueueHandler:
         self._result_callback: Optional[
             Callable[[str, str], Awaitable[None]]
         ] = None
+        self._ready_check: Optional[Callable[[], bool]] = None
 
         # Circuit Breaker für Redis
         self._cb = SomaCircuitBreaker(
@@ -155,6 +156,18 @@ class QueueHandler:
         """Callback wenn Ergebnis fertig (z.B. WebSocket-Push)."""
         self._result_callback = callback
 
+    def set_ready_check(
+        self,
+        check: Callable[[], bool],
+    ) -> None:
+        """Setze eine Funktion die prüft ob Verarbeitung möglich ist.
+
+        Der Worker wartet bis diese Funktion True zurückgibt bevor er
+        den nächsten Request aus der Queue verarbeitet.
+        Typisch: Prüfe ob die Heavy-Engine gerade frei ist.
+        """
+        self._ready_check = check
+
     async def start_worker(self) -> None:
         if self._running:
             return
@@ -175,9 +188,26 @@ class QueueHandler:
         logger.info("queue_worker_stopped")
 
     async def _worker_loop(self) -> None:
-        """Verarbeite geparkte Anfragen wenn Ressourcen frei werden."""
+        """Verarbeite geparkte Anfragen wenn Ressourcen frei werden.
+
+        Wartet bis:
+          1. Ein Request in der Queue liegt
+          2. Die ready_check-Funktion True zurückgibt (Heavy-Engine frei)
+        Erst dann wird der Request verarbeitet.
+        """
+        _wait_logged = False
+
         while self._running:
             try:
+                # Prüfe ob Heavy-Engine frei ist bevor wir etwas verarbeiten
+                if self._ready_check and not self._ready_check():
+                    if not _wait_logged:
+                        logger.debug("queue_worker_waiting", reason="engine_busy")
+                        _wait_logged = True
+                    await asyncio.sleep(1.0)
+                    continue
+                _wait_logged = False
+
                 request = await self.dequeue()
                 if request and self._process_callback:
                     logger.info(
@@ -189,6 +219,11 @@ class QueueHandler:
                         await self.store_result(request.request_id, result)
                         if self._result_callback:
                             await self._result_callback(request.request_id, result)
+                        logger.info(
+                            "deferred_completed",
+                            request_id=request.request_id,
+                            result_len=len(result) if result else 0,
+                        )
                     except Exception as exc:
                         logger.error(
                             "deferred_processing_failed",

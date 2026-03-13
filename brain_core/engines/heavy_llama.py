@@ -56,6 +56,7 @@ class HeavyLlamaEngine(BaseEngine):
         self._last_request_time: float = 0.0
         self._model_loaded: bool = False
         self._idle_unload_task: Optional[asyncio.Task] = None
+        self._is_generating: bool = False
 
     async def initialize(self) -> None:
         self._client = httpx.AsyncClient(
@@ -113,6 +114,12 @@ class HeavyLlamaEngine(BaseEngine):
                 )
                 await self._unload_model()
 
+    @property
+    def is_generating(self) -> bool:
+        """True wenn gerade eine Anfrage verarbeitet wird.
+        Monolog & Ambient pausieren solange um VRAM/Compute freizuhalten."""
+        return self._is_generating
+
     def notify_vram_pressure(self) -> None:
         """Vom LogicRouter/HealthMonitor aufgerufen wenn VRAM > 90%.
         Entlädt sofort — asynchron via create_task."""
@@ -154,29 +161,40 @@ class HeavyLlamaEngine(BaseEngine):
 
         # Basis-Options + optionaler Override (z.B. temperature=0.1 für Code-Generierung)
         ollama_options = {
-            "num_ctx": 8192,
-            "temperature": 0.7,
-            "top_p": 0.9,
+            "num_ctx": 16384,
+            "temperature": 0.4,
+            "top_p": 0.85,
+            "repeat_penalty": 1.15,
         }
         if options_override:
             ollama_options.update(options_override)
 
+        # ── Qwen3 Thinking-Mode Steuerung ─────────────────────────────
+        # Thinking ist mächtig aber langsam (~5x). Nur bei komplexen Fragen aktivieren.
+        # Einfache Befehle (Licht, Suche, Erinnerung) → kein Thinking → 6x schneller.
+        use_thinking = self._should_use_thinking(prompt)
+
         # Ollama API Call
         async def _call() -> str:
-            resp = await self._client.post(
-                "/api/chat",
-                json={
-                    "model": self._model,
-                    "messages": messages,
-                    "stream": False,
-                    "options": ollama_options,
-                },
-            )
+            payload = {
+                "model": self._model,
+                "messages": messages,
+                "stream": False,
+                "options": ollama_options,
+            }
+            # Qwen3: think=false deaktiviert den internen Reasoning-Modus
+            if not use_thinking:
+                payload["think"] = False
+            resp = await self._client.post("/api/chat", json=payload)
             resp.raise_for_status()
             data = resp.json()
             return data["message"]["content"]
 
-        response = await self._cb.call(self._retry.execute, _call)
+        self._is_generating = True
+        try:
+            response = await self._cb.call(self._retry.execute, _call)
+        finally:
+            self._is_generating = False
 
         # Session updaten
         if session_id:
@@ -189,9 +207,60 @@ class HeavyLlamaEngine(BaseEngine):
             model=self._model,
             prompt_len=len(prompt),
             response_len=len(response),
+            thinking=use_thinking,
         )
 
         return response
+
+    @staticmethod
+    def _should_use_thinking(prompt: str) -> bool:
+        """
+        Entscheide ob Qwen3 Thinking-Mode aktiv sein soll.
+        
+        Thinking AN (langsamer, ~5x, aber klüger):
+          - Komplexe Fragen, Erklärungen, Diskussionen
+          - Kreative Aufgaben, Planung
+          - Code-Generierung, Plugin-Erstellung
+        
+        Thinking AUS (schnell, ~0.5-1s):
+          - Smart Home Befehle (Licht, Heizung, etc.)
+          - Einfache Suchen, Erinnerungen
+          - Kurze Antworten, Smalltalk
+          - Re-Ask Sessions (search_reask, fetch_reask, etc.)
+        """
+        p = prompt.lower()
+        
+        # Re-Ask Sessions → kein Thinking (schon recherchiert, nur zusammenfassen)
+        if any(marker in p for marker in [
+            "kein [action:", "kein action", "fasse die wichtigsten",
+            "fasse das ergebnis", "basierend auf dem seiteninhalt",
+            "du hast gerade", "zusammen —",
+        ]):
+            return False
+        
+        # Smart Home Befehle → kein Thinking
+        smart_home_words = [
+            "licht", "lampe", "heizung", "temperatur", "an ", " aus",
+            "heller", "dunkler", "wärmer", "kälter", "steckdose",
+            "rolladen", "jalousie", "musik", "pause", "stop", "leiser", "lauter",
+        ]
+        if len(p.split()) <= 8 and any(w in p for w in smart_home_words):
+            return False
+        
+        # Einfache Grüße / Smalltalk → kein Thinking
+        short_phrases = [
+            "hallo", "hi ", "hey ", "guten morgen", "gute nacht",
+            "danke", "tschüss", "wie geht", "alles klar",
+        ]
+        if any(p.startswith(sp) or p == sp.strip() for sp in short_phrases):
+            return False
+        
+        # Erinnerungen, Merken → kein Thinking
+        if any(w in p for w in ["erinner", "timer", "weck", "merke", "merken"]):
+            return False
+        
+        # Alles andere → Thinking AN für maximale Qualität
+        return True
 
     async def health_check(self) -> bool:
         """Prüfe ob Ollama erreichbar und Model geladen."""

@@ -102,6 +102,18 @@ from brain_core.memory.integration import (
     store_system_event as memory_store_event,
 )
 from brain_core.memory.two_phase import get_bridge_response
+from brain_core.memory.user_identity import (
+    is_onboarding_needed,
+    get_user_name,
+    set_user_name,
+    complete_onboarding,
+    get_user_name_sync,
+)
+from brain_core.memory.onboarding import (
+    get_onboarding_system_prompt,
+    get_onboarding_greeting,
+    is_onboarding_complete,
+)
 from brain_ego.consciousness import PerceptionSnapshot
 
 logger = structlog.get_logger("soma.voice.pipeline")
@@ -176,6 +188,11 @@ class VoicePipeline:
         self._voice_session_id = "voice_main_session"
         self._conversation_history: list[dict] = []  # Für Dashboard
 
+        # ── Onboarding-Modus: Kein Wake-Word nötig ────────────────────────
+        # Während des Onboardings behandelt Soma JEDE Sprache als an sich gerichtet.
+        # Der User muss nicht "Soma" sagen — er antwortet einfach natürlich.
+        self._onboarding_active = False
+
         # ── Passiver Kontext-Buffer (The ZORA Awareness) ─────────────────
         # Speichert die letzten ~2min ALLER gehörten Gespräche
         # AUCH ohne Wake-Word — Soma "weiß" immer was gerade passiert
@@ -247,6 +264,36 @@ class VoicePipeline:
             device=self._audio_device,
             msg="🎤 Soma hört zu. Dauerhaft. Wie ZORA.",
         )
+
+        # ── Onboarding: Proaktive Begrüßung beim ersten Start ────────────
+        # Wenn das Gedächtnis leer ist → SOMA stellt sich vor und fragt nach dem Namen.
+        # Muss NACH TTS-Init passieren damit SOMA sprechen kann.
+        # WICHTIG: Wir warten bis TTS fertig gesprochen hat UND fügen einen
+        # Cooldown ein damit der Mic-Buffer von SOMAs eigener Stimme geflusht wird.
+        try:
+            needs_onboarding = await is_onboarding_needed()
+            if needs_onboarding:
+                logger.info("onboarding_triggered", reason="empty_memory")
+                greeting = get_onboarding_greeting()
+                self._onboarding_step = 1  # Greeting war Step 0, nächste Antwort ist Step 1
+                self._onboarding_active = True  # Kein Wake-Word nötig!
+                await asyncio.sleep(2.0)  # Kurz warten bis alles stabil läuft
+                await self._emit(
+                    "tts",
+                    f"🆕 Onboarding: \"{greeting}\"",
+                    "ONBOARDING",
+                )
+                await self.tts.speak(
+                    greeting,
+                    SpeechEmotion(speed=0.95, pitch=1.0, volume=1.0),
+                )
+                # Warten bis TTS die Begrüßung VOLLSTÄNDIG ausgesprochen hat
+                await self.tts._speak_queue.join()
+                # Kurzer Cooldown: Mic-Buffer flushen (SOMAs eigene Stimme)
+                await asyncio.sleep(1.0)
+                logger.info("onboarding_greeting_complete", msg="Begrüßung vollständig, warte auf Antwort")
+        except Exception as exc:
+            logger.warning("onboarding_greeting_failed", error=str(exc))
 
     async def stop(self):
         """Voice Pipeline stoppen."""
@@ -474,7 +521,13 @@ class VoicePipeline:
             )
 
             # ── 4. Wurde "Soma" gesagt? ──────────────────────────────
-            if transcription.contains_soma:
+            # Während des Onboardings: JEDE Sprache wird als an Soma gerichtet behandelt.
+            # Der Nutzer antwortet natürlich auf SOMAs Fragen ohne "Soma" sagen zu müssen.
+            if self._onboarding_active:
+                logger.info("onboarding_routing", text=transcription.text[:60],
+                            msg="Onboarding aktiv → Sprache wird ohne Wake-Word verarbeitet")
+                await self._handle_soma_request(transcription, emotion_reading)
+            elif transcription.contains_soma:
                 await self._handle_soma_request(transcription, emotion_reading)
 
             # ── 5. Stille Befehle erkennen (Dismiss) ─────────────────
@@ -503,10 +556,14 @@ class VoicePipeline:
         self._user_last_spoken = time.time()
 
         # "Soma" aus dem Text entfernen für den Prompt
+        # Während Onboarding: Gesamter Text ist der Prompt (kein "Soma" drin)
         prompt = self._extract_prompt(transcription.text)
 
         if not prompt.strip():
             # Nur "Soma" gesagt, sonst nichts
+            # Während Onboarding: Leerer Text → ignorieren, weiter zuhören
+            if self._onboarding_active:
+                return
             await self._emit("llm", "👋 Soma wurde gerufen (ohne Frage)", "TRIGGER")
             await self.tts.speak(
                 "Ja?",
@@ -514,20 +571,30 @@ class VoicePipeline:
             )
             return
 
-        # ── Evolution Lab Trigger ────────────────────────────────────
-        # "schreib ein Plugin", "erstell ein Plugin", "bau ein Plugin"
-        if self._is_plugin_request(prompt):
-            await self._handle_plugin_request(prompt)
-            return
+        # ── Spezial-Handler NUR im Normalbetrieb (nicht während Onboarding) ──
+        if not self._onboarding_active:
+            # ── Evolution Lab Trigger ────────────────────────────────────
+            # "schreib ein Plugin", "erstell ein Plugin", "bau ein Plugin"
+            if self._is_plugin_request(prompt):
+                await self._handle_plugin_request(prompt)
+                return
 
-        # ── Pending Plugin Test ("Ja, ruf es auf") ───────────────────
-        if self._pending_plugin_test and self._is_affirmative(prompt):
-            await self._execute_pending_plugin()
-            return
+            # ── Pending Plugin Test ("Ja, ruf es auf") ───────────────────
+            if self._pending_plugin_test and self._is_affirmative(prompt):
+                await self._execute_pending_plugin()
+                return
 
-        # HINWEIS: Erinnerungen werden NICHT mehr direkt hier behandelt.
-        # Das LLM erkennt den Intent und setzt einen [ACTION:reminder...] Tag.
-        # → _execute_action_tags() in _handle_soma_request() führt ihn aus.
+            # HINWEIS: Erinnerungen werden NICHT mehr direkt hier behandelt.
+            # Das LLM erkennt den Intent und setzt einen [ACTION:reminder...] Tag.
+            # → _execute_action_tags() in _handle_soma_request() führt ihn aus.
+
+            # ── Pre-LLM Such-Interceptor ─────────────────────────────────
+            # Erkennt explizite Suchanfragen direkt und umgeht das LLM
+            # (das LLM wählt manchmal browse statt search, oder erfindet Daten)
+            search_query = self._extract_search_intent(prompt)
+            if search_query:
+                await self._handle_direct_search(search_query, emotion_reading)
+                return
 
         logger.info(
             "soma_addressed",
@@ -547,17 +614,36 @@ class VoicePipeline:
             # Emotionaler Kontext für den System-Prompt
             emotion_context = self.emotion.get_context_for_llm()
 
+            # ── Onboarding-Check: Erstes Erwachen? ──────────────────────
+            onboarding_active = False
+            try:
+                onboarding_active = await is_onboarding_needed()
+            except Exception:
+                pass
+
             # ── Memory-enriched System-Prompt (parallel zum Emotion-Context) ──
             emotion_str = emotion_reading.emotion.value if emotion_reading else "neutral"
-            try:
-                memory_prompt_extra = await build_context_for_query(
-                    user_text=prompt,
-                    emotion=emotion_str,
-                    is_child=getattr(self, '_child_mode', False),
+
+            if onboarding_active:
+                # Erstes Kennenlernen — spezieller System-Prompt
+                _onboarding_step = getattr(self, '_onboarding_step', 0)
+                _onboarding_user = get_user_name_sync()
+                memory_prompt_extra = get_onboarding_system_prompt(
+                    step=_onboarding_step,
+                    user_name=_onboarding_user if _onboarding_user != "du" else "",
                 )
-            except Exception as mem_err:
-                logger.warning("memory_context_failed", error=str(mem_err))
-                memory_prompt_extra = ""
+                self._onboarding_step = _onboarding_step + 1
+                logger.info("onboarding_active", step=_onboarding_step)
+            else:
+                try:
+                    memory_prompt_extra = await build_context_for_query(
+                        user_text=prompt,
+                        emotion=emotion_str,
+                        is_child=getattr(self, '_child_mode', False),
+                    )
+                except Exception as mem_err:
+                    logger.warning("memory_context_failed", error=str(mem_err))
+                    memory_prompt_extra = ""
 
             request = SomaRequest(
                 prompt=prompt,
@@ -607,8 +693,56 @@ class VoicePipeline:
                 # Auf echte Antwort warten
                 response = await llm_task
 
+            # ── DEFERRED: Nur Warte-Nachricht sprechen, keine ACTION-Tags ──
+            if response.was_deferred:
+                wait_msg = response.response
+                logger.info(
+                    "deferred_wait_message",
+                    msg=wait_msg[:80],
+                    deferred_id=response.deferred_id,
+                )
+                await self._emit(
+                    "llm",
+                    f"⏳ Warteschlange: \"{wait_msg}\"",
+                    "DEFERRED",
+                    {"deferred_id": response.deferred_id, "engine": "deferred"},
+                )
+                # Conversation History
+                self._conversation_history.append({
+                    "role": "assistant",
+                    "text": wait_msg,
+                    "engine": "deferred",
+                    "timestamp": datetime.now().isoformat(),
+                })
+                # Warte-Nachricht aussprechen
+                await self.tts.speak(
+                    wait_msg,
+                    SpeechEmotion(speed=1.05, pitch=1.0, volume=0.9),
+                )
+                # Echte Antwort kommt später via deliver_deferred_result()
+                return
+
             # ── ACTION-Tag Dispatch ──────────────────────────────────
-            clean_response, action_log = await self._execute_action_tags(response.response)
+            self._last_user_text = prompt  # für Halluzinations-Guard in _action_remember
+
+            # ── Frage-Guard: Wenn SOMA eine Frage stellt → keine ACTION-Tags ──
+            # Verhindert: "Willst du das Wetter wissen?[ACTION:search ...]"
+            # Die Suche soll erst starten wenn der Nutzer bestätigt.
+            import re as _re_guard
+            _response_text_for_actions = response.response
+            _clean_text = _re_guard.sub(r'\[ACTION:\w+[^\]]*\]', '', response.response).strip()
+            if '?' in _clean_text and _re_guard.search(r'\[ACTION:', response.response):
+                # Antwort enthält Fragezeichen UND Action-Tags → Tags entfernen
+                logger.info(
+                    "question_guard_stripped_actions",
+                    response_preview=_clean_text[:80],
+                )
+                _response_text_for_actions = _clean_text  # Nur Text, keine Actions
+
+            clean_response, action_log = await self._execute_action_tags(_response_text_for_actions)
+
+            # ── Anti-Hallucination Filter ────────────────────────────
+            clean_response = self._filter_hallucinations(clean_response)
 
             # ── Code-Block Schutz ────────────────────────────────────
             # Wenn das LLM einen ```python Block in der Antwort hat,
@@ -661,6 +795,27 @@ class VoicePipeline:
             )
             speech_emotion = self._select_speech_emotion(emotion_reading)
             await self.tts.speak(clean_response, speech_emotion)
+
+            # ── Onboarding-Lifecycle: Prüfe ob Onboarding abgeschlossen ──
+            if self._onboarding_active:
+                try:
+                    still_needed = await is_onboarding_needed()
+                    step_done = is_onboarding_complete(
+                        getattr(self, '_onboarding_step', 0)
+                    )
+                    if not still_needed or step_done:
+                        self._onboarding_active = False
+                        logger.info(
+                            "onboarding_completed",
+                            msg="Onboarding abgeschlossen — normaler Betrieb",
+                        )
+                        await self._emit(
+                            "info",
+                            "✅ Onboarding abgeschlossen — Soma kennt dich jetzt!",
+                            "ONBOARDING",
+                        )
+                except Exception:
+                    pass  # Onboarding-Check darf Pipeline nie brechen
 
             # ── Memory: Interaktion speichern (fire-and-forget) ────────
             try:
@@ -731,7 +886,14 @@ class VoicePipeline:
         while self._running:
             try:
                 # Nicht unterbrechen wenn Soma gerade selbst spricht
-                if not self.tts.is_speaking:
+                # oder wenn das Heavy-LLM gerade eine Anfrage verarbeitet
+                heavy_busy = False
+                if self._logic_router:
+                    heavy_engine = self._logic_router._engines.get("heavy")
+                    if heavy_engine and getattr(heavy_engine, "is_generating", False):
+                        heavy_busy = True
+
+                if not self.tts.is_speaking and not heavy_busy:
                     current_hour = datetime.now().hour
                     intervention = self.ambient.check(current_hour=current_hour)
 
@@ -766,6 +928,47 @@ class VoicePipeline:
         await self._emit("tts", f"🔔 Autonom: \"{text}\"", "PROACTIVE")
         logger.info("autonomous_speak", text=text[:80])
         await self.tts.speak(text, emotion, priority=True)
+
+    async def deliver_deferred_result(self, result: str):
+        """
+        Liefert das Ergebnis eines deferred Requests an den Nutzer.
+
+        Wird vom QueueHandler aufgerufen wenn ein geparkter Request
+        fertig verarbeitet wurde. Verarbeitet ACTION-Tags und spricht
+        die bereinigte Antwort aus.
+        """
+        logger.info("delivering_deferred_result", result_len=len(result))
+
+        # ACTION-Tags verarbeiten (Erinnerungen, HA-Calls etc.)
+        clean, actions = await self._execute_action_tags(result)
+        clean = self._filter_hallucinations(clean)
+
+        if not clean.strip():
+            logger.warning("deferred_result_empty_after_clean")
+            return
+
+        # Dashboard
+        await self._emit(
+            "llm",
+            f"📬 Deferred-Ergebnis: \"{clean}\"",
+            "DEFERRED",
+            {"actions_executed": actions},
+        )
+
+        # Conversation History
+        self._conversation_history.append({
+            "role": "assistant",
+            "text": clean,
+            "engine": "heavy (deferred)",
+            "timestamp": datetime.now().isoformat(),
+        })
+
+        # Aussprechen mit Priority (unterbricht nicht laufende TTS)
+        await self.tts.speak(
+            clean,
+            SpeechEmotion(speed=1.0, pitch=1.0, volume=0.95),
+            priority=True,
+        )
 
     # ══════════════════════════════════════════════════════════════════
     #  ACTION-TAG DISPATCH
@@ -817,9 +1020,24 @@ class VoicePipeline:
                     executed.append(f"ha_tts: {result}")
 
                 elif action_type == "create_plugin":
-                    # LLM entscheidet eigenständig ein Plugin zu erstellen
-                    result = await self._action_create_plugin(params)
-                    executed.append(f"create_plugin: {result}")
+                    # LLM entscheidet ein Plugin zu erstellen —
+                    # NUR wenn der Nutzer explizit danach gefragt hat!
+                    user_text_lower = (getattr(self, "_last_user_text", "") or "").lower()
+                    plugin_request_markers = [
+                        "plugin", "erweiterung", "schreib dir", "entwickle",
+                        "erstell", "bau dir", "programmier", "feature",
+                        "fähigkeit", "kannst du lernen", "bring dir bei",
+                    ]
+                    if any(m in user_text_lower for m in plugin_request_markers):
+                        result = await self._action_create_plugin(params)
+                        executed.append(f"create_plugin: {result}")
+                    else:
+                        logger.warning(
+                            "create_plugin_BLOCKED",
+                            reason="user did not request plugin creation",
+                            user_text=user_text_lower[:80],
+                        )
+                        executed.append("create_plugin: blockiert (Nutzer hat nicht danach gefragt)")
 
                 elif action_type == "youtube":
                     # YouTube-Suche öffnen / Lied abspielen
@@ -850,6 +1068,26 @@ class VoicePipeline:
                     # URL-Inhalt abrufen + als Kontext nutzen
                     result = await self._action_fetch_url(params)
                     executed.append(f"fetch_url: {result}")
+
+                elif action_type == "browse":
+                    # Webseite öffnen, lesen und zusammenfassen
+                    result = await self._action_browse(params)
+                    executed.append(f"browse: {result}")
+
+                elif action_type == "screenshot":
+                    # Screenshot einer URL speichern
+                    result = await self._action_screenshot(params)
+                    executed.append(f"screenshot: {result}")
+
+                elif action_type == "shell":
+                    # Shell-Befehl ausführen
+                    result = await self._action_shell(params)
+                    executed.append(f"shell: {result}")
+
+                elif action_type == "screen_look":
+                    # Bildschirm abfotografieren + OCR
+                    result = await self._action_screen_look(params)
+                    executed.append(f"screen_look: {result}")
 
                 else:
                     logger.warning("action_tag_unknown", action=action_type)
@@ -942,22 +1180,137 @@ class VoicePipeline:
         return "Erinnerungs-Plugin nicht verfügbar."
 
     async def _action_remember(self, params: dict) -> str:
-        """Speichert eine Info via ACTION-Tag direkt im Memory (über Orchestrator)."""
+        """Speichert eine Info via ACTION-Tag direkt im Memory (über Orchestrator).
+        
+        Halluzinations-Guard: Prüft ob der Inhalt zum User-Input passt.
+        Wenn der User nie etwas Ähnliches gesagt hat, wird NICHT gespeichert.
+        """
         category = params.get("category", "important")
         content  = params.get("content", "")
         if not content:
             return "Kein Inhalt zum Merken angegeben."
 
+        # ── Halluzinations-Guard ─────────────────────────────────────
+        user_text = getattr(self, "_last_user_text", "") or ""
+        if user_text and not self._remember_content_matches_user(user_text, content):
+            logger.warning(
+                "action_remember_BLOCKED_hallucination",
+                user_text=user_text[:80],
+                content=content[:80],
+            )
+            return f"Nicht gespeichert (Halluzinations-Guard): Inhalt passt nicht zum User-Input."
+
         try:
+            # Immer in Episodes speichern (L2)
             await memory_store_event(
                 event_type="intervention",
                 description=f"[{category}] {content}",
             )
+
+            # Preferences und User-Info sofort auch als Fakt (L3) speichern!
+            # Sonst dauert es bis zur nächsten Background-Consolidation.
+            fact_categories = {
+                "preferences": "preference",
+                "preference": "preference",
+                "user_info": "knowledge",
+                "routines": "habit",
+                "relationships": "relationship",
+            }
+            l3_category = fact_categories.get(category.lower())
+            if l3_category:
+                try:
+                    from brain_core.memory.integration import get_orchestrator
+                    from brain_core.memory.user_identity import get_user_name_sync
+                    orch = get_orchestrator()
+                    # Bestimme Subject: Nutzername für User-Daten, "SOMA" für SOMA-Regeln
+                    subject = get_user_name_sync() or "Nutzer"
+                    content_lower = content.lower()
+                    if any(w in content_lower for w in ["soma", "du sollst", "du musst", "schreibe", "antworte"]):
+                        subject = "SOMA"
+                    await orch.semantic.learn_fact(
+                        category=l3_category,
+                        subject=subject,
+                        fact=content,
+                        confidence=0.7,
+                    )
+                    logger.info("action_remember_L3_saved", subject=subject, fact=content[:60])
+
+                    # ── Name erkennen → User Identity aktualisieren ──
+                    if category.lower() == "user_info":
+                        from brain_core.memory.user_identity import (
+                            _extract_name_from_fact, set_user_name,
+                            complete_onboarding,
+                        )
+                        detected_name = _extract_name_from_fact(content)
+                        if detected_name:
+                            await set_user_name(detected_name)
+                            # WorkingMemory updaten
+                            try:
+                                orch.working.set_user_name(detected_name)
+                            except Exception:
+                                pass
+                            # Onboarding abschließen nach Namens-Erkennung
+                            await complete_onboarding()
+                            logger.info("user_name_learned", name=detected_name)
+
+                except Exception as l3_err:
+                    logger.warning("action_remember_L3_failed", error=str(l3_err))
+
             logger.info("action_remember_saved", category=category, content_preview=content[:60])
             return f"Gemerkt in '{category}': {content[:60]}"
         except Exception as exc:
             logger.warning("action_remember_failed", error=str(exc))
             return f"Konnte nicht speichern: {exc}"
+
+    @staticmethod
+    def _remember_content_matches_user(user_text: str, content: str) -> bool:
+        """
+        Prüft ob der zu speichernde Inhalt zum User-Input passt.
+        
+        Strategie: Mindestens 2 bedeutsame Wörter (>3 Zeichen) aus dem 
+        User-Text müssen im Remember-Content vorkommen.
+        Explizite Merken-Befehle ("merk dir", "speicher") werden immer durchgelassen.
+        """
+        user_lower = user_text.lower()
+        
+        # Explizite Speicher-Befehle → immer durchlassen
+        explicit_markers = [
+            "merk dir", "merke dir", "speicher", "erinner dich",
+            "vergiss nicht", "notier", "wichtig:", "denk dran",
+            "behalte", "remember", "save",
+        ]
+        if any(m in user_lower for m in explicit_markers):
+            return True
+        
+        # Stoppwörter (werden beim Overlap-Check ignoriert)
+        stop_words = {
+            "ich", "du", "er", "sie", "es", "wir", "ihr", "mein", "dein",
+            "sein", "ist", "bin", "hat", "habe", "sind", "war", "dass",
+            "das", "die", "der", "den", "dem", "des", "ein", "eine",
+            "und", "oder", "aber", "auch", "nicht", "noch", "schon",
+            "mit", "von", "für", "auf", "aus", "bei", "nach", "über",
+            "und", "wie", "was", "wer", "wenn", "weil", "als", "zum",
+            "zur", "kann", "will", "soll", "muss", "darf", "gerade",
+            "heute", "jetzt", "dann", "mal", "nur", "sehr", "ganz",
+            "the", "and", "for", "that", "this", "with", "from",
+            "soma",
+        }
+        
+        # Bedeutsame Wörter aus dem User-Text extrahieren
+        import re
+        user_words = set(
+            w for w in re.findall(r'\b\w+\b', user_lower)
+            if len(w) > 3 and w not in stop_words
+        )
+        content_lower = content.lower()
+        
+        # Zähle Übereinstimmungen
+        overlap = sum(1 for w in user_words if w in content_lower)
+        
+        # Mindestens 2 bedeutsame Wörter müssen übereinstimmen
+        # ODER der User-Text ist sehr kurz (< 5 Wörter) → 1 reicht
+        min_overlap = 1 if len(user_words) < 4 else 2
+        return overlap >= min_overlap
 
     async def _action_ha_call(self, params: dict) -> str:
         """
@@ -1191,9 +1544,154 @@ class VoicePipeline:
         await self._emit("action", "⏹️ Wiedergabe gestoppt", "MEDIA")
         return result
 
+    # ══════════════════════════════════════════════════════════════════
+    #  PRE-LLM SUCH-INTERCEPTOR — Bypass LLM für zuverlässige Suche
+    # ══════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _extract_search_intent(prompt: str) -> str:
+        """
+        Erkennt ob der User eine Web-Suche will und extrahiert die Query.
+        
+        Wenn klar ist dass gesucht werden soll → direkt suchen statt 
+        zu hoffen dass das LLM den richtigen ACTION-Tag wählt.
+        
+        Returns: Suchquery oder "" wenn kein Such-Intent erkannt.
+        """
+        import re
+        p = prompt.lower().strip()
+        
+        # ── Explizite Such-Keywords ──────────────────────────────────
+        search_patterns = [
+            # "suche nach ...", "such mal nach ...", "suche im internet nach ..."
+            r'(?:suche?|such)\s+(?:mal\s+)?(?:im\s+internet\s+)?(?:auf\s+\w+\s+)?(?:nach|für|über)\s+(.+)',
+            # "suche auf Google nach ..."
+            r'(?:suche?|such)\s+(?:mal\s+)?(?:auf|bei|mit|über)\s+\w+\s+(?:nach|für|über|zu)?\s*(.+)',
+            # "recherchiere ...", "recherchier mal ..."
+            r'recherchier(?:e|st)?\s+(?:mal\s+)?(?:nach|über|zu)?\s*(.+)',
+            # "google mal ...", "google nach ..."
+            r'google?\s+(?:mal\s+)?(?:nach)?\s*(.+)',
+            # "finde heraus ...", "find raus ..."
+            r'find(?:e)?\s+(?:mal\s+)?(?:heraus|raus)\s+(.+)',
+            # "schau mal nach ...", "schau im internet nach ..."
+            r'schau\s+(?:mal\s+)?(?:im\s+internet\s+)?nach\s+(.+)',
+            # "was kostet ...", "was kosten ..."
+            r'was\s+kostet?n?\s+(.+)',
+            # "wie teuer ist/sind ..."
+            r'wie\s+teuer\s+(?:ist|sind)\s+(.+)',
+            # "wie steht ..." (Aktien, Krypto, Kurse)
+            r'wie\s+steht\s+(?:der|die|das)?\s*(.+)',
+            # "wie ist das Wetter / die Temperatur ..."
+            r'wie\s+(?:ist|wird)\s+(?:das\s+)?(?:wetter|temperatur)\s*(.*)',
+            # "aktuelle nachrichten / news ..."
+            r'aktuelle[rns]?\s+(.+)',
+            # "was gibt es neues zu / über ..."
+            r'was\s+gibt\s+es\s+neues?\s+(?:zu|über|von|bei)\s+(.+)',
+            # "öffne browser und suche nach ..."
+            r'(?:öffne?|starte?)\s+(?:den\s+)?browser\s+(?:und\s+)?(?:suche?|such)\s+(?:nach|auf\s+\w+\s+nach)\s+(.+)',
+            # "suche ... preise/preis"
+            r'(?:suche?|such|finde?)\s+(?:mal\s+)?(?:die\s+|den\s+|das\s+)?(?:aktuellen?\s+)?(.+?(?:preise?n?|kosten|kurs(?:e|en)?|ergebnisse?))\s*$',
+        ]
+        
+        for pattern in search_patterns:
+            match = re.search(pattern, p)
+            if match:
+                query = match.group(1).strip()
+                # Mindestens 2 Zeichen
+                if len(query) >= 2:
+                    # Reinige die Query von Füllwörtern am Ende
+                    query = re.sub(r'\s+(?:bitte|mal|für\s+mich|im\s+internet)\s*$', '', query)
+                    return query
+        
+        return ""
+
+    async def _handle_direct_search(self, query: str, emotion_reading=None):
+        """
+        Führt eine Web-Suche direkt aus, ohne den Umweg über das LLM.
+        Spricht Bridge → Sucht → LLM fasst zusammen → Spricht Ergebnis.
+        """
+        emotion_str = emotion_reading.emotion.value if emotion_reading else "neutral"
+        
+        # Bridge sofort sprechen
+        await self._emit("action", f"🔍 Direkte Suche: '{query}'", "SEARCH")
+        await self.tts.speak(
+            "Moment, ich suche das für dich.",
+            SpeechEmotion(speed=1.1, pitch=1.0, volume=0.9),
+        )
+
+        # Echte Web-Suche
+        from brain_core.web_search import get_web_search
+        ws = get_web_search()
+        results = await ws.search(query, max_results=6)
+
+        if not results:
+            await self.tts.speak(
+                f"Leider konnte ich nichts zu '{query}' finden.",
+                self._select_speech_emotion(emotion_str),
+            )
+            return
+
+        # Ergebnisse formatieren
+        results_text = ws.format_results_for_llm(query, results, max_chars=3000)
+        await self._emit(
+            "action",
+            f"🔍 {len(results)} Ergebnisse → KI fasst zusammen...",
+            "SEARCH",
+        )
+
+        # LLM fasst zusammen
+        if self._logic_router:
+            from brain_core.logic_router import SomaRequest
+            summary_prompt = (
+                f"Du hast gerade das Internet nach '{query}' durchsucht.\n"
+                f"Hier sind die aktuellen Ergebnisse:\n\n"
+                f"{results_text}\n\n"
+                f"Fasse die wichtigsten Informationen präzise zusammen. "
+                f"Nenne konkrete Zahlen, Preise oder Fakten. "
+                f"Maximal 3 Sätze. Kein [ACTION:...] Tag."
+            )
+            try:
+                re_ask = await self._logic_router.route(
+                    SomaRequest(
+                        prompt=summary_prompt,
+                        session_id="search_reask",
+                        metadata={"no_memory": True},
+                    )
+                )
+                answer = re_ask.response.strip()
+                # Strip etwaige ACTION-Tags die das LLM trotzdem generiert
+                import re
+                answer = re.sub(r'\[ACTION:[^\]]+\]', '', answer).strip()
+            except Exception as exc:
+                logger.error("direct_search_reask_failed", error=str(exc))
+                answer = "\n".join(f"{r.title}: {r.body}" for r in results[:3])
+        else:
+            answer = "\n".join(f"{r.title}: {r.body}" for r in results[:3])
+
+        await self._emit("llm", f"🔍 Suchantwort: \"{answer[:120]}...\"", "SEARCH")
+        await self.tts.speak(answer, self._select_speech_emotion(emotion_str))
+
+        # ── Memory: Auch Direkt-Suchen ins Gedächtnis speichern ──────
+        try:
+            _arousal = emotion_reading.arousal if emotion_reading else 0.0
+            _valence = emotion_reading.valence if emotion_reading else 0.0
+            _stress = emotion_reading.stress_level if emotion_reading else 0.0
+            asyncio.create_task(memory_after_response(
+                user_text=f"[Suche] {query}",
+                soma_text=answer,
+                emotion=emotion_str,
+                topic=f"Websuche: {query[:50]}",
+                arousal=_arousal,
+                valence=_valence,
+                stress=_stress,
+            ))
+        except Exception:
+            pass  # Memory-Fehler dürfen Pipeline nie brechen
+
     async def _action_search(self, params: dict) -> str:
         """
-        Web-Suche via DuckDuckGo + Re-Ask des LLM mit den echten Ergebnissen.
+        Echter Web-Zugriff via DuckDuckGo + KI-Zusammenfassung der Ergebnisse.
+        Wie ChatGPT: SOMA sucht wirklich im Internet und fasst zusammen.
         [ACTION:search query="bitcoin kurs aktuell"]
         """
         query = (
@@ -1205,86 +1703,120 @@ class VoicePipeline:
         if not query:
             return "Kein Suchbegriff angegeben."
 
-        await self._emit("action", f"🔍 Suche: '{query}'", "SEARCH")
+        await self._emit("action", f"🔍 Internet-Suche: '{query}'", "SEARCH")
         logger.info("action_search_start", query=query)
 
-        # ── Web-Suche via DuckDuckGo (kein API-Key nötig) ────────────
-        search_results = await self._ddg_search(query, max_results=5)
+        # ── Echter Web-Zugriff via WebSearch-Modul ────────────────────
+        from brain_core.web_search import get_web_search
+        ws = get_web_search()
+
+        search_results = await ws.search(query, max_results=6)
 
         if not search_results:
-            return f"Keine Suchergebnisse für '{query}' gefunden."
+            await self._emit("action", f"🔍 Keine Ergebnisse für '{query}'", "SEARCH")
+            return f"Ich konnte leider nichts zu '{query}' im Internet finden."
 
-        results_text = "\n".join(
-            f"- {r['title']}: {r['body']} ({r['url']})"
-            for r in search_results
-        )
+        # Formatierung für LLM
+        results_text = ws.format_results_for_llm(query, search_results, max_chars=3000)
+
         await self._emit(
             "action",
-            f"🔍 {len(search_results)} Ergebnisse → Re-Ask LLM...",
+            f"🔍 {len(search_results)} Ergebnisse gefunden → KI fasst zusammen...",
             "SEARCH",
         )
 
-        # ── Re-Ask: LLM beantwortet die Frage mit echten Daten ───────
+        # ── Re-Ask: LLM fasst echte Internet-Daten zusammen (wie ChatGPT) ─
         if not self._logic_router:
-            return results_text
+            # Fallback: Direkt vorlesen
+            summary = "\n".join(
+                f"{r.title}: {r.body}" for r in search_results[:3]
+            )
+            await self.tts.speak(summary, self._select_speech_emotion(None))
+            return summary
 
         from brain_core.logic_router import SomaRequest
         enriched_prompt = (
-            f"Beantworte die folgende Frage auf Basis der Suchergebnisse.\n"
-            f"Frage: {query}\n\n"
-            f"Aktuelle Suchergebnisse vom Internet:\n{results_text}\n\n"
-            f"Gib eine präzise, direkte Antwort. Kein [ACTION:...] Tag."
+            f"Du hast gerade das Internet nach '{query}' durchsucht und diese "
+            f"aktuellen Ergebnisse gefunden:\n\n"
+            f"{results_text}\n\n"
+            f"Fasse die wichtigsten Informationen präzise zusammen — "
+            f"so wie du es selbst sagen würdest. "
+            f"Nenne die wichtigsten Fakten, Zahlen oder Neuigkeiten. "
+            f"Maximal 3 Sätze. Kein [ACTION:...] Tag."
         )
         try:
             re_ask = await self._logic_router.route(
                 SomaRequest(
                     prompt=enriched_prompt,
                     session_id="search_reask",
+                    metadata={"no_memory": True},  # Such-Reasks nicht dauerhaft merken
                 )
             )
             final_answer = re_ask.response.strip()
         except Exception as exc:
             logger.error("search_reask_failed", error=str(exc))
-            final_answer = results_text  # Fallback: Rohe Ergebnisse vorlesen
+            # Fallback: Top-3 Ergebnisse als Text
+            final_answer = "\n".join(
+                f"{r.title}: {r.body}" for r in search_results[:3]
+            )
 
-        await self._emit("llm", f"🔍 Suchantwort: \"{final_answer}\"", "SEARCH")
+        await self._emit("llm", f"🔍 Suchantwort: \"{final_answer[:120]}...\"", "SEARCH")
 
-        # Antwort direkt sprechen (der ursprüngliche clean_response ist leer/useless)
+        # Antwort direkt sprechen
         await self.tts.speak(final_answer, self._select_speech_emotion(None))
         return final_answer
 
     async def _action_fetch_url(self, params: dict) -> str:
         """
-        Ruft den Inhalt einer URL ab und lässt das LLM darüber antworten.
+        Ruft den Inhalt einer URL ab, extrahiert sauberen Text (trafilatura)
+        und lässt das LLM darüber antworten.
         [ACTION:fetch_url url="https://..." question="Was steht dort?"]
         """
         url      = params.get("url", "")
-        question = params.get("question", "Fasse den Inhalt zusammen.")
+        question = params.get("question", "Fasse den wichtigsten Inhalt zusammen.")
         if not url:
             return "Keine URL angegeben."
 
-        await self._emit("action", f"🌐 Lade: {url}", "FETCH")
-        try:
-            import httpx
-            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-                resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0 SOMA-AI/1.0"})
-                resp.raise_for_status()
-                # Einfaches Text-Stripping (kein BeautifulSoup nötig)
-                import re as _re
-                text = _re.sub(r'<[^>]+>', ' ', resp.text)
-                text = _re.sub(r'\s+', ' ', text).strip()[:4000]
-        except Exception as exc:
-            return f"Fehler beim Laden von {url}: {exc}"
+        # URL normalisieren (falls Schema fehlt)
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+
+        await self._emit("action", f"🌐 Lade Seite: {url[:60]}", "FETCH")
+
+        from brain_core.web_search import get_web_search
+        ws = get_web_search()
+        fetch_result = await ws.fetch_url(url)
+
+        if not fetch_result.success or not fetch_result.text:
+            return f"Konnte '{url}' nicht laden: {fetch_result.error}"
+
+        page_title = fetch_result.title or url
+        text = fetch_result.text
+
+        await self._emit(
+            "action",
+            f"🌐 Seite geladen ({len(text)} Zeichen): {page_title[:50]}",
+            "FETCH",
+        )
 
         if not self._logic_router:
             return text[:500]
 
         from brain_core.logic_router import SomaRequest
-        re_ask_prompt = f"{question}\n\nSeiteninhalt:\n{text}"
+        re_ask_prompt = (
+            f"Beantworte folgende Frage basierend auf dem Seiteninhalt.\n"
+            f"Seite: {page_title}\n"
+            f"Frage: {question}\n\n"
+            f"Seiteninhalt:\n{text[:4000]}\n\n"
+            f"Kein [ACTION:...] Tag. Direkte, präzise Antwort."
+        )
         try:
-            re_ask = await self._logic_router.route(SomaRequest(prompt=re_ask_prompt, session_id="fetch_reask"))
+            re_ask = await self._logic_router.route(
+                SomaRequest(prompt=re_ask_prompt, session_id="fetch_reask")
+            )
             answer = re_ask.response.strip()
         except Exception as exc:
+            logger.error("fetch_reask_failed", error=str(exc))
             answer = text[:500]
 
         await self.tts.speak(answer, self._select_speech_emotion(None))
@@ -1293,32 +1825,16 @@ class VoicePipeline:
     @staticmethod
     async def _ddg_search(query: str, max_results: int = 5) -> list[dict]:
         """
-        DuckDuckGo-Suche via HTML-Scraping (kein API-Key, keine Bibliothek nötig).
-        Gibt Liste von {title, body, url} zurück.
+        Legacy-Wrapper — delegiert an WebSearch-Modul.
+        Behalten für Rückwärtskompatibilität.
         """
-        import httpx, re as _re, urllib.parse
-        encoded = urllib.parse.quote_plus(query)
-        url = f"https://html.duckduckgo.com/html/?q={encoded}"
-        headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) SOMA-AI/1.0"}
-        results = []
-        try:
-            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
-                resp = await client.get(url, headers=headers)
-                resp.raise_for_status()
-                html = resp.text
-            # Titel extrahieren
-            titles  = _re.findall(r'class="result__title"[^>]*>.*?<a[^>]*>([^<]+)<', html)
-            snippets = _re.findall(r'class="result__snippet"[^>]*>([^<]+)<', html)
-            urls    = _re.findall(r'class="result__url"[^>]*>([^<]+)<', html)
-            for i in range(min(max_results, len(titles), len(snippets))):
-                results.append({
-                    "title": titles[i].strip(),
-                    "body":  snippets[i].strip(),
-                    "url":   urls[i].strip() if i < len(urls) else "",
-                })
-        except Exception as exc:
-            logger.warning("ddg_search_failed", error=str(exc))
-        return results
+        from brain_core.web_search import get_web_search
+        ws = get_web_search()
+        results = await ws.search(query, max_results=max_results)
+        return [
+            {"title": r.title, "body": r.body, "url": r.url}
+            for r in results
+        ]
 
     @staticmethod
     async def _xdg_open(url: str) -> str:
@@ -1339,6 +1855,375 @@ class VoicePipeline:
             return f"Geöffnet: {url[:80]}"
         except Exception as exc:
             return f"Fehler: {exc}"
+
+    # ══════════════════════════════════════════════════════════════════
+    #  BROWSE — Webseite öffnen, lesen und zusammenfassen
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _action_browse(self, params: dict) -> str:
+        """
+        Öffnet eine URL im Headless-Browser, extrahiert Text und
+        lässt das LLM die Frage dazu beantworten.
+        [ACTION:browse url="https://heise.de" question="Top-News?"]
+        
+        SMART: Erkennt Suchmaschinen-URLs (google.de, bing.com etc.)
+        und leitet automatisch zu [ACTION:search] weiter.
+        """
+        url = params.get("url", "")
+        question = params.get("question", "Fasse den wichtigsten Inhalt zusammen.")
+        if not url:
+            return "Keine URL angegeben."
+
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+
+        # ── Suchmaschinen-Erkennung ──────────────────────────────────
+        # Wenn die URL eine Suchmaschine ist (google.de, bing.com, etc.)
+        # → nutze die echte Suchfunktion statt die Startseite zu scrapen!
+        import re as _re
+        search_engine_patterns = [
+            r'(?:www\.)?google\.[a-z.]+(?:/search)?',
+            r'(?:www\.)?bing\.com',
+            r'(?:www\.)?duckduckgo\.com',
+            r'(?:www\.)?yahoo\.[a-z.]+',
+            r'(?:www\.)?startpage\.com',
+            r'(?:www\.)?ecosia\.org',
+            r'search\.brave\.com',
+        ]
+        is_search_engine = any(
+            _re.search(pat, url.lower()) for pat in search_engine_patterns
+        )
+        
+        # Prüfe ob die URL schon eine Suchanfrage enthält (?q=...)
+        has_query_param = '?q=' in url or '&q=' in url or '?query=' in url or 'search?' in url
+        
+        if is_search_engine and not has_query_param:
+            # Suchmaschine OHNE Query → nutze die Frage als Suchbegriff!
+            await self._emit(
+                "action",
+                f"🔍 Suchmaschine erkannt → leite zu echte Suche weiter: '{question}'",
+                "BROWSE",
+            )
+            logger.info("browse_redirect_to_search", url=url, question=question)
+            return await self._action_search({"query": question})
+
+        await self._emit("action", f"🌐 Browse: {url[:60]}", "BROWSE")
+        logger.info("action_browse", url=url[:80], question=question[:50])
+
+        # Versuche zuerst den schnellen Weg via WebSearch/trafilatura
+        from brain_core.web_search import get_web_search
+        ws = get_web_search()
+        fetch_result = await ws.fetch_url(url)
+
+        if not fetch_result.success or not fetch_result.text:
+            # Fallback: xdg-open (öffnet echten Browser)
+            await self._xdg_open(url)
+            return f"Seite konnte nicht headless geladen werden, habe sie im Browser geöffnet: {url}"
+
+        page_title = fetch_result.title or url
+        text = fetch_result.text
+
+        await self._emit(
+            "action",
+            f"🌐 Seite geladen ({len(text)} Zeichen): {page_title[:50]}",
+            "BROWSE",
+        )
+
+        if not self._logic_router:
+            return text[:500]
+
+        from brain_core.logic_router import SomaRequest
+        re_ask_prompt = (
+            f"Du hast gerade die Webseite '{page_title}' ({url}) geöffnet und gelesen.\n"
+            f"Frage des Nutzers: {question}\n\n"
+            f"Seiteninhalt:\n{text[:4000]}\n\n"
+            f"Beantworte die Frage basierend auf dem Seiteninhalt. "
+            f"Maximal 3-4 Sätze. Kein [ACTION:...] Tag."
+        )
+        try:
+            re_ask = await self._logic_router.route(
+                SomaRequest(prompt=re_ask_prompt, session_id="browse_reask",
+                            metadata={"no_memory": True})
+            )
+            answer = re_ask.response.strip()
+        except Exception as exc:
+            logger.error("browse_reask_failed", error=str(exc))
+            answer = text[:500]
+
+        # Antwort sprechen
+        await self.tts.speak(answer, self._select_speech_emotion(None))
+        return answer
+
+    # ══════════════════════════════════════════════════════════════════
+    #  SCREENSHOT — Screenshot einer URL speichern
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _action_screenshot(self, params: dict) -> str:
+        """
+        Macht einen Screenshot einer Webseite via Playwright oder grim.
+        [ACTION:screenshot url="https://example.com"]
+        [ACTION:screenshot target="screen"]
+        """
+        url = params.get("url", "")
+        target = params.get("target", "")
+
+        # Lokaler Bildschirm-Screenshot
+        if target == "screen" or not url:
+            return await self._action_screen_look(params)
+
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+
+        await self._emit("action", f"📸 Screenshot: {url[:60]}", "SCREENSHOT")
+
+        # Versuche Playwright
+        try:
+            from executive_arm.browser import HeadlessBrowser
+            from executive_arm.policy_engine import PolicyEngine
+
+            pe = PolicyEngine()
+            browser = HeadlessBrowser(policy_engine=pe)
+            result = await browser.screenshot(url, reason="User requested screenshot")
+
+            if result.screenshot_path:
+                await self._emit("action", f"📸 Gespeichert: {result.screenshot_path}", "SCREENSHOT")
+                return f"Screenshot gespeichert unter {result.screenshot_path}"
+            elif result.error:
+                return f"Screenshot-Fehler: {result.error}"
+        except ImportError:
+            logger.warning("playwright_not_available_for_screenshot")
+        except Exception as exc:
+            logger.error("screenshot_error", error=str(exc))
+
+        # Fallback: URL im Browser öffnen + grim
+        await self._xdg_open(url)
+        import asyncio as _aio
+        await _aio.sleep(2.0)  # Warten bis Browser geladen hat
+        return await self._action_screen_look(params)
+
+    # ══════════════════════════════════════════════════════════════════
+    #  SHELL — Sichere Shell-Befehlsausführung
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _action_shell(self, params: dict) -> str:
+        """
+        Führt einen Shell-Befehl aus und gibt das Ergebnis zurück.
+        [ACTION:shell command="ls -la ~/Schreibtisch"]
+        [ACTION:shell command="df -h"]
+        """
+        command = params.get("command", "")
+        if not command:
+            return "Kein Befehl angegeben."
+
+        # Sicherheits-Blocklist (gefährliche Befehle)
+        blocked = ["rm -rf /", "mkfs", "dd if=", ":(){", "fork bomb",
+                    "chmod -R 777 /", ">/dev/sda", "shutdown", "reboot",
+                    "init 0", "init 6", "systemctl poweroff", "systemctl reboot"]
+        cmd_lower = command.lower().strip()
+        if any(b in cmd_lower for b in blocked):
+            return f"Befehl blockiert (Sicherheit): {command[:50]}"
+
+        await self._emit("action", f"💻 Shell: {command[:60]}", "SHELL")
+        logger.info("action_shell", command=command[:80])
+
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd="/home/patricks/Schreibtisch/SOMA",
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=30.0
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                return f"Befehl Timeout nach 30s: {command[:50]}"
+
+            output = stdout.decode("utf-8", errors="replace").strip()
+            err = stderr.decode("utf-8", errors="replace").strip()
+
+            if proc.returncode != 0 and err:
+                result_text = f"Fehler (Exit {proc.returncode}):\n{err[:1000]}"
+            elif output:
+                result_text = output[:2000]
+            else:
+                result_text = f"Befehl ausgeführt (Exit {proc.returncode})"
+
+            await self._emit("action", f"💻 Ergebnis: {result_text[:100]}...", "SHELL")
+
+            # Ergebnis dem LLM zur Zusammenfassung geben
+            if self._logic_router and len(result_text) > 200:
+                from brain_core.logic_router import SomaRequest
+                summary_prompt = (
+                    f"Du hast gerade den Shell-Befehl '{command}' ausgeführt.\n"
+                    f"Ergebnis:\n{result_text[:3000]}\n\n"
+                    f"Fasse das Ergebnis kurz und verständlich für den Nutzer zusammen. "
+                    f"Maximal 2-3 Sätze. Kein [ACTION:...] Tag."
+                )
+                try:
+                    re_ask = await self._logic_router.route(
+                        SomaRequest(prompt=summary_prompt, session_id="shell_reask",
+                                    metadata={"no_memory": True})
+                    )
+                    summary = re_ask.response.strip()
+                    await self.tts.speak(summary, self._select_speech_emotion(None))
+                    return summary
+                except Exception:
+                    pass
+
+            # Direkt sprechen wenn kurz genug
+            speak_text = result_text[:300]
+            await self.tts.speak(speak_text, self._select_speech_emotion(None))
+            return result_text
+
+        except Exception as exc:
+            logger.error("shell_exec_error", error=str(exc))
+            return f"Shell-Fehler: {exc}"
+
+    # ══════════════════════════════════════════════════════════════════
+    #  SCREEN LOOK — Bildschirm abfotografieren + OCR
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _action_screen_look(self, params: dict = None) -> str:
+        """
+        Macht einen Screenshot des echten Monitors via grim (Wayland),
+        führt OCR mit tesseract aus und gibt den erkannten Text zurück.
+        [ACTION:screen_look]
+        """
+        import shutil
+        from pathlib import Path
+
+        screenshot_path = "/tmp/soma_screen_look.png"
+
+        await self._emit("action", "👁️ Schaue auf den Bildschirm...", "SCREEN")
+        logger.info("action_screen_look")
+
+        # ── Screenshot mit grim/spectacle/scrot ──────────────────────
+        screenshot_tool = None
+        if shutil.which("spectacle"):
+            # KDE Plasma (Wayland) — spectacle -b (background) -n (no notification) -o (output)
+            screenshot_tool = ["spectacle", "-b", "-n", "-o", screenshot_path]
+        elif shutil.which("grim"):
+            # wlroots-basierte Compositors (Sway, Hyprland etc.)
+            screenshot_tool = ["grim", screenshot_path]
+        elif shutil.which("scrot"):
+            # X11 Fallback
+            screenshot_tool = ["scrot", screenshot_path]
+        elif shutil.which("gnome-screenshot"):
+            # GNOME Fallback
+            screenshot_tool = ["gnome-screenshot", "-f", screenshot_path]
+        else:
+            return "Kein Screenshot-Tool verfügbar (grim/scrot/gnome-screenshot fehlt)."
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *screenshot_tool,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=10.0)
+
+            if not Path(screenshot_path).exists():
+                return "Screenshot konnte nicht erstellt werden."
+
+            await self._emit("action", "👁️ Screenshot erstellt, lese Text...", "SCREEN")
+
+        except Exception as exc:
+            logger.error("screen_capture_error", error=str(exc))
+            return f"Screenshot-Fehler: {exc}"
+
+        # ── OCR mit tesseract ──────────────────────────────────────────
+        if not shutil.which("tesseract"):
+            # Kein OCR → Screenshot existiert aber kann nicht gelesen werden
+            await self._emit("action", f"📸 Screenshot gespeichert: {screenshot_path}", "SCREEN")
+            return f"Screenshot gespeichert unter {screenshot_path}, aber tesseract (OCR) ist nicht installiert."
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "tesseract", screenshot_path, "stdout",
+                "-l", "deu",
+                "--psm", "3",  # Automatic page segmentation
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=30.0
+            )
+            ocr_text = stdout.decode("utf-8", errors="replace").strip()
+
+            if not ocr_text:
+                return "Bildschirm wurde abfotografiert, aber kein lesbarer Text erkannt."
+
+            await self._emit(
+                "action",
+                f"👁️ OCR: {len(ocr_text)} Zeichen erkannt",
+                "SCREEN",
+            )
+
+            # ── LLM fasst zusammen was auf dem Bildschirm zu sehen ist ─
+            if self._logic_router:
+                from brain_core.logic_router import SomaRequest
+                screen_prompt = (
+                    f"Du hast gerade einen Screenshot vom Bildschirm des Nutzers gemacht "
+                    f"und per OCR folgenden Text erkannt:\n\n"
+                    f"---\n{ocr_text[:4000]}\n---\n\n"
+                    f"Beschreibe kurz und klar was auf dem Bildschirm zu sehen ist. "
+                    f"Was hat der Nutzer offen? Was sind die Hauptinhalte? "
+                    f"Maximal 3-4 Sätze. Kein [ACTION:...] Tag."
+                )
+                try:
+                    re_ask = await self._logic_router.route(
+                        SomaRequest(prompt=screen_prompt, session_id="screen_reask",
+                                    metadata={"no_memory": True})
+                    )
+                    answer = re_ask.response.strip()
+                    await self.tts.speak(answer, self._select_speech_emotion(None))
+                    return answer
+                except Exception as exc:
+                    logger.error("screen_reask_failed", error=str(exc))
+
+            # Fallback: Raw OCR zurückgeben
+            return f"Auf dem Bildschirm sehe ich: {ocr_text[:500]}"
+
+        except Exception as exc:
+            logger.error("ocr_error", error=str(exc))
+            return f"OCR-Fehler: {exc}"
+
+    # ══════════════════════════════════════════════════════════════════
+    #  ANTI-HALLUCINATION FILTER
+    # ══════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _filter_hallucinations(text: str) -> str:
+        """
+        Bereinigt LLM-Output von typischen Halluzinationen:
+        - *Aktionen in Sternchen* wie *öffnet Browser*, *schaut auf Monitor*
+        - Übertriebene Emojis in Sternchenblöcken
+        - Leere/überflüssige Formatierung
+        
+        NICHT mehr filtern: Behauptungen über Fähigkeiten.
+        SOMA kann jetzt wirklich browsen, screenshots machen, shell-befehle usw.
+        Der Filter entfernt nur die FAKE-Aktionen in *Sternchen*.
+        """
+        import re
+
+        # Entferne *Aktions-Beschreibungen in Sternchen*
+        # z.B. "*öffnet den Browser*", "*schaut auf den Monitor*", "*tippt*"
+        text = re.sub(
+            r'\*[^*]{3,80}\*',  # Alles zwischen * und * (3-80 Zeichen)
+            '',
+            text,
+        )
+
+        # Entferne Doppel-Leerzeichen die durch das Entfernen entstehen
+        text = re.sub(r' {2,}', ' ', text)
+
+        # Entferne leere Zeilen am Anfang/Ende
+        text = text.strip()
+
+        return text
 
     # ══════════════════════════════════════════════════════════════════
     #  PROAKTIVE INTERVENTION

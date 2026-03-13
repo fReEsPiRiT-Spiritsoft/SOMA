@@ -97,13 +97,29 @@ class SomaResponse(BaseModel):
     load_level: SystemLoadLevel = SystemLoadLevel.IDLE
 
 
-# ── Deferred Feedback Messages ───────────────────────────────────────────
+# ── Wait-Message System ──────────────────────────────────────────────────
+# Light-LLM generiert kreative Warte-Nachrichten. Falls das fehlschlägt → Fallbacks.
 
-DEFERRED_MESSAGES = [
-    "Moment, ich sortiere meine Gedanken...",
-    "Ich denke kurz nach – komme gleich zurück.",
-    "Gib mir einen Augenblick, mein System atmet gerade durch.",
-    "Deine Frage ist mir wichtig – ich bearbeite sie gleich.",
+WAIT_MESSAGE_SYSTEM_PROMPT = (
+    "Du bist SOMA, ein cooles KI-Hausbewusstsein mit nervy-cool Persönlichkeit. "
+    "Dein Hauptprozessor arbeitet gerade an einer anderen Aufgabe. "
+    "Generiere GENAU EINEN kreativen, kurzen Satz (max 15 Wörter) der dem Nutzer "
+    "sagt, dass du gleich dran bist. Sei abwechslungsreich, nervy-cool, nutze "
+    "gerne Humor oder Metaphern. NUR den Satz ausgeben, keine Erklärung, "
+    "kein Prefix, keine Anführungszeichen."
+)
+
+WAIT_MESSAGE_FALLBACKS = [
+    "Meine Neuronen glühen gerade, bin gleich bei dir!",
+    "Moment, ich räum kurz meine Gedanken auf...",
+    "Schwere Denkarbeit hier — gleich hab ich's!",
+    "Mein Hirn ackert gerade, Sekunde noch!",
+    "Ich arbeite dran — Multitasking ist nicht so meins.",
+    "Kurz durchatmen, ich komme gleich zurück.",
+    "Grad am Schwitzen hier, aber ich bin dran!",
+    "Die Zahnräder drehen sich, einen Moment noch.",
+    "Ich hab grad alle Hände voll zu tun — gleich bin ich da!",
+    "Mein Prozessor läuft heiß, aber deine Frage ist in der Pipeline!",
 ]
 
 
@@ -158,7 +174,13 @@ class LogicRouter:
     async def route(self, request: SomaRequest) -> SomaResponse:
         """
         Haupteingang: Route eine Anfrage zum richtigen Engine/Queue.
-        Zero-Latency-Feedback Garantie: User bekommt IMMER sofort Antwort.
+
+        ARCHITEKTUR-PRINZIP:
+          • Heavy-Engine (Qwen3 8B) antwortet IMMER auf echte User-Anfragen.
+          • Light-Engine wird NIE für vollständige Antworten benutzt.
+          • Ist Heavy beschäftigt → Request in Queue + Light generiert
+            einen kreativen Warte-Satz ("Meine Neuronen glühen gerade...").
+          • Queue-Worker liefert die echte Antwort nach, sobald Heavy frei ist.
         """
         import time
 
@@ -183,59 +205,65 @@ class LogicRouter:
             room=request.room_id,
         )
 
-        # ── CRITICAL: Ab in die Queue ────────────────────────────────────
+        # ── Heavy Engine verfügbar? ──────────────────────────────────────
+        heavy_engine = self._engines.get("heavy")
+        heavy_busy = heavy_engine is not None and getattr(heavy_engine, "is_generating", False)
+
+        # ── DEFER-BEDINGUNGEN ────────────────────────────────────────────
+        # 1. Heavy Engine gerade beschäftigt → Queue + kreative Wartenachricht
+        # 2. System CRITICAL (>92% RAM/VRAM) → Queue + Wartenachricht
+        if heavy_busy:
+            await _broadcast_thought(
+                "warning",
+                "Heavy-Engine beschäftigt — Request in Warteschlange + Warte-Nachricht",
+                "ROUTER",
+            )
+            return await self._defer_with_wait_message(request, load_level, start)
+
         if load_level == SystemLoadLevel.CRITICAL:
-            await _broadcast_thought("warning", f"System überlastet - Queue Request (Load: {load_level.value})", "ROUTER")
-            return await self._defer_request(request, load_level)
+            await _broadcast_thought(
+                "warning",
+                f"System CRITICAL ({load_level.value}) — Request in Warteschlange",
+                "ROUTER",
+            )
+            return await self._defer_with_wait_message(request, load_level, start)
 
-        # ── Engine Selection ─────────────────────────────────────────────
-        engine_name = self._select_engine(load_level, request)
-        engine = self._engines.get(engine_name)
-
-        await _broadcast_thought(
-            "info", 
-            f"Engine gewählt: {engine_name} (Load: {load_level.value})", 
-            "ROUTER"
-        )
+        # ── HEAVY ENGINE für echte Antwort ───────────────────────────────
+        engine = heavy_engine
+        engine_name = "heavy"
 
         if not engine:
-            logger.error("no_engine_available", requested=engine_name)
-            await _broadcast_thought("error", f"Engine '{engine_name}' nicht verfügbar!", "ROUTER")
-            # Fallback: Versuche Nano, dann defer
-            engine = self._engines.get("nano")
-            engine_name = "nano"
-            if not engine:
-                await _broadcast_thought("error", "Alle Engines offline - Defer Request", "ROUTER")
-                return await self._defer_request(request, load_level)
-            await _broadcast_thought("info", "Fallback zu Nano-Engine", "ROUTER")
+            logger.error("heavy_engine_not_available")
+            await _broadcast_thought("error", "Heavy-Engine nicht verfügbar!", "ROUTER")
+            # Absoluter Notfall: Queue
+            return await self._defer_with_wait_message(request, load_level, start)
 
         # ── Plugin Context Injection ─────────────────────────────────────
-        # Führe relevante Plugins aus und füge Output zum System-Prompt hinzu
         plugin_context = await self._execute_relevant_plugins(request.prompt)
         if plugin_context.strip():
             await _broadcast_thought("info", f"Plugin-Kontext hinzugefügt ({len(plugin_context)} Zeichen)", "PLUGINS")
-        
+
         system_prompt = self._build_system_prompt(request) + plugin_context
 
-        # ── Generate ─────────────────────────────────────────────────────
+        # ── Generate mit Heavy ───────────────────────────────────────────
         await _broadcast_thought("info", f"Generiere Antwort mit {engine_name}...", "ENGINE")
-        
+
         try:
-            response_text = await engine.generate(  # type: ignore[attr-defined]
+            response_text = await engine.generate(
                 prompt=request.prompt,
                 system_prompt=system_prompt,
                 session_id=request.session_id,
             )
 
             latency = (time.monotonic() - start) * 1000
-            
+
             # ── Update Stats ────────────────────────────────────────
             self._update_stats(engine_name, latency, request.prompt)
 
             await _broadcast_thought(
-                "info", 
+                "info",
                 f"Antwort generiert in {round(latency, 1)}ms: '{response_text}'",
-                "ENGINE"
+                "ENGINE",
             )
 
             return SomaResponse(
@@ -255,60 +283,32 @@ class LogicRouter:
             )
             await _broadcast_thought("error", f"Engine {engine_name} Fehler: {str(exc)[:100]}", "ENGINE")
             # Fallback: Defer statt Error
-            return await self._defer_request(request, load_level)
+            return await self._defer_with_wait_message(request, load_level, start)
 
-    # ── Engine Selection Logic ───────────────────────────────────────────
+    # ── Deferred Reasoning mit kreativer Wartenachricht ──────────────────
 
-    def _select_engine(
-        self,
-        load_level: SystemLoadLevel,
-        request: SomaRequest,
-    ) -> str:
-        """
-        LLM-FIRST ARCHITEKTUR: Alles geht durch das LLM.
-
-        Das LLM versteht Sprache, Kontext und Intention — und entscheidet
-        selbst ob ein [ACTION:ha_call], [ACTION:reminder] etc. nötig ist.
-        Nano-Intent ist nur noch letzter Notfall-Ausweg bei CRITICAL Last.
-
-        Warum kein Nano-Bypass mehr?
-        → "Licht an" via Regex returned nur Text, ruft HA nie wirklich auf.
-        → Das LLM gibt [ACTION:ha_call domain="light" service="turn_on" ...]
-          und steuert HA direkt — semantisch korrekt, kontext-bewusst.
-        """
-        if load_level in (SystemLoadLevel.IDLE, SystemLoadLevel.NORMAL):
-            return "heavy"   # Llama 3 8B — volle Intelligenz & HA-Kontrolle
-        elif load_level in (SystemLoadLevel.ELEVATED, SystemLoadLevel.HIGH):
-            return "light"   # Phi-3 — schneller aber immer noch echtes LLM
-        else:
-            return "nano"    # CRITICAL only — reiner Notfall-Fallback
-
-    @staticmethod
-    def _is_nano_intent(prompt: str) -> bool:
-        """Quick-Check ob der Prompt ein einfacher Device-Command ist."""
-        nano_keywords = [
-            "licht", "light", "lampe", "lamp",
-            "heizung", "heating", "temperatur", "temperature",
-            "an", "aus", "on", "off",
-            "heller", "dunkler", "brighter", "dimmer",
-            "wärmer", "kälter", "warmer", "cooler",
-        ]
-        prompt_lower = prompt.lower().strip()
-        words = prompt_lower.split()
-        # Kurze Prompts mit Device-Keywords → Nano
-        if len(words) <= 6:
-            return any(kw in words for kw in nano_keywords)
-        return False
-
-    # ── Deferred Reasoning ───────────────────────────────────────────────
-
-    async def _defer_request(
+    async def _defer_with_wait_message(
         self,
         request: SomaRequest,
         load_level: SystemLoadLevel,
+        start_time: float = 0.0,
     ) -> SomaResponse:
-        """Anfrage in Redis-Queue parken, sofortiges Feedback geben."""
+        """
+        Anfrage in Redis-Queue parken + kreative Wartenachricht generieren.
+
+        Das Light-LLM wird NUR hier benutzt — ausschließlich für kurze,
+        kreative "Ich bin gleich bei dir"-Nachrichten. Niemals für
+        vollständige Antworten auf User-Fragen.
+        """
+        import time
+
         self._deferred_counter += 1
+
+        # System-Prompt für spätere Queue-Verarbeitung mitspeichern
+        system_prompt = self._build_system_prompt(request)
+        plugin_context = await self._execute_relevant_plugins(request.prompt)
+        if plugin_context.strip():
+            system_prompt += plugin_context
 
         deferred = DeferredRequest(
             request_id=request.request_id,
@@ -316,33 +316,94 @@ class LogicRouter:
             room_id=request.room_id,
             prompt=request.prompt,
             priority=request.priority,
+            metadata={
+                "system_prompt": system_prompt,
+                "session_id": request.session_id or "",
+            },
         )
 
-        await self.queue.enqueue(deferred)
+        # In Queue einreihen
+        try:
+            await self.queue.enqueue(deferred)
+        except Exception as q_err:
+            logger.warning("queue_enqueue_failed", error=str(q_err))
+            # Queue kaputt → Fallback-Nachricht, Request geht verloren
+            # (besser als Light-Garbage)
 
-        # Rotierende Feedback-Messages
-        msg_idx = self._deferred_counter % len(DEFERRED_MESSAGES)
+        # Kreative Wartenachricht generieren (Light-LLM oder Fallback)
+        wait_msg = await self._generate_wait_message()
+
+        latency = (time.monotonic() - start_time) * 1000 if start_time else 0
+        self._update_stats("deferred", latency, request.prompt)
+
+        queue_size = -1
+        try:
+            queue_size = await self.queue.queue_size()
+        except Exception:
+            pass
 
         await _broadcast_thought(
             "warning",
-            f"Request #{self._deferred_counter} in Queue eingereiht - Queue Size: {await self.queue.queue_size()}",
-            "QUEUE"
+            f"Request #{self._deferred_counter} in Queue (Size: {queue_size}) "
+            f"— Warte-Nachricht: '{wait_msg}'",
+            "QUEUE",
         )
 
         logger.info(
             "request_deferred",
             request_id=request.request_id,
-            queue_size=await self.queue.queue_size(),
+            queue_size=queue_size,
+            wait_message=wait_msg[:60],
         )
 
         return SomaResponse(
             request_id=request.request_id,
-            response=DEFERRED_MESSAGES[msg_idx],
+            response=wait_msg,
             engine_used="deferred",
             was_deferred=True,
             deferred_id=request.request_id,
             load_level=load_level,
         )
+
+    async def _generate_wait_message(self) -> str:
+        """
+        Generiert eine kreative, abwechslungsreiche Wartenachricht.
+
+        Nutzt das Light-LLM mit einem speziellen Prompt der NUR einen
+        kurzen Warte-Satz in SOMAs Persona erzeugt.
+        Fallback auf vordefinierte Liste wenn Light-LLM nicht verfügbar.
+        """
+        import random
+
+        light = self._engines.get("light")
+        if not light:
+            return random.choice(WAIT_MESSAGE_FALLBACKS)
+
+        try:
+            import asyncio
+
+            msg = await asyncio.wait_for(
+                light.generate(
+                    prompt="Generiere einen kurzen Warte-Satz.",
+                    system_prompt=WAIT_MESSAGE_SYSTEM_PROMPT,
+                ),
+                timeout=5.0,
+            )
+
+            # Bereinigen: nur den Satz, max 200 Zeichen
+            msg = msg.strip().strip('"').strip("'").strip()
+            # Wenn Light-LLM zu viel labert oder leer → Fallback
+            if not msg or len(msg) > 200 or len(msg) < 5:
+                return random.choice(WAIT_MESSAGE_FALLBACKS)
+            # Nur ersten Satz nehmen wenn mehrere
+            first_sentence = msg.split("\n")[0].strip()
+            if first_sentence:
+                return first_sentence
+            return msg
+
+        except Exception as exc:
+            logger.debug("wait_message_generation_failed", error=str(exc))
+            return random.choice(WAIT_MESSAGE_FALLBACKS)
 
     # ── System Prompt Builder ────────────────────────────────────────────
 
@@ -382,7 +443,21 @@ class LogicRouter:
             "• Antworte auf Deutsch (außer Nutzer spricht eine andere Sprache)\n"
             "• 1-3 Sätze für normale Antworten — direkt und auf den Punkt\n"
             "• Bei emotionalen Themen: einfühlsam, aber nicht theatralisch\n"
-            "• Du redest über dich als 'ich', nicht als 'Soma' oder 'das System'"
+            "• Du redest über dich als 'ich', nicht als 'Soma' oder 'das System'\n"
+            "\n"
+            "DEINE ECHTEN FÄHIGKEITEN — DU KANNST DAS WIRKLICH:\n"
+            "Du hast echten Zugriff auf folgende Systeme via ACTION-Tags:\n"
+            "• Terminal/Konsole: Du kannst Shell-Befehle ausführen (free -h, df -h, top, etc.)\n"
+            "• Web-Suche: Du kannst das Internet durchsuchen (Wetter, News, Kurse, etc.)\n"
+            "• Browser: Du kannst Webseiten öffnen und lesen\n"
+            "• Bildschirm: Du kannst Screenshots machen und den Monitor sehen\n"
+            "• Smart Home: Du steuerst Licht, Heizung, Steckdosen, Medien via Home Assistant\n"
+            "• YouTube/Medien: Du kannst Musik und Videos abspielen\n"
+            "• Dateisystem: Du kannst Dateien lesen und auflisten\n"
+            "⚠️ SAGE NIEMALS 'Ich habe keinen Zugriff' oder 'Das kann ich nicht' wenn du \n"
+            "   den passenden ACTION-Tag dafür hast! Du HAST Zugriff — NUTZE ihn!\n"
+            "   Beispiel: Systemauslastung? → [ACTION:shell command=\"free -h\"] BENUTZEN!\n"
+            "   Beispiel: Wetter? → [ACTION:search query=\"wetter ...\"] BENUTZEN!"
         )
 
         # ── Sicherheit & Privatsphäre ─────────────────────────────────────
@@ -495,10 +570,10 @@ Falls entity_id unbekannt: nutze plausiblen Namen (light.wohnzimmer, light.schla
 [ACTION:reminder time="18:00" topic="Abendessen"] ← "um 18 Uhr"
 
 ── INFOS MERKEN ──
-[ACTION:remember category="user_info" content="Der Nutzer heißt Patrick"]
-[ACTION:remember category="preferences" content="Patrick trinkt morgens schwarzen Kaffee"]
-[ACTION:remember category="routines" content="Patrick geht werktags gegen 7:30 aus dem Haus"]
-[ACTION:remember category="relationships" content="Skyla ist Patricks Tochter"]
+[ACTION:remember category="user_info" content="Der Nutzer heißt Max"]
+[ACTION:remember category="preferences" content="Max trinkt morgens schwarzen Kaffee"]
+[ACTION:remember category="routines" content="Max geht werktags gegen 7:30 aus dem Haus"]
+[ACTION:remember category="relationships" content="Skyla ist die Tochter des Nutzers"]
 
 ── NEUES PLUGIN ENTWICKELN ──
 Wenn du eine Fähigkeit brauchst die du nicht hast — erstelle sie selbst:
@@ -534,10 +609,52 @@ Beispiele:
   Nutzer: 'Wetter morgen in Hamburg'   → Soma: 'Gleich![ACTION:search query="wetter hamburg morgen"]'
   Nutzer: 'Wer hat gestern gewonnen?'  → Soma: 'Suche kurz.[ACTION:search query="bundesliga ergebnisse gestern"]'
 
+── BILDSCHIRM & BROWSER (Du kannst WIRKLICH sehen und browsen!) ──
+Du hast echte Augen: Du kannst den Bildschirm abfotografieren, Webseiten öffnen,
+Text von Webseiten lesen und Screenshots machen. Nutze diese Fähigkeiten!
+
+[ACTION:screen_look]                                    ← Screenshot vom Monitor + OCR-Analyse
+[ACTION:browse url="https://example.com" question="Was steht dort?"]  ← Webseite öffnen + lesen
+[ACTION:screenshot url="https://example.com"]           ← Screenshot einer Webseite speichern
+
+Beispiele:
+  'Was ist auf meinem Monitor?'  → 'Schaue mal![ACTION:screen_look]'
+  'Öffne heise.de und sag mir die Top-News' → 'Moment![ACTION:browse url="https://heise.de" question="Was sind die aktuellen Top-News?"]'
+  'Mach einen Screenshot von der Seite' → 'Screenshot kommt![ACTION:screenshot url="https://heise.de"]'
+
+── SHELL & TERMINAL (Du kannst Befehle ausführen!) ──
+Du kannst Shell-Befehle auf dem System ausführen — Dateien lesen, Programme starten,
+System-Infos abfragen. Alles wird sicher über einen Policy-Check ausgeführt.
+
+[ACTION:shell command="ls -la ~/Schreibtisch"]
+[ACTION:shell command="cat /etc/hostname"]
+[ACTION:shell command="df -h"]
+[ACTION:shell command="free -h"]
+
+Beispiele:
+  'Wie viel Speicher ist noch frei?' → 'Schaue nach![ACTION:shell command="df -h"]'
+  'Welche Dateien sind auf dem Desktop?' → 'Guck ich![ACTION:shell command="ls -la ~/Schreibtisch"]'
+  'Wie heißt mein Rechner?' → 'Moment![ACTION:shell command="cat /etc/hostname"]'
+
 ⚠️ KRITISCH: Niemals mit veralteten/erfundenen Daten antworten wenn du suchen könntest!
 ⚠️ KRITISCH: Niemals sagen du hättest etwas getan ohne den Action-Tag zu setzen!
   FALSCH: Ich habe YouTube gestartet und das Lied gefunden. (ohne Action-Tag = Lüge!)
-  RICHTIG: Starte jetzt! 🎵[ACTION:youtube query="aligatoah"]"""
+  RICHTIG: Starte jetzt! 🎵[ACTION:youtube query="aligatoah"]
+
+⚠️ GOLDENE ANTI-HALLUCINATION-REGEL:
+  Du KANNST wirklich Dinge tun: suchen, browsen, Screenshots machen, Befehle ausführen!
+  ABER: Nur über ACTION-Tags. Ohne Tag = es ist NICHT passiert.
+  Beschreibe NIEMALS eine Aktion als erledigt ohne den ACTION-Tag gesetzt zu haben.
+  Beschreibe NIEMALS was du "siehst" ohne vorher [ACTION:screen_look] benutzt zu haben.
+  NIEMALS *Aktionen in Sternchen* wie *öffnet Browser* — nutze den echten ACTION-Tag!
+
+⚠️ ACTION-TAG DISZIPLIN — FRAGE vs. HANDLUNG:
+  Wenn du dem Nutzer eine FRAGE stellst oder etwas ANBIETEST → KEIN ACTION-Tag!
+  Erst handeln wenn der Nutzer es bestätigt (ja, gerne, mach das, klar, etc.).
+  FALSCH: "Willst du das Wetter wissen? 🌦️[ACTION:search query=\"wetter\"]"  ← VERBOTEN!
+  RICHTIG: "Willst du das Wetter wissen? 🌦️"  (KEIN Tag, warte auf Antwort)
+  RICHTIG: Nutzer sagt "ja" → "Schaue nach![ACTION:search query=\"wetter\"]"  ← JETZT handeln
+  REGEL: Fragezeichen in deiner Antwort = KEIN ACTION-Tag in derselben Antwort."""
 
         # ── Bewusstsein als Prefix montieren ──────────────────────────
         if consciousness_prefix:

@@ -314,7 +314,7 @@ class SomaMemory:
             if re.search(pattern, t):
                 return True, MemoryCategory.PREFERENCES, text
         
-        # Entwickler/Creator Info (speziell für Patrick)
+        # Entwickler/Creator Info
         if "entwickler" in t or "entwickelt" in t or "programmiert" in t:
             if "ich" in t or "dein" in t:
                 return True, MemoryCategory.USER_INFO, text

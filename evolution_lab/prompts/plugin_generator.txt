@@ -46,9 +46,12 @@ PFLICHT-STRUKTUR JEDES PLUGINS
 
 4. Fehler-Handling: IMMER try/except – niemals unbehandelte Exceptions.
 
-5. Logging:
-     import structlog
-     logger = structlog.get_logger("soma.plugin.PLUGINNAME")
+5. Logging — KRITISCH fuer Sandbox-Kompatibilitaet:
+     # structlog ist NICHT in der Test-Sandbox verfuegbar!
+     # Verwende IMMER dieses Pattern (funktioniert ueberall):
+     import logging
+     logger = logging.getLogger("soma.plugin.PLUGINNAME")
+     # structlog NIEMALS direkt importieren — es crasht den Sandbox-Test!
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 STANDARDLÖSUNG FÜR HÄUFIGE AUFGABEN
@@ -108,10 +111,10 @@ __description__ = "Zeigt CPU/RAM-Auslastung"
 __dependencies__ = ["psutil"]
 
 import asyncio
+import logging
 import psutil
-import structlog
 
-logger = structlog.get_logger("soma.plugin.sysinfo")
+logger = logging.getLogger("soma.plugin.sysinfo")
 
 async def on_load() -> None:
     logger.info("sysinfo_loaded")
@@ -137,9 +140,9 @@ __author__ = "soma-ai"
 __description__ = "Prüft Bluetooth-Status via bluetoothctl"
 
 import asyncio
-import structlog
+import logging
 
-logger = structlog.get_logger("soma.plugin.bluetooth")
+logger = logging.getLogger("soma.plugin.bluetooth")
 
 async def on_load() -> None:
     logger.info("bluetooth_plugin_loaded")
