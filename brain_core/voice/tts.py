@@ -270,6 +270,7 @@ class TTSEngine:
         text: str,
         emotion: Optional[SpeechEmotion] = None,
         priority: bool = False,
+        micro=None,
     ):
         """
         Text aussprechen (non-blocking, queued).
@@ -278,11 +279,12 @@ class TTSEngine:
             text: Auszusprechender Text
             emotion: Emotionale Modulation
             priority: True = An Anfang der Queue (z.B. für Interventionen)
+            micro: MicroExpression für subtile Prosodie-Tells (None = neutral)
         """
         if not text.strip():
             return
 
-        item = (text, emotion or SpeechEmotion())
+        item = (text, emotion or SpeechEmotion(), micro)
 
         if priority:
             # Priority: Item vorne einfügen UND Worker aufwecken
@@ -308,11 +310,11 @@ class TTSEngine:
         """Background-Worker: Spricht Sätze aus der Queue nacheinander."""
         while True:
             try:
-                text, emotion = await self._speak_queue.get()
+                text, emotion, micro = await self._speak_queue.get()
                 self._speaking = True
                 self._speaking_since = time.monotonic()
 
-                await self._synthesize_and_play(text, emotion)
+                await self._synthesize_and_play(text, emotion, micro)
 
                 self._speaking = False
                 self._speak_queue.task_done()
@@ -324,28 +326,32 @@ class TTSEngine:
                 logger.error("tts_speak_error", error=str(e))
                 self._speaking = False
 
-    async def _synthesize_and_play(self, text: str, emotion: SpeechEmotion):
-        """Text → WAV → Abspielen."""
+    async def _synthesize_and_play(self, text: str, emotion: SpeechEmotion, micro=None):
+        """Text → WAV → Abspielen. Optional mit Micro-Expression."""
         start = time.monotonic()
 
         if self._piper:
-            await self._speak_piper(text, emotion)
+            await self._speak_piper(text, emotion, micro)
         else:
             await self._speak_espeak(text, emotion)
 
         elapsed = (time.monotonic() - start) * 1000
         logger.info("tts_spoken", text=text[:60], ms=round(elapsed, 0))
 
-    async def _speak_piper(self, text: str, emotion: SpeechEmotion):
-        """Synthese via Piper (neue API mit SynthesisConfig)."""
+    async def _speak_piper(self, text: str, emotion: SpeechEmotion, micro=None):
+        """Synthese via Piper (neue API mit SynthesisConfig) + Micro-Expressions."""
         import concurrent.futures
         from piper.config import SynthesisConfig
         
+        # Rate: Emotion-Basis × Micro-Expression-Faktor
+        # Micro-Expression wird nativ via length_scale angewandt (kein Post-Processing).
+        effective_speed = emotion.speed * (micro.rate_factor if micro else 1.0)
+        
         # SynthesisConfig für emotionale Modulation
         syn_config = SynthesisConfig(
-            length_scale=1.0 / emotion.speed,   # Piper: length_scale ist invers
-            noise_scale=0.667,                  # Standard-Wert
-            noise_w_scale=0.8,                  # Standard-Wert
+            length_scale=1.0 / effective_speed,  # Piper: length_scale ist invers
+            noise_scale=0.667,                   # Standard-Wert
+            noise_w_scale=0.8,                   # Standard-Wert
             volume=emotion.volume,
         )
         
@@ -369,6 +375,15 @@ class TTSEngine:
         
         # Alle Chunks zusammenfügen
         all_audio = np.concatenate(audio_chunks)
+        
+        # ── Micro-Expression Audio Post-Processing ──────────────────
+        # Pitch-Shift, Volume-Anpassung, Stille-Pausen.
+        # Rate wird oben nativ via SynthesisConfig.length_scale gehandhabt.
+        if micro and not micro.is_neutral:
+            from brain_core.voice.micro_expressions import apply_micro_to_audio
+            all_audio = apply_micro_to_audio(
+                all_audio, micro, self._piper.config.sample_rate,
+            )
         
         # In WAV-Buffer schreiben
         audio_buffer = io.BytesIO()
@@ -407,11 +422,17 @@ class TTSEngine:
 
     @property
     def is_speaking(self) -> bool:
+        """
+        Vision #10: Watchdog von 30s auf 5s reduziert.
+        Piper-Synthese + aplay dauert bei normalen Sätzen max 2-3s.
+        30s war viel zu lang — ein Stuck-State blockierte das ganze System.
+        """
         if self._speaking and hasattr(self, '_speaking_since'):
             stuck_seconds = time.monotonic() - self._speaking_since
-            if stuck_seconds > 30:
+            if stuck_seconds > 5:
                 logger.warning("tts_speaking_stuck_reset",
-                               stuck_s=round(stuck_seconds, 1))
+                               stuck_s=round(stuck_seconds, 1),
+                               msg="Watchdog: 5s Limit erreicht → Reset")
                 self._speaking = False
         return self._speaking
 

@@ -153,12 +153,34 @@ class STTEngine:
         segments = []
         text_parts = []
         for seg in segments_iter:
+            # ── Vision #7: no_speech_prob Confidence Filter ──────────
+            # Whisper liefert pro Segment eine no_speech_prob.
+            # Wenn > 0.4 UND < 3 Wörter → sehr wahrscheinlich Halluzination.
+            seg_text = seg.text.strip()
+            seg_words = len(seg_text.split()) if seg_text else 0
+            no_speech = getattr(seg, "no_speech_prob", 0.0)
+
+            if no_speech > 0.4 and seg_words < 3:
+                logger.debug("stt_no_speech_filtered",
+                             text=seg_text[:40],
+                             no_speech_prob=f"{no_speech:.2f}",
+                             words=seg_words)
+                continue  # Segment verwerfen
+
+            if no_speech > 0.7:
+                # Sehr hohe no_speech_prob → auch bei längeren Segmenten verwerfen
+                logger.debug("stt_high_no_speech_filtered",
+                             text=seg_text[:40],
+                             no_speech_prob=f"{no_speech:.2f}")
+                continue
+
             segments.append({
                 "start": round(seg.start, 2),
                 "end": round(seg.end, 2),
-                "text": seg.text.strip(),
+                "text": seg_text,
+                "no_speech_prob": round(no_speech, 3),
             })
-            text_parts.append(seg.text.strip())
+            text_parts.append(seg_text)
 
         full_text = " ".join(text_parts).strip()
         processing_ms = (time.monotonic() - start) * 1000

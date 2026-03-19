@@ -43,7 +43,10 @@ class SomaConfig(BaseSettings):
     ollama_num_parallel: int = 2
     ollama_max_loaded_models: int = 3              # Oracle + Draft + Whisper Headroom
     # Warm Pool: Wie lange Modelle im VRAM bleiben (Ollama keep_alive)
-    ollama_heavy_keep_alive: str = "5m"           # Oracle: 5min idle → unload
+    # Vision #2: Laenger im VRAM halten = Prefix-Cache bleibt warm
+    # Ollama cached den System-Prompt (Persona) als KV-Prefix automatisch
+    # wenn das Modell geladen bleibt. 30m statt 5m = deutlich schnellerer TTFT.
+    ollama_heavy_keep_alive: str = "30m"          # Oracle: 30min idle → unload
     ollama_light_keep_alive: str = "-1"            # Draft: PERMANENT im VRAM (nur ~1.2GB)
 
     # ── Speculative Decoding ─────────────────────────────────────────────

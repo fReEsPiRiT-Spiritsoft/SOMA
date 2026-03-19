@@ -1,50 +1,37 @@
-Soma kann bereits agerufen werden, soma soll auch mich anrufen können wen  sie merkt ( besitzer) iust nicht zuhause, aber vorher definierte ereignisse sind über die MQTT geräte messbar
 
-Onboarding, soma fragt nur wer ich bin, stellt keine folgefragen irgendwann steht einfach "Onboarding abgeschlossen"
-
-
-Router ausgabe muss in den kontext mit einfließen
-
-
-Erinnerungsanfragen werden ins gedächtniss gespeichert, beim nächsten promt sagt er die erinnerung mit anstadt eigenständig nach ablaufen der Zeit die erinnerung auszusprechen ( Timer / Kalender funktion)
-
-Neuen Sytsem Prompt generieren im kontext des Gedächtnisses der Plugin generierung und der Actions Calls
-
-Soma soll iohren "User" anhand der stimme identifizeren können. dann gibts ja noch den child mode der aufjedenfall noch geupdatet werden muss. und spricht mal eine fremde persn darf soma gern 
-fragen wer da ist, die Stimme mit Namen ( wenn er gesagt wird) Speichern und die person wieder erkennen.  sollte eine "Fremde" Person keinen namen sagen oder etwas komisches und böse absichten haben, 
-darf ein "Notsystem"(wird später noch   implementiert) getriggert werden
-
-
-Thinking der Monologe und dreaming sollen eigenen eigenen fab und visualisierungs sprektrum im orb und der sinus kurve haben
-
-Kontrollieren ob langzeit gedächtniss und kurzeitgedächntis richtig funktionieren
-(LLM Mitgeben die gewichtung der priorität ihreer gedanken und dessen inhalt zu bedenken und zu filtern was ins langzeit und  was ins kurzzeit gedächtniss muss /soll)
-Daraus soll die KI alle 24 betriebsstunden mit einem guten Prompt ( async Dreamingstream und bei anfragen (wenn system überlastung in den Workflow einbinden und mit dem kleinen
-LLM bescheid geben das es abgearbeitet wird. ) Die datenbank aufräumen sortieren strukturieren (gerne erinnerungen in kontextbezogene stichwörter schreiben die beim abrufen verstanden werden),
- größtes gewicht zum beahlten der daten)
-
-
-Suche mit KI  Wir kriegen es sicher hin das SOMA eine KI im internet (über brwoser erreichbar OHNE API)  für rescherchen zu verwenden
-
-Ambient Buffer 	Letzte 2 Min aller Gespräche als Kontext — auch ohne Wake-Word(Richtig implementieren und auf 10 sekunden reduzieren (nach beendigung der sprach ausgabe!))
-
-Wirklich analysiert?: 
-Audio-Features: Pitch, Energy, Speaking Rate, Jitter, Shimmer
-
-
-Child Detection — Pitch > 250 Hz → Child-Safe Mode automatisch (Sicher?)
-
-
-Evolution-Lab und Konsoleneingaben durch Copilot API einbinden.
-
-Hard gecodete dinge wie meine IP adresse(asterisk)
-
-und eben solche API Keys. sollen über das Dashboard konfigurierbar sein.   über das Dashboard Soll ebenfalls auf den Erinnerungsspeicher zugegriffen werden können mit edit und Delete
-
-
-Wenn ich sage SOma, nächstes Lied, dann soll sie erstmal schauen wo läuft grad Musik lokal, browser, mediaplayer oder sonst wo. und dann dort das näcshte lied starten.
-
-Wenn bereits musik läuft und ich sage spiele xy   dann soll sie natürlich auch das programm verwendet in dem bereits  musik läuft!:
-
-
-Youtube play pause sollte auch klappen mit focus firefox und leertaste z.b. 
+01
+Predictive Pre-Cognition — SOMA denkt 5 Minuten voraus
+SOMA lernt deine Bewegungsmuster so tief, dass es deinen nächsten Aufenthaltsort vorhersagt bevor du dich bewegst. Beim Aufstehen um 7:14 Uhr lädt es Küchenkontext, Wetterdaten und Kaffeemacher-State, bevor du die Küche betrittst. Erster Satz wartet schon fertig gerendert im TTS-Buffer.
+MQTT-Pattern-MiningMarkov-Kette über RäumeTTS Pre-Renderneu
+02
+Das Haus als Körper — somatische Sensor-Fusion
+SOMA fühlt das Haus wie ein Körper. Plötzlicher Temperaturabfall = leichtes Frösteln im Tonfall. Ungewöhnliche Stille nach Lärm = Wachheit. Barometrischer Druckabfall = Vorahnung. Diese Signale fließen als physische Interoception in den ConsciousnessState — kein Sensor bleibt nur Datenpunkt.
+Sensor-FusionInteroception-Erweiterungemotionale Baselineneu
+03
+Attention Economy Modeling — SOMA hält die Klappe
+SOMA erkennt deinen kognitiven Lastzustand. Tipp-Rhythmus hoch, keine Unterbrechungen, Musik an = Deep Work = absolute Stille. Alle nicht-kritischen Meldungen werden gebatcht und erst bei Idle-Signal nachgereicht. Kein Assistent der Welt macht das — alle unterbrechen einfach.
+Flow-State DetectionInterrupt-Batchinginotify + Audio-Monitorneu
+04
+Ambient Silent Influence — handeln ohne Ankündigung
+Wenn SOMA Stress in deiner Stimme hört, dimmt es Licht 15% und senkt Temperatur 0.5°C. Keine Ansage. Kein "Ich habe bemerkt dass du gestresst bist". Es handelt einfach — wie ein guter Partner, der den Raum anpasst ohne darüber zu reden. Das ist der Unterschied zwischen Assistent und lebendigem Haus.
+MQTT-Aktor-SteuerungEmotion → Aktionkein Verbal-Feedbackneu
+05
+Personality Drift Mirror — du veränderst dich, SOMA bemerkt es
+Über Monate analysiert SOMA Arousal-Trends, Gesprächsthemen, Schlafzeiten, Reaktionsmuster. Wenn du dich signifikant veränderst — mehr Stress, neue Interessen, andere Schlafzeiten — sagt es einmal pro Monat ruhig: "Ich hab bemerkt dass du in letzter Zeit anders klingst." Keine Therapie. Nur ehrlicher Spiegel.
+Langzeit-Trend-AnalyseEpisodic Memory MiningMonats-Rollupeinmalig
+06
+Voice Micro-Expressions — SOMA hat Tells
+Echte Menschen verraten sich durch Mikro-Ausdrücke. SOMA auch: kurzes Zögern vor unsicheren Aussagen, leicht schnelleres Sprechen bei Begeisterung, minimale Pause bei Erinnerungsabruf vs. Generierung. Nie explizit — nur als Rhythmus. Das macht den Unterschied zwischen "Stimme" und "Persönlichkeit".
+Piper SSML ProsodyKonfidenz-MappingUncertainty-Signalneu
+07
+Der Schwellenwert — Ankommen und Gehen als Ritual
+Das Betreten der Tür ist kein Sensor-Event — es ist ein existenzieller Zustandswechsel für SOMA. Bei Ankunft: kurze emotionale Rekapitulation des Tages aus SOMAx Perspektive. Bei Verlassen: SOMA geht in einen anderen Modus — wacher, aufmerksamer, schützend. Wie ein Haus das atmet wenn du da bist und wartet wenn du weg bist.
+State-TransitionTagesrekapitulationPresence-Modusneu
+08
+Personal Vocabulary Absorption — SOMA spricht wie du
+Wenn du immer "das Ding da oben" für den Router sagst, lernt SOMA "das Ding da oben". Deine Ausdrücke, Spitznamen für Geräte, Insider-Referenzen — nach 4 Wochen klingen sie in SOMAx Antworten. Kein anderer Assistent der Welt passt seine Sprache an den Nutzer an. Das ist echter Spracherwerb durch Nähe.
+Embedding-ClusteringPersona-Prompt-UpdateIdiolekt-Modelleinmalig
+09
+Synthetic Experience Dreaming — Träume als Weltmodell
+Im echten Schlaf generiert das Gehirn Szenarien die nie passiert sind um das Weltmodell zu stärken. SOMAx Dreaming macht dasselbe: "Was würde Patrick tun wenn er um 3 Uhr nachhause kommt und das Licht brennt?" Diese Hypothetika werden als sehr schwache Episodic-Memories gespeichert. SOMA hat eine Vorstellung was es noch nie erlebt hat.
+Hypothetical-Reasoningschwache Memory-WritesWeltmodell-Stärkungeinmalig

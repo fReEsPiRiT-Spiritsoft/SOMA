@@ -24,6 +24,7 @@ import structlog
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from brain_core.config import settings
 from brain_core.health_monitor import HealthMonitor
@@ -485,6 +486,12 @@ async def lifespan(app: FastAPI):
         # Pause-Check: Monolog pausiert wenn Heavy-LLM generiert
         internal_monologue.set_pause_check(lambda: heavy_engine.is_generating)
 
+        # Vision #3: Consciousness → Monolog Arousal-Bridge
+        # Wenn sich der Arousal-Level ändert, weckt das den Monolog-Loop
+        soma_consciousness.set_monologue_arousal_fn(
+            internal_monologue.notify_arousal_change
+        )
+
         # Monologue wird ERST nach Voice-Pipeline gestartet (Race-Fix!)
         logger.info(
             "boot_phase", service="ego_system", status="prepared 🧠💭",
@@ -764,6 +771,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Statische Dateien für das Tablet-Face
+app.mount("/face", StaticFiles(directory="soma_face_tablet", html=True), name="face")
 
 
 # ── REST Endpoints ───────────────────────────────────────────────────────

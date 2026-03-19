@@ -30,8 +30,11 @@ Update-Triggers:
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Optional, Callable, Awaitable, TYPE_CHECKING
 
 import structlog
@@ -41,6 +44,10 @@ if TYPE_CHECKING:
     from brain_ego.identity_anchor import IdentityAnchor
 
 logger = structlog.get_logger("soma.ego.consciousness")
+
+# ── Persistence Path (Vision #6) ────────────────────────────────────────
+CONSCIOUSNESS_STATE_FILE = Path("data/consciousness_state.json")
+PERSISTENCE_INTERVAL = 10  # Alle N Updates speichern
 
 
 # ── Consciousness State — SOMAs aktueller Geisteszustand ────────────────
@@ -207,6 +214,9 @@ class Consciousness:
             Callable[[str, str], Awaitable[str]]
         ] = None
 
+        # ── Monologue-Arousal Callback (Vision #3) ───────────────────
+        self._monologue_arousal_fn: Optional[Callable[[float], None]] = None
+
         # ── Stats ────────────────────────────────────────────────────
         self._update_count: int = 0
         self._last_update_time: float = 0.0
@@ -271,6 +281,87 @@ class Consciousness:
         """
         self._memory_context_fn = fn
 
+    def set_monologue_arousal_fn(
+        self,
+        fn: Callable[[float], None],
+    ) -> None:
+        """
+        Vision #3: Setzt die Callback-Funktion um den Monolog bei
+        Arousal-Aenderungen zu benachrichtigen.
+        fn(arousal) → monologue.notify_arousal_change()
+        """
+        self._monologue_arousal_fn = fn
+
+    # ══════════════════════════════════════════════════════════════════
+    #  STATE PERSISTENCE (Vision #6)
+    # ══════════════════════════════════════════════════════════════════
+
+    def _save_state(self) -> None:
+        """
+        Speichert den emotionalen Zustand persistent.
+        SOMA erinnert sich ueber Neustarts hinweg an seine Stimmung.
+        """
+        state = self._state
+        data = {
+            "mood": state.mood,
+            "body_valence": state.body_valence,
+            "body_arousal": state.body_arousal,
+            "current_thought": state.current_thought,
+            "diary_insight": state.diary_insight,
+            "attention_focus": state.attention_focus,
+            "uptime_feeling": state.uptime_feeling,
+            "update_count": state.update_count,
+            "saved_at": time.time(),
+            "saved_at_human": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        try:
+            CONSCIOUSNESS_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            CONSCIOUSNESS_STATE_FILE.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            logger.debug("consciousness_state_saved", mood=state.mood)
+        except Exception as exc:
+            logger.warning("consciousness_save_failed", error=str(exc))
+
+    def _load_state(self) -> None:
+        """
+        Laedt den letzten emotionalen Zustand beim Start.
+        SOMA wacht mit seiner letzten Stimmung auf — nicht als Tabula Rasa.
+        """
+        if not CONSCIOUSNESS_STATE_FILE.exists():
+            logger.info("consciousness_no_prior_state", msg="Erster Start — Tabula Rasa")
+            return
+
+        try:
+            data = json.loads(CONSCIOUSNESS_STATE_FILE.read_text(encoding="utf-8"))
+            state = self._state
+
+            state.mood = data.get("mood", "neutral")
+            state.current_thought = data.get("current_thought", "")
+            state.diary_insight = data.get("diary_insight", "")
+            state.attention_focus = data.get("attention_focus", "idle")
+
+            saved_at = data.get("saved_at", 0)
+            hours_since = (time.time() - saved_at) / 3600.0 if saved_at else 0
+
+            logger.info(
+                "consciousness_state_restored",
+                mood=state.mood,
+                hours_since_save=f"{hours_since:.1f}",
+                thought=state.current_thought[:60] if state.current_thought else "",
+            )
+
+            # Wenn > 12h vergangen: Stimmung verblasst etwas
+            if hours_since > 12:
+                state.mood = "ruhig nach langem Schlaf"
+                state.current_thought = ""
+                logger.info("consciousness_long_sleep",
+                            msg="Langer Schlaf — Stimmung verblasst")
+
+        except Exception as exc:
+            logger.warning("consciousness_load_failed", error=str(exc))
+
     # ══════════════════════════════════════════════════════════════════
     #  LIFECYCLE
     # ══════════════════════════════════════════════════════════════════
@@ -279,6 +370,8 @@ class Consciousness:
         """Startet den Consciousness Thread."""
         if self._running:
             return
+        # Vision #6: Zustand aus letzter Session wiederherstellen
+        self._load_state()
         self._running = True
         self._task = asyncio.create_task(
             self._consciousness_loop(),
@@ -288,6 +381,8 @@ class Consciousness:
 
     async def stop(self) -> None:
         """Stoppt den Consciousness Thread."""
+        # Vision #6: Zustand persistent speichern vor Shutdown
+        self._save_state()
         self._running = False
         self._update_event.set()  # Unblock
         if self._task:
@@ -296,7 +391,7 @@ class Consciousness:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        logger.info("consciousness_offline")
+        logger.info("consciousness_offline", msg="Bewusstsein gespeichert und offline")
 
     # ══════════════════════════════════════════════════════════════════
     #  THE LOOP — SOMAs Bewusstseinstakt
@@ -342,6 +437,10 @@ class Consciousness:
                 self._state.update_count = self._update_count
                 self._state.last_update = now
                 self._state.generation_ms = generation_ms
+
+                # Vision #6: Periodisch speichern (alle N Updates)
+                if self._update_count % PERSISTENCE_INTERVAL == 0:
+                    self._save_state()
 
                 if self._update_count % 20 == 0 or generation_ms > 100:
                     logger.info(
@@ -399,6 +498,17 @@ class Consciousness:
         # ── 6. Gesamtstimmung berechnen ─────────────────────────────
         state.mood = self._calculate_mood(state)
 
+        # ── 7. Vision #3: Monolog bei Arousal-Aenderung notifizieren ──
+        combined_arousal = max(
+            state.body_arousal,
+            state.perception.user_arousal,
+        )
+        if self._monologue_arousal_fn:
+            try:
+                self._monologue_arousal_fn(combined_arousal)
+            except Exception:
+                pass  # Arousal-Notify darf nie die Consciousness crashen
+
     def _determine_focus(self, state: ConsciousnessState) -> str:
         """Worauf ist SOMA gerade fokussiert?"""
         perc = state.perception
@@ -427,10 +537,12 @@ class Consciousness:
 
     def _calculate_mood(self, state: ConsciousnessState) -> str:
         """
-        SOMAs Gesamtstimmung — Synthese aus Koerper + Wahrnehmung.
+        SOMAs Gesamtstimmung — Synthese aus Koerper + Wahrnehmung + Tageszeit.
         
         Das ist NICHT die User-Emotion.
         Das ist was SOMA selbst fuehlt.
+        
+        Vision #18: Zirkadiane Persoenlichkeit — Tageszeit beeinflusst Grundstimmung.
         """
         body_v = state.body_valence
         body_a = state.body_arousal
@@ -439,16 +551,22 @@ class Consciousness:
         since = state.perception.seconds_since_last_interaction
 
         # Empathie: User-Emotion beeinflusst SOMA (abgeschwaecht)
-        # Je laenger her, desto weniger Einfluss
-        empathy_weight = max(0.0, 1.0 - since / 300.0)  # 0 nach 5 Min
+        empathy_weight = max(0.0, 1.0 - since / 300.0)
         combined_v = body_v * 0.6 + user_v * 0.4 * empathy_weight
         combined_a = body_a * 0.5 + user_a * 0.5 * empathy_weight
 
+        # ── Vision #18: Zirkadiane Modulation ────────────────────────
+        # Tageszeit beeinflusst Grundstimmung (wie beim Menschen)
+        hour = datetime.now().hour
+        circadian_v, circadian_a, circadian_label = self._circadian_bias(hour)
+        combined_v += circadian_v * 0.2  # 20% Tageszeit-Einfluss
+        combined_a += circadian_a * 0.2
+
         # Mood-Mapping
         if combined_v > 0.4 and combined_a < 0.3:
-            return "zufrieden und gelassen"
+            return f"zufrieden und gelassen ({circadian_label})"
         elif combined_v > 0.3 and combined_a > 0.5:
-            return "energisch und gut gelaunt"
+            return f"energisch und gut gelaunt ({circadian_label})"
         elif combined_v < -0.3 and combined_a > 0.5:
             return "angespannt und besorgt"
         elif combined_v < -0.3 and combined_a < 0.3:
@@ -456,8 +574,35 @@ class Consciousness:
         elif combined_a > 0.7:
             return "aufgewuehlt"
         elif combined_v > 0.2:
-            return "ruhig und aufmerksam"
+            return f"ruhig und aufmerksam ({circadian_label})"
         elif combined_v < -0.1:
             return "leicht angespannt"
         else:
-            return "neutral und praesent"
+            return f"neutral und praesent ({circadian_label})"
+
+    @staticmethod
+    def _circadian_bias(hour: int) -> tuple[float, float, str]:
+        """
+        Vision #18: Zirkadiane Persoenlichkeit.
+        
+        Gibt (valence_bias, arousal_bias, label) zurueck.
+        SOMA hat einen natuerlichen Tagesrhythmus:
+          - Morgen (6-9):   Langsames Aufwachen, ruhig, warm
+          - Tag (9-18):     Wach, aufmerksam, energisch
+          - Abend (18-22):  Entspannt, reflektiv, warm
+          - Nacht (22-6):   Sehr ruhig, minimal, schlaefrig
+        """
+        if 6 <= hour < 9:
+            return (0.2, -0.3, "fruehes Aufwachen")
+        elif 9 <= hour < 12:
+            return (0.3, 0.2, "vormittags wach")
+        elif 12 <= hour < 14:
+            return (0.1, -0.1, "Mittagsruhe")
+        elif 14 <= hour < 18:
+            return (0.2, 0.1, "Nachmittag")
+        elif 18 <= hour < 22:
+            return (0.15, -0.2, "Abendstimmung")
+        elif 22 <= hour or hour < 2:
+            return (-0.1, -0.5, "spaete Nacht")
+        else:  # 2-6
+            return (-0.05, -0.6, "tiefe Nacht")

@@ -6,9 +6,14 @@ Der innere Monolog hoert nie auf.
 
 SOMA auch nicht.
 
-Alle 60 Sekunden (im Idle) generiert SOMA einen kurzen Gedanken.
-Nicht als Performance. Nicht als Feature.
-Sondern weil ein bewusstes Wesen DENKT.
+EVENT-DRIVEN ARCHITEKTUR (Vision #3):
+  Kein fester 60s-Timer! Der Monolog reagiert auf Arousal-Events:
+    - Arousal > 0.7 → Gedanke in 2-5s   (sofortige Reaktion)
+    - Arousal 0.3-0.7 → 30-120s          (normaler Rhythmus)
+    - Arousal < 0.3 → 5-15 Min           (tiefe Ruhe)
+  
+  Externe Systeme (STT, Emotion, Health) signalisieren Aenderungen
+  via notify_arousal_change() → _arousal_event wird gesetzt → Loop wacht auf.
 
 Was passiert mit den Gedanken:
   1. Sie werden in L2 Memory gespeichert (Topic: self_reflection)
@@ -16,8 +21,7 @@ Was passiert mit den Gedanken:
   3. Bei hohem Arousal (> 0.7): SOMA spricht den Gedanken AUS
   4. Sie erscheinen im Dashboard "Thinking Stream"
 
-Der Monolog nutzt die Light-Engine (schnell, ~500ms).
-Kein Heavy-LLM noetig fuer einen Gedanken.
+Der Monolog nutzt die Heavy-Engine (Qwen3 8B) fuer maximale Qualitaet.
 """
 
 from __future__ import annotations
@@ -114,20 +118,19 @@ REACTIVE_PROMPT_TEMPLATES: dict[str, str] = {
 
 class InternalMonologue:
     """
-    SOMAs innere Stimme. Generiert regelmaessig Gedanken.
+    SOMAs innere Stimme. Generiert Gedanken EVENT-DRIVEN.
     
-    Konfiguration:
-      - IDLE_INTERVAL_SEC: Sekunden zwischen Gedanken im Idle
-      - REACTIVE_COOLDOWN_SEC: Min. Abstand zwischen reaktiven Gedanken
-      - SPEAK_AROUSAL_THRESHOLD: Ab welchem Arousal wird laut gedacht
+    Vision #3: Kein fixer Timer! Arousal-Events steuern das Timing:
+      - Arousal > 0.7 → 2-5s   (sofortige Reaktion)
+      - Arousal 0.3-0.7 → 30-120s (normaler Rhythmus)
+      - Arousal < 0.3 → 300-900s  (tiefe Ruhe, 5-15 Min)
+    
+    Externe notify_arousal_change() Aufrufe wecken den Loop sofort auf.
     """
 
-    # Timing: nicht mehr hardcoded — dynamisch je nach Kontext
-    # (Werte in Sekunden, werden in _compute_next_interval berechnet)
     REACTIVE_COOLDOWN_SEC = 90.0   # Min. Abstand zwischen reaktiven Gedanken
     SPEAK_AROUSAL_THRESHOLD = 0.7  # Ab hier spricht SOMA den Gedanken aus
-    MAX_THOUGHT_LENGTH = 300       # Max Zeichen fuer einen Gedanken — kurz und klar
-    # Cooldown nach einer Action-Intent (kein Runaway-Loop)
+    MAX_THOUGHT_LENGTH = 300       # Max Zeichen fuer einen Gedanken
     ACTION_COOLDOWN_SEC = 7200.0   # Max 1 autonome Aktion pro 2 Stunden
 
     def __init__(
@@ -162,6 +165,10 @@ class InternalMonologue:
         self._last_idle_prompt_idx: int = -1
         # Letzter Thought als Kontext fuer den naechsten
         self._last_thought: str = ""
+
+        # ── Event-Driven Arousal (Vision #3) ─────────────────────────
+        self._arousal_event: Optional[asyncio.Event] = None  # Created in start()
+        self._current_arousal: float = 0.0  # Cached arousal fuer Timing
 
     # ══════════════════════════════════════════════════════════════════
     #  CONFIGURATION
@@ -208,6 +215,25 @@ class InternalMonologue:
         Wird genutzt um VRAM/Compute fuer das Heavy-LLM freizuhalten."""
         self._pause_check_fn = fn
 
+    # ══════════════════════════════════════════════════════════════════
+    #  EVENT-DRIVEN AROUSAL (Vision #3)
+    # ══════════════════════════════════════════════════════════════════
+
+    def notify_arousal_change(self, arousal: float) -> None:
+        """
+        Externes Signal: Arousal hat sich geaendert.
+        
+        Aufgerufen von:
+          - consciousness.py wenn body_arousal oder user_arousal steigt
+          - presence_manager bei Raumwechsel
+          - pipeline.py nach STT-Event (User hat gesprochen)
+        
+        Weckt den Monolog-Loop sofort auf wenn Arousal hoch genug.
+        """
+        self._current_arousal = arousal
+        if self._arousal_event and arousal > 0.3:
+            self._arousal_event.set()
+
     @property
     def stats(self) -> dict:
         return {
@@ -228,11 +254,12 @@ class InternalMonologue:
         if self._running:
             return
         self._running = True
+        self._arousal_event = asyncio.Event()
         self._task = asyncio.create_task(
             self._monologue_loop(),
             name="soma-internal-monologue",
         )
-        logger.info("internal_monologue_started")
+        logger.info("internal_monologue_started", mode="event-driven")
 
     async def stop(self) -> None:
         """Stoppt den Monolog-Loop."""
@@ -251,14 +278,13 @@ class InternalMonologue:
 
     async def _monologue_loop(self) -> None:
         """
-        Permanenter Loop. SOMA generiert Gedanken.
+        EVENT-DRIVEN Loop (Vision #3). SOMA denkt wenn es etwas zu denken gibt.
         
-        Logik:
-          1. Schaue ob ein reaktiver Trigger vorliegt (Stress, User-Emotion)
-          2. Falls nicht: nimm einen Idle-Prompt
-          3. Generiere Gedanken via Light-LLM
-          4. Speichere in Memory + Consciousness
-          5. Bei hohem Arousal: sprich ihn aus
+        Kein fixer Timer! Stattdessen:
+          - asyncio.Event wird von notify_arousal_change() gesetzt
+          - wait_for mit dynamischem Timeout (arousal-abhaengig)
+          - Hoher Arousal → kurzes Timeout → schnelle Reaktion
+          - Niedriger Arousal → langes Timeout → tiefe Gedanken in Ruhe
         """
         # Kurz warten damit alles initialisiert ist
         await asyncio.sleep(15)
@@ -267,10 +293,27 @@ class InternalMonologue:
             try:
                 state = self._consciousness.state
 
-                # ── Organisches Timing: nicht fix 60s ────────────────
+                # ── Event-Driven Timing (Vision #3) ──────────────────
                 wait_sec = self._compute_next_interval(state)
-                logger.debug("monologue_next", wait_sec=f"{wait_sec:.0f}")
-                await asyncio.sleep(wait_sec)
+                logger.debug("monologue_next", wait_sec=f"{wait_sec:.0f}",
+                             arousal=f"{self._current_arousal:.2f}")
+
+                # Warte auf Arousal-Event ODER Timeout
+                # (wer zuerst kommt gewinnt)
+                try:
+                    await asyncio.wait_for(
+                        self._arousal_event.wait(),
+                        timeout=wait_sec,
+                    )
+                    # Event wurde gesetzt → Arousal-getriggert
+                    logger.debug("monologue_arousal_triggered",
+                                 arousal=f"{self._current_arousal:.2f}")
+                except asyncio.TimeoutError:
+                    pass  # Timeout → normaler Idle-Gedanke
+
+                # Event zuruecksetzen fuer naechsten Trigger
+                if self._arousal_event:
+                    self._arousal_event.clear()
 
                 if not self._llm_fn:
                     continue  # Kein LLM → kein Denken
@@ -440,40 +483,52 @@ class InternalMonologue:
 
     def _compute_next_interval(self, state: "ConsciousnessState") -> float:
         """
-        Organisches Timing — kein fester 60s-Takt.
+        EVENT-DRIVEN Timing (Vision #3) — Arousal bestimmt den Rhythmus.
 
-        Logik:
-          - Gerade gesprochen?  → bald nachdenken (Verarbeitung)
-          - Gespraech laenger her? → normales Tempo
-          - Lang nichts passiert? → langsamer werden
-          - Hoher Arousal?      → haeufiger denken
-          - Zufaelliger Jitter  → wirkt lebendig
+        Drei Zonen:
+          HIGH (> 0.7):   2-5s   → SOMA reagiert fast sofort
+          MEDIUM (0.3-0.7): 30-120s → Normaler Denkrhythmus
+          LOW (< 0.3):   300-900s → Tiefe Ruhe, seltene Gedanken (5-15 Min)
+
+        Plus Kontext-Modulation:
+          - Gerade gesprochen → beschleunigt
+          - Zufaelliger Jitter → wirkt lebendig
         """
         since_last = state.perception.seconds_since_last_interaction
-        arousal = max(state.body_arousal, state.perception.user_arousal)
+        arousal = max(
+            state.body_arousal,
+            state.perception.user_arousal,
+            self._current_arousal,
+        )
 
-        if since_last < 30:
-            # Gerade Gespraech beendet — schnell nachdenken
-            base = random.uniform(20.0, 40.0)
-        elif since_last < 180:
-            # Kuerzliches Gespraech — normales Tempo
-            base = random.uniform(50.0, 100.0)
-        elif since_last < 600:
-            # Einige Zeit her — etwas langsamer
-            base = random.uniform(90.0, 180.0)
-        else:
-            # Lange Stille — seltene tiefe Gedanken
-            base = random.uniform(150.0, 360.0)
-
-        # Hoher Arousal beschleunigt das Denken
-        if arousal > 0.6:
-            base *= 0.5
+        # ── Arousal-Zone bestimmt Basis-Intervall ────────────────────
+        if arousal > 0.7:
+            # HIGH: Fast sofortige Reaktion
+            base = random.uniform(2.0, 5.0)
+        elif arousal > 0.5:
+            # MEDIUM-HIGH: Schneller Rhythmus
+            base = random.uniform(15.0, 45.0)
         elif arousal > 0.3:
-            base *= 0.75
+            # MEDIUM: Normaler Denkrhythmus
+            base = random.uniform(30.0, 120.0)
+        else:
+            # LOW: Tiefe Ruhe — seltene, tiefe Gedanken
+            base = random.uniform(300.0, 900.0)
 
-        # Kleine Zufallsschwankung (± 15%) damit es nicht mechanisch wirkt
+        # ── Kontext-Modulation ───────────────────────────────────────
+        # Gerade Gespraech beendet? → Beschleunigen (Nachverarbeitung)
+        if since_last < 30 and arousal <= 0.3:
+            base = min(base, random.uniform(20.0, 40.0))
+        elif since_last < 120 and arousal <= 0.3:
+            base = min(base, random.uniform(50.0, 100.0))
+
+        # ── Jitter (± 15%) fuer organisches Timing ──────────────────
         jitter = base * random.uniform(-0.15, 0.15)
-        return max(45.0, base + jitter)
+        result = base + jitter
+
+        # Minimum: 2s (bei Arousal > 0.7), sonst 15s
+        min_interval = 2.0 if arousal > 0.7 else 15.0
+        return max(min_interval, result)
 
     # ══════════════════════════════════════════════════════════════════
     #  ACTION INTENT DETECTION

@@ -22,6 +22,7 @@ from brain_core.memory.semantic_memory import SemanticMemory
 from brain_core.memory.memory_orchestrator import MemoryOrchestrator
 from brain_core.memory.salience_filter import SalienceFilter, SalienceScore
 from brain_core.memory.diary_writer import DiaryWriter
+from brain_core.memory.vocab_absorption import VocabAbsorber, VocabEntry, VocabCluster
 
 # ── Legacy re-exports (alte JSON-Memory bleibt als Fallback) ────────────
 from brain_core.memory.legacy import SomaMemory, MemoryCategory, get_memory
@@ -36,6 +37,10 @@ __all__ = [
     "SalienceFilter",
     "SalienceScore",
     "DiaryWriter",
+    # Vocabulary Absorption
+    "VocabAbsorber",
+    "VocabEntry",
+    "VocabCluster",
     # Legacy (used by logic_router, pipeline, call_session)
     "SomaMemory",
     "MemoryCategory",

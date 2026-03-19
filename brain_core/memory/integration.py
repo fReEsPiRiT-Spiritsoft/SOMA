@@ -17,6 +17,7 @@ from brain_core.memory.background_tasks import BackgroundConsolidator
 from brain_core.memory.prompt_builder import build_system_prompt
 from brain_core.memory.two_phase import TwoPhaseResponder  # noqa: F401
 from brain_core.memory.embedding_service import get_embedding_service
+from brain_core.memory.vocab_absorption import VocabAbsorber
 
 logger = logging.getLogger("soma.memory.integration")
 
@@ -24,11 +25,12 @@ logger = logging.getLogger("soma.memory.integration")
 _orchestrator: Optional[MemoryOrchestrator] = None
 _preloader: Optional[SpeculativePreloader] = None
 _consolidator: Optional[BackgroundConsolidator] = None
+_vocab_absorber: Optional[VocabAbsorber] = None
 
 
 async def init_memory_system() -> MemoryOrchestrator:
     """Einmal beim Start aufrufen (main.py lifespan)."""
-    global _orchestrator, _preloader, _consolidator
+    global _orchestrator, _preloader, _consolidator, _vocab_absorber
 
     # Shared Embedding Service (persistent aiohttp session + LRU cache)
     await get_embedding_service().initialize()
@@ -36,16 +38,21 @@ async def init_memory_system() -> MemoryOrchestrator:
     _orchestrator = MemoryOrchestrator()
     await _orchestrator.initialize()
 
+    # Vocabulary Absorption — SOMA lernt die Sprache des Nutzers
+    _vocab_absorber = VocabAbsorber()
+    await _vocab_absorber.initialize()
+
     _preloader = SpeculativePreloader(_orchestrator)
     _consolidator = BackgroundConsolidator(
         _orchestrator,
         diary_writer=_orchestrator.diary,
+        vocab_absorber=_vocab_absorber,
     )
     _consolidator.start()
 
     logger.info(
         "memory_system_initialized",
-        components="L1+L2+L3+Salience+Diary+Dreaming+Preloader",
+        components="L1+L2+L3+Salience+Diary+Dreaming+Preloader+VocabAbsorption",
     )
     return _orchestrator
 
@@ -69,6 +76,12 @@ def get_consolidator() -> BackgroundConsolidator:
     if _consolidator is None:
         raise RuntimeError("Memory system not initialized.")
     return _consolidator
+
+
+def get_vocab_absorber() -> VocabAbsorber:
+    if _vocab_absorber is None:
+        raise RuntimeError("Memory system not initialized.")
+    return _vocab_absorber
 
 
 # ── Convenience hooks ────────────────────────────────────────────────
@@ -101,11 +114,20 @@ async def build_context_for_query(
     if not memory_context and preloaded:
         memory_context = preloaded
 
+    # Vocabulary Absorption: Idiolekt-Block fuer Persona-Prompt
+    idiolect_block = ""
+    if _vocab_absorber:
+        try:
+            idiolect_block = await _vocab_absorber.get_idiolect_prompt_block()
+        except Exception as e:
+            logger.debug(f"vocab_prompt_block_failed: {e}")
+
     return build_system_prompt(
         memory_context=memory_context,
         emotion=emotion,
         is_child=is_child,
         interaction_count=interaction_count,
+        idiolect_block=idiolect_block,
     )
 
 
@@ -141,6 +163,20 @@ async def after_response(
     )
     if _consolidator:
         _consolidator.touch()
+
+    # Vocabulary Absorption: User-Text → Vokabular-Extraktion
+    if _vocab_absorber and user_text:
+        asyncio.create_task(_safe_vocab_feed(user_text, soma_text))
+
+
+async def _safe_vocab_feed(user_text: str, soma_text: str):
+    """Fire-and-forget: Vocab-Extraktion + SOMA-Usage-Tracking."""
+    try:
+        await _vocab_absorber.feed(user_text)
+        if soma_text:
+            await _vocab_absorber.track_soma_usage(soma_text)
+    except Exception as e:
+        logger.debug(f"vocab_feed_error: {e}")
 
 
 async def store_system_event(

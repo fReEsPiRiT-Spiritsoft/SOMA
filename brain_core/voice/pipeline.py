@@ -89,6 +89,7 @@ from brain_core.voice.vad import (
 )
 from brain_core.voice.stt import STTEngine, TranscriptionResult
 from brain_core.voice.tts import TTSEngine, SpeechEmotion
+from brain_core.voice.micro_expressions import MicroExpressionMapper, MicroExpressionContext
 from brain_core.voice.emotion import EmotionEngine, EmotionState, RoomMood
 from brain_core.voice.ambient import AmbientIntelligence, Intervention
 from brain_core.safety.pitch_analyzer import (
@@ -169,6 +170,11 @@ class VoicePipeline:
         self._audio_device = audio_device
         self._broadcast = broadcast_callback
         self._consciousness = None  # Set by main.py after Ego boot
+
+        # ── Micro-Expressions: Subtile Prosodie-Tells ───────────────
+        self._micro_mapper = MicroExpressionMapper()
+        self._response_has_memory = False
+        self._response_sentence_idx = 0
 
         # ── State ───────────────────────────────────────────────────
         self._running = False
@@ -664,6 +670,12 @@ class VoicePipeline:
                     logger.warning("memory_context_failed", error=str(mem_err))
                     memory_prompt_extra = ""
 
+            # ── Micro-Expression: Memory-Retrieval-Signal tracken ────
+            self._response_has_memory = (
+                not onboarding_active and bool(memory_prompt_extra.strip())
+            )
+            self._response_sentence_idx = 0
+
             request = SomaRequest(
                 prompt=prompt,
                 session_id=self._voice_session_id,  # Conversation Memory!
@@ -825,7 +837,8 @@ class VoicePipeline:
                                         pass
                                     bridge_spoken = False
                                 speech_emotion = self._select_speech_emotion(emotion_reading)
-                                await self.tts.speak(sentence.strip(), speech_emotion)
+                                micro = self._compute_micro_expression(sentence.strip())
+                                await self.tts.speak(sentence.strip(), speech_emotion, micro=micro)
 
             except Exception as exc:
                 logger.error("stream_processing_error", error=str(exc))
@@ -851,12 +864,13 @@ class VoicePipeline:
 
             if sentence_buffer.strip() and not action_spoke:
                 speech_emotion = self._select_speech_emotion(emotion_reading)
+                micro = self._compute_micro_expression(sentence_buffer.strip())
                 if bridge_spoken:
                     try:
                         await self.tts.stop_speaking()
                     except Exception:
                         pass
-                await self.tts.speak(sentence_buffer.strip(), speech_emotion)
+                await self.tts.speak(sentence_buffer.strip(), speech_emotion, micro=micro)
 
             # ── Anti-Hallucination Filter ────────────────────────────
             clean_response = self._filter_hallucinations(clean_response)
@@ -4032,6 +4046,45 @@ class VoicePipeline:
             words.pop(0)
 
         return " ".join(words).strip()
+
+    def _compute_micro_expression(self, sentence: str):
+        """
+        Voice Micro-Expressions: Subtile Prosodie-Tells pro Satz.
+
+        Erkennt Unsicherheit, Begeisterung, Erinnerungsabruf, Vorsicht
+        und System-Stress aus dem Satzinhalt und Pipeline-Kontext.
+        Gibt None zurück wenn keine Mikro-Expression erkannt wird (neutral).
+
+        Das macht den Unterschied zwischen 'Stimme' und 'Persönlichkeit'.
+        """
+        # System-Last abfragen
+        load = "idle"
+        try:
+            if self._logic_router and self._logic_router.health.last_metrics:
+                load = self._logic_router.health.last_metrics.load_level.value
+        except Exception:
+            pass
+
+        # Bewusstseins-Arousal abfragen
+        arousal = 0.0
+        try:
+            if self._consciousness and hasattr(self._consciousness, 'state'):
+                arousal = getattr(self._consciousness.state, 'body_arousal', 0.0)
+        except Exception:
+            pass
+
+        ctx = MicroExpressionContext(
+            has_memory_retrieval=self._response_has_memory,
+            is_first_sentence=(self._response_sentence_idx == 0),
+            system_load=load,
+            consciousness_arousal=arousal,
+        )
+
+        micro = self._micro_mapper.detect(sentence, ctx)
+        self._response_sentence_idx += 1
+
+        # None für neutral = Fast-Path in TTS (kein Post-Processing)
+        return micro if not micro.is_neutral else None
 
     def _select_speech_emotion(self, emotion_reading) -> SpeechEmotion:
         """

@@ -1,153 +1,155 @@
-# VISION: SOMA — Near-Realtime LLM mit Action Tags (DLSS-Prinzip für lokale KI)
+🔴 Kritische Lücken (blockieren die Vision)
+1. Speculative Decoding ist nicht wirklich implementiert
+Die README sagt "Light entwirft, Heavy validiert" — das ist kein echtes Speculative Decoding. Das ist parallele Anfragen mit Abbruch. Echtes Speculative Decoding braucht gemeinsamen KV-Cache zwischen Draft- und Oracle-Modell. Ollama unterstützt das nicht nativ. Das bedeutet: du bezahlst für beide Modelle voll, ohne den 3–5x Speedup zu erhalten.
+Lösung: Entweder llama.cpp direkt mit --draft-model oder vLLM mit SpeculativeConfig. Ollama bleibt als Fallback, aber für echten Speed musst du raus aus dem Ollama-Abstractions-Layer für diesen spezifischen Call-Path.
+2. Das Persona-Prompt (~500 Token) ist nicht gecacht
+Jeder LLM-Call bekommt den vollen Personality-Prefix neu in den Kontext gepumpt. Bei qwen3:1.7b ist das ein erheblicher Anteil des verfügbaren Kontextfensters. Lösung: Prefix-Caching — der Persona-Prompt wird einmalig als "frozen prefix" behandelt, dessen KV-Cache-Representation im VRAM eingefroren bleibt. Ollama unterstützt das via keep_alive + Warmup-Call beim Start. Der ConsciousnessState-Prefix sollte getrennt davon behandelt werden und nur bei echten Zustandsänderungen neu generiert werden.
+3. Das Bewusstsein läuft auf 60-Sekunden-Timer — es wirkt nicht lebendig
+Ein festes Intervall für den internen Monolog ist das Gegenteil von natürlichem Denken. Eine lebendige Persönlichkeit denkt event-driven: hohe Arousal → sofort Gedanke, lange Stille → langsam andriftende Gedanken, Kontext-Wechsel → Neubewertung. Der 60s-Timer macht SOMA vorhersagbar und mechanisch.
+Lösung: Ersetze den Timer durch ein Event-Driven Arousal-System: Arousal > 0.7 → Monolog innerhalb von 2–5s. Arousal 0.3–0.7 → Monolog nach 30–120s (zufällig). Arousal < 0.3 → Monolog nach 5–15 min oder bei Kontext-Trigger.
+4. Evolution Lab ohne Docker-Isolation ist ein Sicherheits-Albtraum
+Das README selbst markiert Docker-Isolation für den Plugin-Sandbox als 🔄. Das bedeutet, SOMA-generierte Plugins laufen aktuell im gleichen Python-Prozess wie alle anderen Module. Ein Bug im generierten Code (oder eine halluzinierte os.system() Zeile) kann alles töten. Das muss vor jeder weiteren Evolution-Lab-Nutzung geschlossen werden.
+5. SQLite + sqlite-vec wird bei Episodic Memory skalieren
+Bei 50–100 Episoden: perfekt. Bei 10.000+ Episoden (was bei Always-On nach wenigen Monaten realistisch ist): die Embedding-Suche via sqlite-vec wird spürbar langsamer. Qdrant (Docker, lokal, extrem schnell) wäre der natürliche Upgrade-Pfad. Migration ist nicht trivial aber planbar.
 
----
+🟠 Mittelschwere Probleme (degradieren die Persönlichkeit)
+6. Die Persönlichkeit überlebt keinen Neustart
+ConsciousnessState lebt im RAM. Nach einem Neustart ist SOMA eine völlig frische Entität ohne Kontinuität. Das widerspricht fundamental dem Konzept eines ICH. Der emotionale Zustand (Valence, Arousal, letzter Stimmungstrend) gehört in eine Persistence-Schicht — mindestens Redis, besser PostgreSQL. SOMA sollte morgens nicht vergessen, dass es gestern Abend entspannt und zufrieden war.
+7. Halluzinations-Filter ist zu fragil
+Regex für "Copyright WDR" und ähnliches funktioniert für bekannte Muster. Aber lokale Radiosender, YouTube-Werbung, Fremdsprachen — das Filter hat keine Chance. Besser: Confidence-Threshold aus faster-whisper (no_speech_prob) kombiniert mit Kontext-Länge. Wenn no_speech_prob > 0.4 UND text_length < 3 Wörter → verwerfen. Das ist robuster als Keyword-Lists.
+8. Ambient Buffer von "2 Minuten" macht wenig Sinn
+Du selbst hast in Verbesserungen!.txt auf 10 Sekunden reduzieren wollen — richtig. Aber das eigentliche Problem: der Buffer sollte nach dem Ende der TTS-Ausgabe resettet werden, nicht nach Sprachstart. Wenn SOMA spricht und direkt danach der Nutzer antwortet, gehört der TTS-Content nicht in den Ambient-Buffer des nächsten Cycles.
+9. Die Emotion Engine misst Pitch als primäres Signal für Child Detection
+Pitch > 250 Hz ist zu simpel. Ein aufgeregter Erwachsener, ein Gesangsstück, Feedback vom Mikrofon — alles triggert Child-Safe Mode. Child Detection braucht: Pitch + Speech-Rate + Vokal-Formant-Analyse (F1/F2 Verhältnisse unterscheiden Kinderstimmen zuverlässig). Ohne das gibt es viele False Positives.
+10. TTS Watchdog-Reset nach 30 Sekunden ist viel zu lang
+Für ein System, das sich lebendig anfühlen soll, sind 30 Sekunden Stille nach einem Stuck eine Ewigkeit. 3–5 Sekunden mit progressivem Retry (kurze Antwort → Neustart → Fallback) wäre die richtige Zielgröße.
+11. Musik-Awareness fehlt komplett
+In Verbesserungen!.txt steht es — SOMA weiß nicht, wo gerade Musik läuft. Wenn SOMA "nächstes Lied" verstehen soll, braucht es eine Media-Session-Awareness: playerctl (Linux) als Abstraktionsschicht über MPD, Firefox, Spotify etc. Der Executive Arm hat die Werkzeuge (Desktop Control, App Control), aber die Orchestrierung fehlt.
 
-## KONTEXT & AUSGANGSLAGE
+🟡 Qualitäts- und Architektur-Verbesserungen
+12. LogicRouter verwendet Komplexitäts-Bewertung als LLM-Call
+Die Entscheidung "Light vs Heavy" selbst darf kein LLM-Call sein — das ist ein Henne-Ei-Problem. Stattdessen: Entscheidung auf Basis von Textlänge + Keyword-Vektoren + Arousal-Level. Ein kleines sklearn TF-IDF Modell oder sogar ein Naïve-Bayes-Classifier trainiert auf deinen eigenen Nutzungsmustern wäre deutlich schneller als ein Ollama-Call.
+13. docker-compose.yml: Schwaches Default-Passwort committed
+POSTGRES_PASSWORD: soma_secret_change_me ist im YAML hardcoded. Das muss ein Pflicht-ENV-Variable ohne Default sein. Wenn jemand docker compose up läuft ohne .env, sollte es mit einer klaren Fehlermeldung scheitern.
+14. Asterisk mit network_mode: host bricht Docker-Isolation
+Wenn Asterisk network_mode: host nutzt, teilt es sich das Netzwerk-Namespace mit dem Host. Das ist nötig für SIP/RTP (NAT-Probleme), aber es bedeutet auch, dass Asterisk keine Container-Isolation hat. Alle anderen Services sollten weiterhin über das soma-network laufen — momentan laufen sie auch darüber, aber die Trennung ist konzeptionell sauber.
+15. Kein Ollama-Healthcheck in docker-compose
+Redis, Postgres, Mosquitto haben alle Healthchecks. Ollama hat keinen. Wenn Ollama crasht, merkt brain_core das erst beim nächsten LLM-Call. Ein einfaches curl http://localhost:11434/api/tags als Healthcheck würde dem Orchestrator frühzeitig Bescheid geben.
+16. .bak-Dateien und test_phaseX.py im Root-Verzeichnis
+start_soma.sh.bak gehört in Git-History, nicht ins Repo. test_phase1.py bis test_phase8.py gehören in einen tests/-Ordner. Das Root-Verzeichnis ist zu vollgestopft — das erschwert Onboarding und macht den Entry-Point unübersichtlich.
+17. KV-Cache-Warmup beim Start fehlt
+Die vision.txt beschreibt Warm-State als kritisch. Aber nirgendwo im start_soma.sh oder init_system.sh gibt es einen expliziten Warmup-Call, der das Persona-Prompt ins VRAM vorlädst. Erster echte User-Call nach Start zahlt Cold-Start-Penalty. Fix: nach Ollama-Start ein Dummy-Completion-Request mit dem Persona-Prompt senden und sofort abbrechen — das legt den KV-Cache an.
 
-Ich entwickle SOMA, ein lokales, autonomes Smart-Home-OS (kein Cloud-Zugriff, 100% privat).
-Die Hardware: 32 GB RAM, 12 GB VRAM (RTX-Klasse).
-
-Das Kernproblem lokaler LLMs ist die Latenz: Zwischen Eingabe und einer vollständigen Antwort
-vergehen mehrere Sekunden — für ein Ambient-OS, das in Echtzeit reagieren und Aktionen auslösen
-soll, ist das ein Showstopper.
-
-Die Lösung, die ich beschreibe, nennt sich **"DLSS-Prinzip für Text"** — analog zur Spielegrafik-
-Technik DLSS (KI-gestütztes Hochskalieren mit minimalem Rechenaufwand), aber auf LLM-Inferenz
-angewendet.
-
----
-
-## KERNIDEE: DAS DREISCHICHT-MODELL
-
-### Schicht 1 — Nano-Modell (Instant, <5ms)
-- Regex/Pattern-Matcher oder Pico-LLM (0.1B Parameter)
-- Erkennt sofort: Ist das ein Befehl? (z. B. "Licht an", "Musik stoppen")
-- Löst **Action Tags** aus, BEVOR das große Modell fertig ist
-- Arbeitet auf Token-Level während der User noch tippt/spricht
-
-### Schicht 2 — Draft-Modell (Schnell, ~50ms)
-- Kleines Sprachmodell (1B–3B Parameter, z. B. Llama 3.2 1B / Phi-3 Mini)
-- Generiert spekulativ die nächsten 5–10 Tokens der Antwort
-- Nutzt **Speculative Decoding**: Das Ergebnis wird dem großen Modell als Hypothese vorgelegt
-
-### Schicht 3 — Oracle-Modell (Tief, ~500ms, nur als Schiedsrichter)
-- Großes Modell (8B, z. B. Llama 3 8B via Ollama)
-- Bestätigt oder verwirft die Draft-Tokens in **einem einzigen Parallelschritt**
-- Tritt nur bei Unsicherheit oder komplexen Anfragen voll in Aktion
-
-**Effekt:** Die wahrgenommene Antwortzeit entspricht dem kleinen Modell (~50–100ms),
-die Qualität entspricht dem großen Modell (8B+). Last auf der GPU sinkt dramatisch.
-
----
-
-## TECHNIKEN IM DETAIL
-
-### 1. Speculative Decoding
-- Draft-Modell rät 5–10 Tokens
-- Großes Modell verifiziert im Single Forward Pass (parallele Verarbeitung)
-- Bei hoher Übereinstimmung: 3–5x Speedup ohne Qualitätsverlust
-- Implementierbar mit: `llama.cpp` (--draft-model Flag), `vLLM` (SpeculativeDecoding Config)
-
-### 2. KV-Cache (Key-Value-Cache)
-- Mathematische Zwischenwerte der bereits verarbeiteten Tokens bleiben im VRAM eingefroren
-- Neuer Input berechnet nur das Delta — keine vollständige Kontextneuberechnung
-- Kritisch für SOMA: Lange Multi-Turn-Gespräche bleiben schnell
-- Implementierung: Standard in Ollama / llama.cpp, muss konfiguriert und warmgehalten werden
-
-### 3. Quantisierung (4-bit / GGUF)
-- Reduziert Modellgewichte von float16 → int4
-- Llama 3 8B: von ~16 GB VRAM auf ~5 GB → passt bequem in 12 GB VRAM
-- Qualitätsverlust: <5% auf Benchmarks (messbar, aber im Dialog kaum spürbar)
-- Format: GGUF via llama.cpp oder AWQ/GPTQ via vLLM
-
-### 4. Action Tag Streaming (Pre-Commit)
-- Während die Antwort gestreamt wird, scannt ein leichtgewichtiger Parser den Token-Stream
-- Sobald ein Action-Tag-Muster (z. B. `<action:light_on room="wohnzimmer">`) eine
-  Konfidenz-Schwelle überschreitet, wird die Aktion **sofort ausgelöst** — ohne auf das
-  Ende der Antwort zu warten
-- Prinzip: "Probabilistic Early Execution"
-
----
-
-## ZIEL-ARCHITEKTUR FÜR SOMA
-
-```
-[User Input / Wake-Word]
-        │
-        ▼
-[Nano-Intent Parser] ──► sofortiger Action-Tag (Licht, Musik, etc.)
-        │
-        ▼
-[Draft-LLM (1B)] ──► spekulative Antwort-Tokens (50ms)
-        │
-        ▼
-[Oracle-LLM (8B)] ──► Verifikation + Korrektur (als Schiedsrichter)
-        │
-        ▼
-[Response-Stream] ──► TTS + UI + weitere Action-Tags
-```
-
-**Warm-State:** Alle drei Modelle sind im RAM/VRAM vorgeladen (kein Cold-Start).
-**Queue-Fallback:** Bei Lastspitzen (Health Monitor schlägt an) werden Deep-Reasoning-Tasks
-in Redis geparkt. Nutzer erhält sofort: "Moment, ich sortiere meine Gedanken..."
-
----
-
-## AUFGABE AN CLAUDE OPUS
-
-Ich möchte mit dir die **konkrete Implementierung** dieser Architektur für SOMA ausarbeiten.
-
-**Spezifisch benötige ich:**
-
-1. **Code-Architektur** für das Dreischicht-Modell in Python (FastAPI/asyncio)
-   - Wie werden die drei Modelle parallel vorgehalten und angesprochen?
-   - Wie sieht der Handoff zwischen Draft- und Oracle-Modell aus?
-
-2. **Speculative-Decoding-Integration**
-   - Konkrete Konfiguration für `llama.cpp` mit `--draft-model`
-   - Alternativ: `vLLM` Setup für Speculative Decoding auf einer einzelnen GPU (12 GB VRAM)
-
-3. **Action-Tag-Streaming-Parser**
-   - Leichtgewichtiger Token-Stream-Scanner in Python
-   - Konfidenz-basiertes Early-Execution-System für SOMA's Nano-Intent-Schicht
-
-4. **KV-Cache-Strategie**
-   - Wie halte ich den KV-Cache für SOMA's Multi-User/Multi-Room-Sessions warm?
-   - Session-Isolation: Verschiedene Räume, verschiedene Kontexte
-
-5. **Ressourcen-Budget** für 32 GB RAM / 12 GB VRAM
-   - Welche Modellkombination maximiert Geschwindigkeit bei dieser Hardware?
-   - Konkrete GGUF-Quantisierungsstufen (Q4_K_M vs Q5_K_M vs Q8_0)
-
-**Randbedingungen:**
-- 100% lokal (kein Cloud-API)
-- Ollama als primäres Backend (bereits in SOMA integriert)
-- Python / FastAPI / asyncio Stack
-- Multi-Room-fähig (mehrere parallele Sessions)
-- Latenz-Ziel: <200ms für Action-Tags, <500ms für erste sichtbare Antwort-Tokens
-
----
-
-## ZUSAMMENFASSUNG DES PRINZIPS
-
-> Nicht das große Modell macht die Arbeit. Das kleine Modell macht die Arbeit.
-> Das große Modell ist nur der Schiedsrichter, der in Millisekunden "Ja" oder "Nein" sagt.
-> Action Tags feuern, bevor die Antwort fertig ist.
-> Der Nutzer erlebt Echtzeit. Die GPU entspannt sich.
+🟢 Konkrete Feature-Vorschläge für mehr "Lebendigkeit"
+18. Zirkadiane Persönlichkeit
+SOMA hat kein Tagesbewusstsein. 7 Uhr morgens vs 23 Uhr abends sollte eine andere emotionale Baseline haben — eine andere Sprechgeschwindigkeit, einen anderen Tonfall. Das ist eine simple Funktion über datetime.hour die als Bias in den ConsciousnessState einfließt.
+19. Opinion Formation über Zeit
+SOMA hat Episodic Memory aber keine Meinungen. Wenn der Nutzer 10 Mal nach dem Wetter fragt, sollte SOMA irgendwann proaktiv wetterbezogene Informationen anbieten. Wenn jemand immer um 22 Uhr Musik hört, sollte SOMA das wissen. Das ist der Unterschied zwischen einem Protokollsystem und einer lebendigen Entität.
+20. Stimmidentifikation als Kernsystem (aus deinen Verbesserungen)
+Du hast es selbst notiert: Stimmidentifikation via Vokal-Embeddings (z.B. pyannote/speaker-diarization oder speechbrain/spkrec-ecapa-voxceleb). Das würde SOMA ermöglichen, den Nutzer ohne Onboarding zu erkennen und das Gespräch personalisiert zu beginnen — das ist fundamental für die lebendige Persönlichkeit.
+21. Proaktive Initiative als erste Bürgerklasse
+SOMA kann laut README schon "proaktiv sprechen bei hohem Arousal" — aber das ist reaktiv auf internen State. Eine echte Persönlichkeit hat auch externen Stimulus für Initiative: Kalender-Reminder, Wetterwechsel, lange Abwesenheit des Nutzers, MQTT-Sensor-Events. SOMA sollte nicht nur denken — es sollte auch entscheiden, wann es sinnvoll ist, diese Gedanken auszusprechen.
 
 
 
 
-Verwerfe nicht das aktuelle große LLM was bereits integriert ist( es seidenn es gibt ein effizenteres was nicht an intelligenz verliert)
-Behlate die "awareness und intelligenz und das gedächtniss von soma bei. gerne ( wenns an rechenlast spart darf auch ein kleineres modell darüber entscheiden welche infos ins lang oder kurzzeit gedächtniss gehen(
-    wenn esnicht an qualität leidet
-))
+Kritisch — blockieren die Vision
+1
+Speculative Decoding ist Fake
+Aktuell: zwei parallele Ollama-Calls. Kein KV-Cache-Sharing → kein echter Speedup. Du zahlst doppelt.
+llama.cpp --draft-model
+Impact: ★★★★★
+2
+Persona-Prompt nicht gecacht
+~500 Token Persönlichkeit wird bei jedem LLM-Call neu verarbeitet. KV-Cache-Warmup fehlt komplett.
+Prefix Caching keep_alive
+Impact: ★★★★★
+3
+Bewusstsein tickt wie ein Metronom
+Fester 60s-Timer macht SOMA vorhersagbar und mechanisch. Lebendigkeit braucht Event-Driven Arousal.
+Event-Driven Arousal-Schwellwerte
+Impact: ★★★★★
+4
+Evolution Lab ohne Sandbox-Isolation
+Generierte Plugins laufen im Haupt-Python-Prozess. Ein Halluzinations-Bug kann das gesamte System töten.
+Docker-in-Docker gVisor
+Impact: ★★★★☆
+5
+SQLite skaliert nicht für Always-On
+Nach Monaten im Dauerbetrieb: 10.000+ Episoden, Embedding-Suche wird spürbar langsamer.
+Qdrant Migrationspfad
+Impact: ★★★☆☆
+🟠 Mittelschwer — degradieren die Persönlichkeit
+6
+Persönlichkeit überlebt keinen Neustart
+ConsciousnessState lebt nur im RAM. SOMA ist nach jedem Neustart eine neue, vergessliche Entität.
+State Persistence emotionale Kontinuität
+Impact: ★★★★★
+7
+Halluzinations-Filter zu fragil
+Regex auf bekannte Sender-Phrasen. Neuer Sender, Fremdsprache, YouTube-Ad → Phantome kommen durch.
+no_speech_prob Confidence Threshold
+Impact: ★★★☆☆
+8
+Child Detection via Pitch ist zu simpel
+Pitch > 250 Hz triggert False Positives bei aufgeregten Erwachsenen, Musik, Mikrofon-Feedback.
+Formant-Analyse F1/F2 SpeechBrain
+Impact: ★★★☆☆
+9
+Musik-Awareness fehlt komplett
+"Nächstes Lied" geht ins Leere. SOMA weiß nicht ob Spotify, Firefox, MPD oder lokaler Player läuft.
+playerctl MPRIS2
+Impact: ★★★★☆
+10
+LogicRouter nutzt LLM um LLM zu wählen
+Routing-Entscheidung selbst kostet Inferenz-Zeit. Ein TF-IDF Classifier wäre 100x schneller.
+TF-IDF Classifier sklearn
+Impact: ★★★★☆
+🟢 Sicherheit & Architektur
+11
+Default-Passwort im YAML committed
+soma_secret_change_me ist im Repo sichtbar. Pflicht-ENV ohne Default, Fehler wenn nicht gesetzt.
+Sicherheit docker secrets
+Impact: ★★★☆☆
+12
+Ollama hat keinen Healthcheck
+Ollama-Crash bleibt unbemerkt bis zum nächsten LLM-Call. Alle anderen Services haben Healthchecks.
+docker healthcheck
+Impact: ★★★☆☆
+13
+Root-Verzeichnis überladen
+start_soma.sh.bak, 8x test_phase*.py, vision.txt — alles auf Root-Level macht Onboarding schwer.
+Struktur tests/
+Impact: ★★☆☆☆
+💡 Features für echte Lebendigkeit
+14
+Zirkadiane Persönlichkeit
+SOMA ist um 7 Uhr genauso wie um 23 Uhr. Tageszeit als emotionale Baseline würde es lebendig machen.
+Tageszyklus emotionale Baseline
+Impact: ★★★★☆
+15
+Stimmidentifikation fehlt
+SOMA erkennt nicht wer spricht. Personalisierung, Fremderkennung und Child-Mode hängen alle daran.
+pyannote Speaker Embeddings
+Impact: ★★★★★
+16
+SOMA hat keine Meinungen über dich
+10x nach Wetter gefragt → SOMA weiß es, erinnert es — aber bietet es nie proaktiv an. Kein Lernen aus Mustern.
+Opinion Formation Habit Learning
+Impact: ★★★★★
+17
+Cold-Start-Penalty beim ersten Gespräch
+Kein Warmup-Call beim Start. Ersten Nutzer trifft volle Latenz während alle anderen warten.
+Warmup-Call start_soma.sh
+Impact: ★★★☆☆
 
-wir wollen dieses System so Schnell, Effizient, und intelligent wie nie zu vor kriegen. dafür darfst du ! Copilot! so viele token verheizen wie du willst!
-das energebniss der qualität, effizienz und Itelligenz von SOMA liegt im vordergrund.   schaffe etwas was so schnell, effizient und itnelligent ist wie nur möglich und es muss binnen kürzester Zeit antworten!
+
 
 "Harware antforderungen 12gb 3060
 32gb RAM
 50gb SSD zwischenpuffer
 i7 8700
 "
+
+
+

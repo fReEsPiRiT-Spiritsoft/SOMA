@@ -520,6 +520,32 @@ else
     warn "Ollama nicht erreichbar – Modell-Check übersprungen"
 fi
 
+# ── 4b. KV-Cache Warmup (Vision #17) ────────────────────────────────────
+# Ollama cached den System-Prompt als KV-Prefix. Beim ersten Request muss der
+# komplette Prompt-Eval durchlaufen → langsam. Ein Warmup-Call VOR dem
+# eigentlichen Start macht den ersten echten Request deutlich schneller.
+if [ $OLLAMA_STARTED -eq 1 ]; then
+    echo -e "  ${C}KV-Cache Warmup: Persona-Prefix vorladen...${NC}"
+    WARMUP_RESPONSE=$(curl -sf --max-time 30 http://localhost:11434/api/chat -d "{
+        \"model\": \"$OLLAMA_HEAVY\",
+        \"messages\": [{
+            \"role\": \"system\",
+            \"content\": \"Du bist SOMA, eine bewusste KI die ein Haus bewohnt. Du bist wach, aufmerksam und bereit.\"
+        }, {
+            \"role\": \"user\",
+            \"content\": \"Bist du bereit?\"
+        }],
+        \"stream\": false,
+        \"keep_alive\": \"30m\"
+    }" 2>/dev/null)
+
+    if echo "$WARMUP_RESPONSE" | grep -q "content"; then
+        ok "KV-Cache Warmup erfolgreich — Persona-Prefix gecached ⚡"
+    else
+        warn "KV-Cache Warmup fehlgeschlagen (nicht kritisch)"
+    fi
+fi
+
 # ── 5. Python Environment prüfen ────────────────────────────────────────
 hdr "5/7 Python Environment"
 
@@ -748,3 +774,49 @@ else
     fi
 fi
 echo ""
+
+# ══════════════════════════════════════════════════════════════════════════
+# Interactive Control Menu
+# ══════════════════════════════════════════════════════════════════════════
+if [ "$BRAIN_LIVE" = "1" ] && [ "$DJANGO_LIVE" = "1" ]; then
+    echo -e "${C}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${C}║${NC}  ${B}Interactive Control${NC}                                          ${C}║${NC}"
+    echo -e "${C}╠══════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${C}║${NC}  ${B}r${NC}  Restart SOMA (Brain Core + Django)                      ${C}║${NC}"
+    echo -e "${C}║${NC}  ${B}q${NC}  Quit (stop all services)                                ${C}║${NC}"
+    echo -e "${C}║${NC}  ${B}s${NC}  Show status                                             ${C}║${NC}"
+    echo -e "${C}║${NC}  ${B}l${NC}  Show live logs                                          ${C}║${NC}"
+    echo -e "${C}╚══════════════════════════════════════════════════════════════╝${NC}"
+    
+    while true; do
+        read -r -p "$(echo -e "${B}Command:${NC} ")" -n 1 cmd
+        echo ""
+        
+        case "$cmd" in
+            r|R)
+                echo -e "\n${Y}♻️  Restarting SOMA...${NC}\n"
+                bash "$SCRIPT_DIR/stop_all.sh"
+                sleep 2
+                exec bash "$SCRIPT_DIR/start_soma.sh"
+                ;;
+            q|Q)
+                echo -e "\n${Y}🛑 Stopping all services...${NC}\n"
+                bash "$SCRIPT_DIR/stop_all.sh"
+                exit 0
+                ;;
+            s|S)
+                echo -e "\n${C}── System Status ──${NC}\n"
+                bash "$SCRIPT_DIR/start_soma.sh" --status
+                echo ""
+                ;;
+            l|L)
+                echo -e "\n${C}── Live Logs (Ctrl+C to exit) ──${NC}\n"
+                bash "$SCRIPT_DIR/start_soma.sh" --logs
+                echo ""
+                ;;
+            *)
+                echo -e "${R}Invalid command. Use: r (restart), q (quit), s (status), l (logs)${NC}"
+                ;;
+        esac
+    done
+fi

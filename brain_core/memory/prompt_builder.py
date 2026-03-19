@@ -60,10 +60,12 @@ def build_system_prompt(
     is_child: bool = False,
     interaction_count: int = 0,
     custom_instructions: str = "",
+    idiolect_block: str = "",
 ) -> str:
     """
     Dynamischer System-Prompt — fühlt sich jedes Mal frisch an.
     Wird vom MemoryOrchestrator mit dem fertigen Gedächtnis-Block gespeist.
+    idiolect_block: Gelernter Sprachstil des Nutzers (VocabAbsorber).
     """
     daytime = _get_daytime()
     user_name = get_user_name_sync()
@@ -107,6 +109,10 @@ def build_system_prompt(
 
     if custom_instructions:
         parts.append(f"\n[Zusätzliche Anweisungen]\n{custom_instructions}")
+
+    # Idiolekt-Block (gelernter Sprachstil des Nutzers)
+    if idiolect_block:
+        parts.append(f"\n{idiolect_block}")
 
     # Gedächtnis-Block (das Herzstück)
     if memory_context:

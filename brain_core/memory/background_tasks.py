@@ -25,6 +25,7 @@ from brain_core.memory.user_identity import get_user_name_sync
 if TYPE_CHECKING:
     from brain_core.memory.memory_orchestrator import MemoryOrchestrator
     from brain_core.memory.diary_writer import DiaryWriter
+    from brain_core.memory.vocab_absorption import VocabAbsorber
 
 logger = logging.getLogger("soma.memory.background")
 
@@ -34,6 +35,7 @@ IDLE_THRESHOLD_SEC = 60           # 60s ohne Interaktion → idle
 CONSOLIDATION_COOLDOWN_SEC = 900  # Max alle 15 Min
 DREAM_COOLDOWN_SEC = 3600         # Tages-Reflexion max alle 60 Min
 PRUNE_COOLDOWN_SEC = 7200         # Pruning max alle 2 Std
+VOCAB_COOLDOWN_SEC = 1800         # Vocab-Clustering max alle 30 Min
 
 # ── Consolidation Config ────────────────────────────────────────────────
 
@@ -54,14 +56,17 @@ class BackgroundConsolidator:
         memory_orchestrator: MemoryOrchestrator,
         diary_writer: Optional[DiaryWriter] = None,
         llm_callable: Optional[Callable[[str], Awaitable[str]]] = None,
+        vocab_absorber: Optional[VocabAbsorber] = None,
     ):
         self._memory = memory_orchestrator
         self._diary = diary_writer
         self._llm_callable = llm_callable
+        self._vocab = vocab_absorber
         self._last_activity: float = time.time()
         self._last_consolidation: float = 0
         self._last_dream: float = 0
         self._last_prune: float = 0
+        self._last_vocab: float = 0
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._dream_count: int = 0
@@ -125,6 +130,12 @@ class BackgroundConsolidator:
                     logger.info("dream_phase_pruning")
                     await self._run_pruning()
                     self._last_prune = now
+
+                # Phase 4: Vocab Clustering + Decay (Spracherwerb)
+                if self._vocab and now - self._last_vocab > VOCAB_COOLDOWN_SEC:
+                    logger.info("dream_phase_vocab_clustering")
+                    await self._run_vocab_absorption()
+                    self._last_vocab = now
 
             except asyncio.CancelledError:
                 break
@@ -440,16 +451,65 @@ class BackgroundConsolidator:
         conn.commit()
         return cur.rowcount
 
+    # ══════════════════════════════════════════════════════════════════
+    #  PHASE 4: VOCAB ABSORPTION — Spracherwerb im Traum
+    # ══════════════════════════════════════════════════════════════════
+
+    async def _run_vocab_absorption(self):
+        """
+        Nächtliche Konsolidierung des gelernten Vokabulars:
+        1. Semantisches Clustering aller reifen Terme
+        2. Decay: lange nicht benutzte Terme verblassen
+        3. Optional: Diary-Eintrag über neue Sprachmuster
+        """
+        if not self._vocab:
+            return
+
+        try:
+            # Clustering: Terme gruppieren (Embeddings + HDBSCAN/Greedy)
+            await self._vocab.run_clustering()
+
+            # Decay: Veraltete Terme deaktivieren
+            await self._vocab.run_decay()
+
+            # Stats loggen
+            stats = self._vocab.stats
+            logger.info(
+                "vocab_absorption_dreaming_complete",
+                unique_terms=stats["unique_terms"],
+                total_observations=stats["total_observations"],
+                top_3=[t[0] for t in stats["top_terms"][:3]],
+            )
+
+            # Diary: Spracherwerb dokumentieren (wenn genug gelernt)
+            if self._diary and stats["unique_terms"] > 10:
+                top_terms = [t[0] for t in stats["top_terms"][:5]]
+                asyncio.create_task(
+                    self._diary.write_insight(
+                        f"Spracherwerb: Ich lerne die Ausdrucksweise meines "
+                        f"Nutzers. Häufige Begriffe: {', '.join(top_terms)}. "
+                        f"Insgesamt kenne ich {stats['unique_terms']} "
+                        f"nutzerspezifische Ausdrücke."
+                    )
+                )
+
+        except Exception as e:
+            logger.error(f"vocab_absorption_dreaming_failed: {e}")
+
     # ── Stats ────────────────────────────────────────────────────────
 
     @property
     def stats(self) -> dict:
-        return {
+        s = {
             "dream_count": self._dream_count,
             "wisdom_nodes_created": self._wisdom_nodes_created,
             "episodes_pruned": self._episodes_pruned,
             "last_consolidation": self._last_consolidation,
             "last_dream": self._last_dream,
             "last_prune": self._last_prune,
+            "last_vocab_clustering": self._last_vocab,
             "idle_since": time.time() - self._last_activity,
         }
+        if self._vocab:
+            s["vocab_stats"] = self._vocab.stats
+        return s

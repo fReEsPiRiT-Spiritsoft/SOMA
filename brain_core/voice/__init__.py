@@ -16,6 +16,12 @@ from brain_core.voice.pipeline import VoicePipeline
 from brain_core.voice.vad import ContinuousVAD, SpeechSegment
 from brain_core.voice.stt import STTEngine, TranscriptionResult
 from brain_core.voice.tts import TTSEngine, SpeechEmotion
+from brain_core.voice.micro_expressions import (
+    MicroExpressionMapper,
+    MicroExpression,
+    MicroExpressionContext,
+    MicroState,
+)
 from brain_core.voice.emotion import EmotionEngine, EmotionState, RoomMood, RoomAtmosphere
 from brain_core.voice.ambient import AmbientIntelligence, Intervention, InterventionType
 
@@ -27,6 +33,10 @@ __all__ = [
     "TranscriptionResult",
     "TTSEngine",
     "SpeechEmotion",
+    "MicroExpressionMapper",
+    "MicroExpression",
+    "MicroExpressionContext",
+    "MicroState",
     "EmotionEngine",
     "EmotionState",
     "RoomMood",
