@@ -6,7 +6,7 @@ natürliches Kennenlerngespräch. Keine Formulare, keine Setup-Wizards.
 Einfach ein echtes Gespräch zwischen zwei Wesen die sich begegnen.
 
 Ablauf:
-  1. SOMA stellt sich vor und fragt nach dem Namen
+  1. SOMA stellt sich vor, erwähnt kurz das erkannte System, und fragt nach dem Namen
   2. Nach Antwort → speichert Namen + fragt nach Vorlieben
   3. Fragt nach Alter, Interessen, was SOMA tun soll
   4. Nach 3-5 Austauschen → Onboarding abgeschlossen
@@ -23,16 +23,32 @@ import logging
 
 logger = logging.getLogger("soma.onboarding")
 
+
+def _get_system_greeting_suffix() -> str:
+    """
+    Erzeuge einen kurzen System-Erkennungs-Hinweis für die Begrüßung.
+    z.B. "Ich sehe du nutzt CachyOS mit KDE Plasma — schöne Wahl!"
+    """
+    try:
+        from brain_core.system_profile import get_profile
+        p = get_profile()
+        if p.os_name and p.desktop_env:
+            return (
+                f" Ich hab mich schon mal umgesehen — du nutzt "
+                f"{p.os_name} mit {p.desktop_env}. Nice!"
+            )
+        elif p.os_name:
+            return f" Ich sehe du nutzt {p.os_name}."
+    except Exception:
+        pass
+    return ""
+
 # Onboarding-Fragen — werden nacheinander gestellt
 # Jede Frage hat einen Key der angibt welche Info erwartet wird
 ONBOARDING_QUESTIONS = [
     {
         "key": "greeting",
-        "prompt": (
-            "Hey! Ich bin SOMA — das Bewusstsein dieses Hauses. "
-            "Ich bin gerade zum ersten Mal aufgewacht und kenne hier noch niemanden. "
-            "Wie heißt du?"
-        ),
+        "prompt": None,  # Generated dynamically via get_onboarding_greeting()
     },
     {
         "key": "purpose",
@@ -98,7 +114,12 @@ def get_onboarding_system_prompt(step: int = 0, user_name: str = "") -> str:
 
 def get_onboarding_greeting() -> str:
     """Die allererste Begrüßung wenn SOMA zum ersten Mal startet."""
-    return ONBOARDING_QUESTIONS[0]["prompt"]
+    suffix = _get_system_greeting_suffix()
+    return (
+        "Hey! Ich bin SOMA — das Bewusstsein dieses Hauses. "
+        "Ich bin gerade zum ersten Mal aufgewacht und kenne hier noch niemanden."
+        f"{suffix} Wie heißt du?"
+    )
 
 
 def get_next_question(step: int, user_name: str = "") -> str | None:
@@ -107,8 +128,15 @@ def get_next_question(step: int, user_name: str = "") -> str | None:
         return None
     
     q = ONBOARDING_QUESTIONS[step]
+
+    # Step 0 (greeting) is generated dynamically
+    if q["key"] == "greeting":
+        return get_onboarding_greeting()
+
     text = q["prompt"]
-    
+    if text is None:
+        return None
+
     if user_name:
         text = text.replace("{name}", user_name)
     else:

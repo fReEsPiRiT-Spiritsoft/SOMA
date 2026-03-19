@@ -1,13 +1,14 @@
 """
-SOMA-AI Light Engine – Phi-3 / Llama 3B via Ollama
-====================================================
+SOMA-AI Light Engine – Qwen3 1.7B via Ollama (Draft Model)
+============================================================
 Balanced Mode: Gute Qualität bei reduziertem Ressourcenverbrauch.
-Wird bei ELEVATED Load genutzt.
+Wird bei ELEVATED Load genutzt + für Memory-Tasks (Diary, Consolidation).
+VRAM: ~1.2GB Q4 — bleibt permanent im VRAM (keep_alive=-1).
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, AsyncGenerator
 
 import httpx
 import structlog
@@ -75,6 +76,8 @@ class LightPhiEngine(BaseEngine):
                     "model": self._model,
                     "messages": messages,
                     "stream": False,
+                    "think": False,  # Qwen3 1.7B Thinking-Mode AUS — zu klein für gutes Reasoning
+                    "keep_alive": settings.ollama_light_keep_alive,
                     "options": {
                         "num_ctx": 2048,
                         "temperature": 0.7,
@@ -98,6 +101,76 @@ class LightPhiEngine(BaseEngine):
             response_len=len(response),
         )
         return response
+
+    async def generate_stream(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> AsyncGenerator[str, None]:
+        """Streame Antwort Token für Token via Ollama Chat API (stream=True)."""
+        if not self._client:
+            raise RuntimeError("LightEngine nicht initialisiert")
+
+        messages = []
+        if session_id:
+            session = self.get_or_create_session(
+                session_id, system_prompt=system_prompt or ""
+            )
+            session.add_turn("user", prompt)
+            messages = session.to_messages(system_prompt)
+        else:
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+
+        payload = {
+            "model": self._model,
+            "messages": messages,
+            "stream": True,
+            "think": False,  # Qwen3 1.7B Thinking-Mode AUS — zu klein für gutes Reasoning
+            "keep_alive": settings.ollama_light_keep_alive,
+            "options": {
+                "num_ctx": 2048,
+                "temperature": 0.7,
+            },
+        }
+
+        full_response = ""
+        try:
+            async with self._client.stream(
+                "POST", "/api/chat", json=payload, timeout=60.0
+            ) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.strip():
+                        continue
+                    import json as _json
+                    try:
+                        chunk = _json.loads(line)
+                    except _json.JSONDecodeError:
+                        continue
+                    if chunk.get("done"):
+                        break
+                    token = chunk.get("message", {}).get("content", "")
+                    if token:
+                        full_response += token
+                        yield token
+        finally:
+            pass
+
+        # Session updaten
+        if session_id:
+            session = self._sessions.get(session_id)
+            if session:
+                session.add_turn("assistant", full_response)
+
+        logger.info(
+            "light_stream_complete",
+            model=self._model,
+            prompt_len=len(prompt),
+            response_len=len(full_response),
+        )
 
     async def health_check(self) -> bool:
         if not self._client:

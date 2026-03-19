@@ -473,7 +473,7 @@ class InternalMonologue:
 
         # Kleine Zufallsschwankung (± 15%) damit es nicht mechanisch wirkt
         jitter = base * random.uniform(-0.15, 0.15)
-        return max(15.0, base + jitter)
+        return max(45.0, base + jitter)
 
     # ══════════════════════════════════════════════════════════════════
     #  ACTION INTENT DETECTION

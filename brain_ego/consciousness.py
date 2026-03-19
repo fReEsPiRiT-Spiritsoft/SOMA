@@ -174,7 +174,9 @@ class Consciousness:
     """
 
     # Update-Intervall im Idle (kein neuer Input)
-    IDLE_UPDATE_SEC = 30.0
+    # 120s statt 30s — spart CPU wenn niemand interagiert
+    # Events (STT, Emotion, Presence) triggern sofort via _update_event
+    IDLE_UPDATE_SEC = 120.0
     # Minimaler Abstand zwischen Updates (Flood-Protection)
     MIN_UPDATE_INTERVAL_SEC = 2.0
 

@@ -38,10 +38,27 @@ class SomaConfig(BaseSettings):
     # ── Ollama ───────────────────────────────────────────────────────────
     ollama_host: str = "http://localhost"
     ollama_port: int = 11434
-    ollama_heavy_model: str = "qwen2.5-coder:14b"
-    ollama_light_model: str = "phi3:mini"
+    ollama_heavy_model: str = "qwen3:8b"         # Oracle: 8B Q4 ≈ 4.7GB VRAM
+    ollama_light_model: str = "qwen3:1.7b"       # Draft: 1.7B Q4 ≈ 1.2GB VRAM
     ollama_num_parallel: int = 2
-    ollama_max_loaded_models: int = 2
+    ollama_max_loaded_models: int = 3              # Oracle + Draft + Whisper Headroom
+    # Warm Pool: Wie lange Modelle im VRAM bleiben (Ollama keep_alive)
+    ollama_heavy_keep_alive: str = "5m"           # Oracle: 5min idle → unload
+    ollama_light_keep_alive: str = "-1"            # Draft: PERMANENT im VRAM (nur ~1.2GB)
+
+    # ── Speculative Decoding ─────────────────────────────────────────────
+    speculative_enabled: bool = True               # Application-Level Spec. Decoding
+    speculative_draft_batch: int = 10              # Draft-Tokens pro Runde
+
+    # ── KV-Cache Strategie (Phase E) ─────────────────────────────────────
+    session_stale_trim_turns: int = 6              # Stale Sessions: Letzte N Turns behalten
+    session_max_idle_secs: float = 300.0           # 5min idle → Session als stale markieren
+
+    # ── GitHub Models API (Code-Generierung für Plugins) ────────────────
+    # PAT mit 'models:read' Scope: https://github.com/settings/tokens
+    github_token: str = ""
+    # Modell für Plugin-Code-Generierung (o1-mini, o1-preview, gpt-4o, o4-mini)
+    github_models_model: str = "o4-mini"
 
     # ── Health Thresholds ────────────────────────────────────────────────
     health_ram_warn_percent: float = 85.0      # War 75%, zu niedrig mit Ollama
@@ -52,7 +69,8 @@ class SomaConfig(BaseSettings):
     health_temp_warn_celsius: float = 75.0
     # ── VRAM Management ─────────────────────────────────────────────
     # Ollama VRAM freigeben nach N Sekunden ohne LLM-Request (0 = deaktiviert)
-    vram_unload_idle_secs: float = 10.0
+    # Phase B: 120s statt 10s — Modell bleibt warm für schnelle Streaming-Responses
+    vram_unload_idle_secs: float = 120.0
     # Heavy-Engine aktiv lassen bis VRAM diese Auslastung überschreitet
     heavy_engine_max_vram_pct: float = 90.0
     # ── Home Assistant ───────────────────────────────────────────────────
@@ -75,6 +93,10 @@ class SomaConfig(BaseSettings):
     soma_phone_password_hash: str = ""
     # SOMA's reachable URL for Home Assistant to fetch TTS audio
     soma_local_url: str = "http://192.168.0.100:8100"  # CHANGE to your machine's LAN IP
+
+    # ── Sudo Mode ────────────────────────────────────────────────────────
+    # If True at boot, SOMA starts with sudo enabled (can be toggled via API)
+    sudo_mode_enabled: bool = False
 
     # ── Django SSOT ──────────────────────────────────────────────────────
     django_host: str = "0.0.0.0"
@@ -112,3 +134,24 @@ class SomaConfig(BaseSettings):
 
 # Singleton
 settings = SomaConfig()
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  RUNTIME SUDO TOGGLE
+# ═══════════════════════════════════════════════════════════════════
+# Can be changed at runtime via /api/sudo endpoint.
+# Separate from config file — doesn't persist across restarts
+# unless sudo_mode_enabled=True is set in .env.
+
+_sudo_mode: bool = settings.sudo_mode_enabled
+
+
+def is_sudo_enabled() -> bool:
+    """Check if sudo mode is currently active."""
+    return _sudo_mode
+
+
+def set_sudo_mode(enabled: bool) -> None:
+    """Toggle sudo mode at runtime (via dashboard API)."""
+    global _sudo_mode
+    _sudo_mode = enabled

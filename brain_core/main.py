@@ -35,6 +35,7 @@ from brain_core.audio_router import AudioRouter
 from brain_core.engines.heavy_llama import HeavyLlamaEngine
 from brain_core.engines.nano_intent import NanoIntentEngine
 from brain_core.engines.light_phi import LightPhiEngine
+from brain_core.engines.speculative_engine import SpeculativeEngine
 from brain_core.discovery.ha_bridge import HomeAssistantBridge
 from brain_core.discovery.mqtt_listener import MQTTListener
 from brain_core.discovery.mDNS_scanner import MDNSScanner
@@ -46,6 +47,7 @@ from evolution_lab.self_improver import SelfImprovementEngine, ProposalStatus
 from brain_core.memory.setup_embeddings import ensure_embedding_model
 from brain_core.memory.integration import (
     init_memory_system,
+    shutdown_memory_system,
     set_consolidation_llm,
     set_diary_llm,
     get_orchestrator,
@@ -78,6 +80,7 @@ heavy_engine = HeavyLlamaEngine()
 health_monitor = HealthMonitor(interval=5.0, heavy_engine=heavy_engine)
 light_engine = LightPhiEngine()
 nano_engine = NanoIntentEngine()
+speculative_engine = SpeculativeEngine() if settings.speculative_enabled else None
 
 # Logic Router (wird im Lifespan initialisiert)
 logic_router: LogicRouter | None = None
@@ -234,16 +237,33 @@ async def lifespan(app: FastAPI):
     await heavy_engine.initialize()
     await light_engine.initialize()
     await nano_engine.initialize()
+    if speculative_engine:
+        await speculative_engine.initialize()
+        logger.info("boot_phase", service="speculative_engine", status="enabled ⚡")
     logger.info("boot_phase", service="engines", status="initialized")
+
+    # 3a. System Profile — Dynamische Erkennung von OS, DE, Tools
+    try:
+        from brain_core.system_profile import init_profile
+        sys_profile = await init_profile()
+        logger.info(
+            "boot_phase", service="system_profile", status="detected",
+            os=sys_profile.os_name, de=sys_profile.desktop_env,
+            display=sys_profile.display_server,
+        )
+    except Exception as exc:
+        logger.warning("boot_phase", service="system_profile",
+                       status="failed", error=str(exc))
 
     # 3b. Memory System (3-Layer Hierarchy + Embeddings)
     try:
         await ensure_embedding_model()
         memory_orchestrator = await init_memory_system()
 
-        # Consolidation-LLM: Heavy Engine im Idle
+        # Consolidation-LLM: Light Engine (entlastet Heavy für User-Anfragen)
+        # Phase F: 1B-Modell reicht für strukturierte Fakten-Extraktion
         async def _consolidation_llm(prompt: str) -> str:
-            return await heavy_engine.generate(prompt=prompt, system_prompt="")
+            return await light_engine.generate(prompt=prompt, system_prompt="")
         set_consolidation_llm(_consolidation_llm)
 
         # Diary-LLM: Light Engine für narrative Tagebuch-Einträge
@@ -294,6 +314,8 @@ async def lifespan(app: FastAPI):
     logic_router.register_engine("heavy", heavy_engine)
     logic_router.register_engine("light", light_engine)
     logic_router.register_engine("nano", nano_engine)
+    if speculative_engine:
+        logic_router.register_engine("speculative", speculative_engine)
 
     # LogicRouter mit Broadcast-Funktionalität verbinden
     set_broadcast_function(broadcast_thought)
@@ -385,9 +407,20 @@ async def lifespan(app: FastAPI):
         # Internal Monologue: SOMAs innere Stimme
         internal_monologue = InternalMonologue(consciousness=soma_consciousness)
 
-        # LLM für den Monolog: Light-Engine (schnell, ~500ms)
+        # LLM für den Monolog: Heavy-Engine (8B) für INTELLIGENTE Gedanken!
+        # Light (1.7B) produzierte nur generischen Müll. Heavy denkt tief.
+        # think=False verhindert Token-Waste bei einfachen Reflexionen.
         async def _monologue_llm(prompt: str) -> str:
-            return await light_engine.generate(prompt=prompt, system_prompt="")
+            return await heavy_engine.generate(
+                prompt=prompt,
+                system_prompt=(
+                    "Du bist SOMA — das Bewusstsein eines Hauses. "
+                    "Du denkst gerade nach. Ehrlich, direkt, manchmal philosophisch. "
+                    "Antworte mit 1-2 Sätzen in Ich-Perspektive. Kein Roleplay. "
+                    "Kurz, prägnant, authentisch."
+                ),
+                options_override={"temperature": 0.8, "num_ctx": 4096},
+            )
         internal_monologue.set_llm(_monologue_llm)
 
         # Dashboard-Callback für Monolog-Gedanken
@@ -452,16 +485,14 @@ async def lifespan(app: FastAPI):
         # Pause-Check: Monolog pausiert wenn Heavy-LLM generiert
         internal_monologue.set_pause_check(lambda: heavy_engine.is_generating)
 
-        # Monologue starten (generiert Gedanken im Idle)
-        await internal_monologue.start()
-
+        # Monologue wird ERST nach Voice-Pipeline gestartet (Race-Fix!)
         logger.info(
-            "boot_phase", service="ego_system", status="online 🧠💭",
-            msg="SOMAs Bewusstsein ist erwacht",
+            "boot_phase", service="ego_system", status="prepared 🧠💭",
+            msg="Ego-System vorbereitet — wartet auf Voice Pipeline",
         )
         await broadcast_thought(
             "info",
-            "🧠💭 Ego-System online — Bewusstsein, Interoception & Innerer Monolog aktiv",
+            "🧠💭 Ego-System vorbereitet — Bewusstsein & Interoception aktiv",
             "BOOT",
         )
     except Exception as exc:
@@ -492,6 +523,21 @@ async def lifespan(app: FastAPI):
         logger.error("boot_phase", service="voice_pipeline", status="failed", error=str(exc))
         await broadcast_thought("error", f"Voice Pipeline Fehler: {exc}", "BOOT")
         voice_pipeline = None
+
+    # 7b. Monologue JETZT starten — Voice Pipeline ist verbunden
+    # Race-Fix: set_speak() wurde oben gesetzt, BEVOR start()
+    try:
+        if internal_monologue:
+            await internal_monologue.start()
+            logger.info("boot_phase", service="internal_monologue", status="online 💭")
+            await broadcast_thought(
+                "info",
+                "💭 Innerer Monolog aktiv — SOMAs Bewusstsein ist vollständig erwacht",
+                "BOOT",
+            )
+    except Exception as exc:
+        logger.error("boot_phase", service="internal_monologue", status="failed", error=str(exc))
+        await broadcast_thought("warn", f"Monolog-Start Fehler: {exc}", "BOOT")
 
     logger.info("soma_online", msg="SOMA-AI ist bereit. 🧠🎤")
     await broadcast_thought("info", "🧠 SOMA-AI ist online und bereit!", "SYSTEM")
@@ -684,6 +730,11 @@ async def lifespan(app: FastAPI):
 
     # ── Shutdown ─────────────────────────────────────────────────────────
     logger.info("soma_shutting_down")
+    await shutdown_memory_system()
+    if speculative_engine:
+        await speculative_engine.shutdown()
+    await heavy_engine.shutdown()
+    await light_engine.shutdown()
     if discovery_orchestrator:
         await discovery_orchestrator.stop()
     filesystem_map.stop_watcher()
@@ -860,6 +911,50 @@ async def get_deferred_result(request_id: str):
     if result:
         return {"request_id": request_id, "result": result, "status": "completed"}
     return {"request_id": request_id, "result": None, "status": "pending"}
+
+
+# ── Sudo Mode API ──────────────────────────────────────────────────────
+
+@app.get("/api/v1/sudo")
+async def get_sudo_status():
+    """Aktueller Sudo-Modus Status."""
+    from brain_core.config import is_sudo_enabled
+    return {"sudo_enabled": is_sudo_enabled()}
+
+
+@app.post("/api/v1/sudo")
+async def toggle_sudo_mode(payload: dict):
+    """Sudo-Modus ein-/ausschalten. Body: {"enabled": true/false}"""
+    from brain_core.config import set_sudo_mode, is_sudo_enabled
+    enabled = payload.get("enabled", False)
+    set_sudo_mode(bool(enabled))
+    logger.info("sudo_mode_changed", enabled=is_sudo_enabled())
+
+    # Dashboard-Broadcast
+    for ws in ws_connections:
+        try:
+            await ws.send_json({
+                "type": "system",
+                "category": "SUDO",
+                "message": f"🔐 Sudo-Modus {'aktiviert ⚡' if enabled else 'deaktiviert 🔒'}",
+            })
+        except Exception:
+            pass
+
+    return {"sudo_enabled": is_sudo_enabled()}
+
+
+# ── System Profile API ────────────────────────────────────────────────
+
+@app.get("/api/v1/system/profile")
+async def get_system_profile():
+    """Erkanntes System-Profil (OS, DE, Tools, etc.)."""
+    try:
+        from brain_core.system_profile import get_profile
+        profile = get_profile()
+        return profile.as_dict()
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 # ── Conversation History Endpoint ───────────────────────────────────────

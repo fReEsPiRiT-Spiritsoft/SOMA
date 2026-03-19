@@ -131,18 +131,22 @@ class STTEngine:
         duration = len(audio) / sample_rate
 
         # Whisper erwartet float32 16kHz
+        # QUALITÄTS-OPTIMIERUNG:
+        #   language="de" FIX: Auto-Detect erkennt kurze deutsche Sätze oft als
+        #   Niederländisch/Englisch → Müll-Transkription. Explizit "de" setzen!
+        #   beam_size=5: Deutlich bessere Erkennung als greedy (1). Kostet ~200ms
+        #   mehr, aber für ein Voice-System ist Qualität > Speed.
+        #   condition_on_previous_text=False: Verhindert Whisper-Halluzinations-Loops
+        effective_language = self._language or "de"  # SOMA ist primär deutsch
         segments_iter, info = self._model.transcribe(
             audio,
-            language=self._language,
-            beam_size=3,
-            best_of=3,
-            vad_filter=True,          # Internes VAD für bessere Segmentierung
-            vad_parameters=dict(
-                min_silence_duration_ms=500,
-                speech_pad_ms=200,
-            ),
+            language=effective_language,
+            beam_size=5,              # Qualität! 5 Hypothesen statt greedy
+            best_of=3,                # Top-3 Kandidaten vergleichen
+            vad_filter=False,         # Externes VAD reicht!
             word_timestamps=False,
-            condition_on_previous_text=True,
+            condition_on_previous_text=False,  # Anti-Halluzination
+            without_timestamps=True,  # Keine Timestamps nötig = schneller
         )
 
         # Segmente sammeln
@@ -158,6 +162,11 @@ class STTEngine:
 
         full_text = " ".join(text_parts).strip()
         processing_ms = (time.monotonic() - start) * 1000
+
+        # ── Whisper-Halluzinations-Filter ─────────────────────────────
+        # Whisper halluziniert bei Hintergrundgeräuschen (TV, Radio) typische
+        # Broadcast-Textbausteine. Diese sind KEINE echte Sprache.
+        full_text = self._filter_hallucinations(full_text)
 
         # "Soma" erkennen (case-insensitive, überall im Text)
         contains_soma = self._detect_soma(full_text)
@@ -184,20 +193,72 @@ class STTEngine:
         return result
 
     @staticmethod
+    def _filter_hallucinations(text: str) -> str:
+        """
+        Filtert typische Whisper-Halluzinationen bei Hintergrundgeräuschen.
+
+        Whisper halluziniert bei TV/Radio-Audio im Hintergrund regelmäßig:
+        - Broadcast-Textbausteine ("Copyright WDR", "Untertitel im Auftrag des ZDF")
+        - YouTube/Podcast-Phrasen ("Vielen Dank fürs Zuschauen", "Abonniert")
+        - Leer-Halluzinationen ("...", "Untertitelung", "SWR")
+
+        Wenn das gesamte Segment ein Halluzinations-Match ist → leerer String.
+        Wenn nur Teile matchen → trotzdem leerer String (Segment ist kontaminiert).
+        """
+        if not text or len(text.strip()) < 3:
+            return ""
+
+        t = text.lower().strip()
+
+        # ── Exakte Halluzinations-Phrasen (Case-insensitive Substring) ──
+        hallucination_markers = [
+            # Deutsche Sender-Tags
+            "copyright", "untertitel", "im auftrag des",
+            "wdr", "zdf", "ard", "swr", "ndr", "mdr", "rbb",
+            "bayerischer rundfunk", "hessischer rundfunk",
+            "mitteldeutscher rundfunk", "norddeutscher rundfunk",
+            "westdeutscher rundfunk", "südwestrundfunk",
+            # YouTube/Podcast-Halluzinationen
+            "vielen dank fürs zuschauen", "danke fürs zuschauen",
+            "abonniert", "subscribe", "thank you for watching",
+            "like and subscribe", "link in der beschreibung",
+            # Untertitel-Artefakte
+            "untertitelung", "untertitelt von", "übersetzung:",
+            "untertitel von", "redaktion:",
+            # Musik-/Geräusch-Halluzinationen
+            "♪", "♫", "[musik]", "[applaus]", "(musik)",
+        ]
+
+        for marker in hallucination_markers:
+            if marker in t:
+                logger.debug("stt_hallucination_filtered",
+                             text=text[:60], marker=marker)
+                return ""
+
+        # ── Zu kurze Phrasen die nur Rauschen sind ──
+        # Einzelne Wörter wie "Ja.", "Mhm.", "So." sind oft Phantom-Segmente
+        words = text.split()
+        if len(words) <= 1 and len(text.strip()) <= 4:
+            return ""
+
+        return text
+
+    @staticmethod
     def _detect_soma(text: str) -> bool:
         """
         Erkennt "Soma" irgendwo im Text.
         Berücksichtigt typische Whisper-Fehler und deutsche Aussprache.
+        ABER: Keine zu breiten Matches die bei TV/Radio triggern!
         """
         t = text.lower()
         # Exakte Matches und typische Whisper-Transkriptionsfehler
+        # NICHT enthalten: "sommer", "summer", "summa" (zu viele False Positives!)
+        # NICHT enthalten: "So, mal" (triggert bei "So, mal schauen wir...")
         soma_variants = [
             "soma", "sooma", "so ma", "sohma", "somma", "zoma",
-            "sommer", "zommer", "summer", "summa",  # Sehr häufige Whisper-Fehler!
             "somar", "soomar", "somah", "sommar",
             "suma", "zooma", "söma", "söhma",
-            "hey soma", "hey sommer", "hej soma",
-            "soma!", "sommer!", "hey,", "So, mal", "so, mal", "hallo soma",
+            "hey soma", "hej soma", "hallo soma",
         ]
         return any(variant in t for variant in soma_variants)
 
@@ -226,13 +287,15 @@ class STTEngine:
         segments_iter, info = self._model.transcribe(
             filepath,
             language=self._language,
-            beam_size=3,
-            vad_filter=True,
+            beam_size=5,              # Qualität > Speed
+            best_of=1,
+            vad_filter=True,          # Für Dateien: VAD sinnvoll (längere Aufnahmen)
             vad_parameters=dict(
                 min_silence_duration_ms=300,
                 speech_pad_ms=100,
             ),
             word_timestamps=False,
+            condition_on_previous_text=False,
         )
 
         text_parts: list[str] = []

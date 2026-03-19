@@ -1,0 +1,958 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+#  NEXTSTEP: SOMA NEAR-REALTIME ENGINE — Integrations-Bauplan
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Quelle: vision.txt (DLSS-Prinzip für lokale KI)
+#  Ziel-Hardware: i7-8700 (6C/12T) · 32GB RAM · RTX 3060 12GB VRAM · 50GB SSD
+#  Datum: 2026-03-18
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  IST-ZUSTAND (Analyse des kompletten Codebase)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#  ENGINES (brain_core/engines/):
+#    • heavy_llama.py — Qwen2.5-coder:14b via Ollama HTTP-API (stream=False)
+#      → PROBLEM: 14B Q4 ≈ 8–9GB VRAM. Kein Platz für Draft-Modell gleichzeitig.
+#      → PROBLEM: stream=False → Antwort erst nach VOLLSTÄNDIGER Generierung.
+#      → PROBLEM: Thinking-Mode (Qwen3) multipliziert Latenz × 5.
+#    • light_phi.py — phi3:mini via Ollama (nur für Warte-Nachrichten benutzt!)
+#      → VERSCHWENDUNG: Wird nie für echte Antworten eingesetzt.
+#    • nano_intent.py — Regex/Pattern-Matcher (registriert, aber NICHT geroutet)
+#      → VERSCHWENDUNG: LogicRouter schickt 100% an Heavy.
+#
+#  LOGIC ROUTER (brain_core/logic_router.py):
+#    • Architektur-Prinzip: "Heavy antwortet IMMER auf echte User-Anfragen"
+#      → PROBLEM: Gegensatz zur Vision (Dreischicht-Modell).
+#    • Load-Level-basiertes Routing existiert, aber nur für Defer-Entscheidung.
+#    • _build_system_prompt() ist komplex (Consciousness, Memory, Plugins, Ambient)
+#      → MUSS ERHALTEN BLEIBEN. Jede Änderung am Router muss Prompt-Building behalten.
+#
+#  ACTION TAGS:
+#    • Parsing passiert NACH vollständiger LLM-Antwort in voice/pipeline.py
+#      → PROBLEM: Kein Streaming, kein Early-Execution.
+#      → Vision will: Action Tags feuern WÄHREND der Antwort gestreamt wird.
+#
+#  MEMORY SYSTEM (brain_core/memory/):
+#    • 3-Layer: Working (RAM) + Episodic (Embeddings/SQLite) + Semantic (Fakten)
+#    • SalienceFilter, DiaryWriter, BackgroundConsolidator
+#    • recall_context() < 200ms — EXZELLENT, muss erhalten bleiben.
+#    • Consolidation nutzt Heavy-Engine im Idle → könnte auf Light-Engine verschoben werden.
+#
+#  BRAIN EGO (brain_ego/):
+#    • Consciousness (Global Workspace Thread) → Prompt-Prefix für ALLE LLM-Calls
+#    • Interoception → Hardware-Metriken als Emotionen
+#    • IdentityAnchor → Unveränderliche Kern-Direktiven
+#    • InternalMonologue → Idle-Gedanken via Light-Engine
+#    • KOMPLETT ERHALTEN. Kein Umbau nötig.
+#
+#  VOICE PIPELINE (brain_core/voice/pipeline.py, 4096 Zeilen):
+#    • VAD → STT (faster-whisper) → LLM → TTS (Piper)
+#    • Emotion-Engine, PitchAnalyzer, AmbientIntelligence
+#    • StreamingSTT existiert bereits! (streaming_stt.py — LocalAgreement, Partials)
+#    • Two-Phase Response: Bridge spricht nach 2.5s wenn LLM zu langsam
+#    • Self-Mute während TTS aktiv
+#    • _ambient_transcript: Passiver Kontext-Buffer (ZORA-Awareness)
+#    → Streaming-STT + Two-Phase sind gute Grundlage. Müssen erweitert werden.
+#
+#  EXECUTIVE ARM / EVOLUTION LAB:
+#    • Agentic Loop (max 10 Steps), PolicyEngine, Toolset
+#    • Self-Improvement Engine mit Proposals + User-Bestätigung
+#    • ERHALTEN. Keine Änderung nötig für Phase 1.
+#
+#  INFRASTRUKTUR:
+#    • Docker: Postgres, Redis, Mosquitto, Ollama
+#    • Ollama läuft als Docker-Container mit GPU-Passthrough
+#    • Redis für Deferred Reasoning Queue
+#    • MQTT für Hardware-Discovery
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  VRAM-BUDGET (RTX 3060 12GB)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#  IST:
+#    Qwen2.5-coder:14b Q4_K_M     ≈ 8.5 GB VRAM
+#    KV-Cache (8192 ctx)           ≈ 0.8 GB
+#    CUDA/Driver Overhead          ≈ 0.5 GB
+#    faster-whisper (small)        ≈ 0.5 GB (geteilt, CPU-Offload möglich)
+#    ─────────────────────────────────────
+#    TOTAL                         ≈ 10.3 GB → 1.7 GB frei → KEIN Platz für Draft!
+#
+#  SOLL (Vision — Dreischicht):
+#    Oracle: Llama 3.1 8B Q4_K_M   ≈ 4.7 GB  (statt 14B → Intelligenz ≈ gleich für Dialog)
+#    Draft:  Llama 3.2 1B Q4_K_M   ≈ 0.7 GB  (Speculative Decoding Partner)
+#    KV-Cache (8192 ctx, beide)     ≈ 1.0 GB
+#    faster-whisper                 ≈ 0.5 GB
+#    CUDA/Driver                    ≈ 0.5 GB
+#    ─────────────────────────────────────
+#    TOTAL                         ≈ 7.4 GB → 4.6 GB Headroom! 🎉
+#
+#  ALTERNATIVE (Maximale Intelligenz):
+#    Oracle: Qwen2.5 7B Q5_K_M     ≈ 5.5 GB  (besser als 14B Q4 bei weniger VRAM!)
+#    Draft:  Qwen2.5 0.5B Q8_0     ≈ 0.6 GB
+#    KV-Cache                       ≈ 1.0 GB
+#    Whisper + CUDA                 ≈ 1.0 GB
+#    ─────────────────────────────────────
+#    TOTAL                         ≈ 8.1 GB → 3.9 GB Headroom
+#
+#  RAM-BUDGET (32 GB):
+#    System + Desktop               ≈ 4 GB
+#    Python (brain_core)             ≈ 1.5 GB
+#    Docker (Postgres+Redis+MQTT)    ≈ 2 GB
+#    Piper TTS + Audio               ≈ 0.5 GB
+#    Embedding-Service               ≈ 0.5 GB
+#    ─────────────────────────────────────
+#    TOTAL                          ≈ 8.5 GB → 23.5 GB frei für OS/Cache/Swap
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  DER BAUPLAN — 6 PHASEN
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#  Phase A: Streaming-Fundament (Action Tags + Token Stream)
+#  Phase B: Modell-Swap (14B → 8B Oracle + 1B Draft)
+#  Phase C: Nano-Intent Pre-Router (Instant Action Tags, <5ms)
+#  Phase D: Speculative Decoding Integration
+#  Phase E: KV-Cache Strategie (Multi-Session Warm-Keeping)
+#  Phase F: Memory-Triage (Light-Engine für Gedächtnis-Entscheidungen)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PHASE A: STREAMING-FUNDAMENT
+#  ✅ IMPLEMENTIERT — 2026-03-18
+#  - A1: generate_stream() in base_engine.py, heavy_llama.py, light_phi.py
+#  - A2: ActionStreamParser (brain_core/action_stream_parser.py) — NEU
+#  - A3: route_stream() in logic_router.py + StreamChunk Dataclass
+#  - A4: Voice Pipeline Streaming-Integration (Sentence-Buffer TTS)
+#  - A5: _execute_single_action() refactored aus _execute_action_tags()
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#  ZIEL: LLM-Antworten token-by-token streamen. Action Tags feuern SOFORT
+#        wenn im Token-Stream erkannt. TTS beginnt zu sprechen bevor Antwort
+#        fertig ist. Gefühlte Latenz: <500ms statt 3–8 Sekunden.
+#
+#  WARUM ZUERST: Streaming allein bringt den größten Latenz-Gewinn. Ohne
+#                Streaming ist Speculative Decoding wirkungslos für den User.
+#
+#  DATEIEN DIE GEÄNDERT WERDEN:
+#    • brain_core/engines/heavy_llama.py    → stream=True + async generator
+#    • brain_core/engines/light_phi.py      → stream=True + async generator
+#    • brain_core/engines/base_engine.py    → generate_stream() abstrakte Methode
+#    • brain_core/logic_router.py           → route_stream() Methode
+#    • brain_core/voice/pipeline.py         → Streaming-Verarbeitung
+#    • [NEU] brain_core/action_stream_parser.py → Token-Scanner für Action Tags
+#
+#  DATEIEN DIE NICHT GEÄNDERT WERDEN:
+#    • brain_ego/* — bleibt unverändert
+#    • brain_core/memory/* — bleibt unverändert
+#    • executive_arm/* — bleibt unverändert
+#    • shared/* — bleibt unverändert
+#
+#  ── SCHRITT A1: Streaming Generator in Engines ─────────────────────────────
+#
+#  heavy_llama.py: Neue Methode generate_stream()
+#    • Ollama /api/chat mit stream=True
+#    • Yield jedes Token/Chunk als es ankommt
+#    • Session-History weiterhin korrekt (sammelt Response am Ende)
+#    • _is_generating Flag wie bisher
+#    • Signature:
+#        async def generate_stream(
+#            self,
+#            prompt: str,
+#            system_prompt: str | None = None,
+#            session_id: str | None = None,
+#            options_override: dict | None = None,
+#        ) -> AsyncGenerator[str, None]:
+#            """Yield einzelne Tokens/Chunks während der Generierung."""
+#
+#  light_phi.py: Gleiche generate_stream() Methode (identisches Pattern).
+#
+#  base_engine.py: Abstrakte Methode generate_stream() hinzufügen.
+#    • Default-Implementierung: Ruft generate() auf und yielded das Ergebnis
+#      als ein einzelner Chunk (Rückwärtskompatibilität).
+#
+#  ── SCHRITT A2: ActionStreamParser (NEU) ────────────────────────────────────
+#
+#  Neue Datei: brain_core/action_stream_parser.py
+#
+#  Aufgabe: Scannt den Token-Stream in Echtzeit auf [ACTION:...] Tags.
+#           Feuert Actions SOFORT wenn ein Tag vollständig ist.
+#           Gibt gleichzeitig den "sprechbaren" Text (ohne Tags) weiter.
+#
+#  Architektur:
+#    class ActionStreamParser:
+#        def __init__(self, action_executor: Callable):
+#            self._buffer = ""
+#            self._in_tag = False
+#            self._tag_buffer = ""
+#            self._executor = action_executor  # async callback
+#            self._fired_tags: list[str] = []
+#
+#        async def feed(self, token: str) -> str:
+#            """
+#            Feed ein Token. Returns: sprechbarer Text (ohne Tags).
+#            Wenn ein vollständiger [ACTION:...] Tag erkannt wird,
+#            wird er SOFORT via _executor() ausgeführt und aus dem
+#            Output-Stream entfernt.
+#            """
+#            # State-Machine:
+#            #   NORMAL: Zeichen → Output
+#            #   "[" erkannt → Puffer starten
+#            #   "[ACTION:" erkannt → Tag-Modus
+#            #   "]" erkannt → Tag vollständig → executor() → flush
+#            #   Timeout/Fehlformat → Puffer als Text ausgeben
+#
+#        def get_clean_text(self) -> str:
+#            """Gesamter bisher akkumulierter Text OHNE Action Tags."""
+#
+#        def get_fired_tags(self) -> list[str]:
+#            """Liste aller bisher gefeuerten Action Tags."""
+#
+#  KRITISCH: Der Parser muss robust sein gegen:
+#    • Unvollständige Tags am Stream-Ende (→ Buffer timeout)
+#    • Verschachtelte Klammern (→ nur [ACTION: erkennen)
+#    • Mehrere Tags in einer Antwort
+#    • Tags mitten im Satz ("Mach ich![ACTION:ha_call ...] Noch was?")
+#
+#  ── SCHRITT A3: route_stream() im LogicRouter ──────────────────────────────
+#
+#  Neue Methode in logic_router.py: route_stream()
+#    • Gleiche Routing-Logik wie route() (Load-Level, Defer, etc.)
+#    • Aber: Yielded Tokens statt auf vollständige Antwort zu warten
+#    • Nutzt ActionStreamParser intern
+#    • Signature:
+#        async def route_stream(
+#            self, request: SomaRequest,
+#        ) -> AsyncGenerator[StreamChunk, None]:
+#            """Streame die Antwort Token für Token."""
+#
+#    StreamChunk Dataclass:
+#        class StreamChunk(BaseModel):
+#            text: str           # Sprechbarer Text-Chunk
+#            is_final: bool      # Letzter Chunk?
+#            action_fired: str | None  # Wenn ein Action Tag gefeuert wurde
+#            engine_used: str
+#            latency_ms: float   # Zeit seit Request-Start
+#
+#  BESTEHENDE route() Methode bleibt als Fallback (API-Kompatibilität).
+#
+#  ── SCHRITT A4: Voice Pipeline → Streaming-Integration ─────────────────────
+#
+#  In voice/pipeline.py (_handle_soma_request):
+#    • Statt: response = await self._logic_router.route(request)
+#    • Neu:   async for chunk in self._logic_router.route_stream(request):
+#    • TTS bekommt Sätze sobald ein Satzende erkannt wird (. ! ?)
+#      → "Sentence-Buffer": Sammle Tokens bis Satzende, dann TTS.speak(satz)
+#    • Action Tags feuern sofort (via ActionStreamParser im route_stream)
+#    • Bridge-Response (Two-Phase) bleibt als Fallback wenn erster Token >2.5s
+#
+#  Sentence-Buffer Logik:
+#    sentence_buffer = ""
+#    async for chunk in route_stream(request):
+#        sentence_buffer += chunk.text
+#        if chunk.text.rstrip().endswith((".", "!", "?", "…")):
+#            asyncio.create_task(tts.speak(sentence_buffer, emotion))
+#            sentence_buffer = ""
+#        if chunk.action_fired:
+#            # Already fired by parser — log to dashboard
+#            await self._emit("action", chunk.action_fired, "STREAM_ACTION")
+#    # Flush remaining buffer
+#    if sentence_buffer.strip():
+#        await tts.speak(sentence_buffer, emotion)
+#
+#  ── SCHRITT A5: Dashboard WebSocket Streaming ───────────────────────────────
+#
+#  broadcast_thought() bereits vorhanden — erweitern um streaming-spezifische Events:
+#    • "stream_start" → Dashboard zeigt Live-Typing-Indikator
+#    • "stream_token" → Dashboard zeigt Token in Echtzeit
+#    • "stream_action" → Dashboard highlightet gefeuerte Action
+#    • "stream_end" → Dashboard zeigt finale Antwort
+#
+#  TESTS FÜR PHASE A:
+#    1. test_streaming.py: Ollama Streaming funktioniert + Tokens kommen einzeln
+#    2. test_action_parser.py: Tags werden korrekt extrahiert und gefeuert
+#    3. test_sentence_buffer.py: Sätze werden korrekt gesplittet für TTS
+#    4. Manuell: Latenz-Messung erste Silbe (Ziel: <500ms nach STT)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PHASE B: MODELL-SWAP (Optimales Modell-Paar für 12GB VRAM)
+#  ✅ IMPLEMENTIERT — 2026-03-18
+#  - B1: Modelle: Qwen3:8b (Oracle, ~4.7GB) + Qwen3:1.7b (Draft, ~1.2GB)
+#  - B2: config.py Defaults aktualisiert + warm-pool Settings (keep_alive)
+#  - B3: .env aktualisiert: LIGHT_MODEL=qwen3:1.7b, MAX_LOADED=3, keep_alive Params
+#  - B4: docker-compose.yml: OLLAMA_MAX_LOADED_MODELS=3
+#  - B5: heavy_llama.py + light_phi.py: keep_alive in ALLEN API-Calls
+#  - B6: Idle-Unload von 10s → 120s (Oracle bleibt warm)
+#  - VRAM-Budget: Oracle ~4.7 + Draft ~1.2 + Whisper ~0.5 + KV ~1.0 = ~7.4GB → 4.6GB frei!
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#  ZIEL: Von einem einzelnen 14B-Modell auf ein optimales Oracle+Draft Paar
+#        wechseln das GLEICHZEITIG im VRAM liegt.
+#
+#  WARUM: Speculative Decoding (Phase D) braucht Oracle+Draft gleichzeitig.
+#         14B ist zu groß dafür. 8B Q4 + 1B Q4 = perfekt für 12GB.
+#
+#  ENTSCHEIDUNG: Welches Oracle-Modell?
+#
+#    Option 1: Llama 3.1 8B Q4_K_M (4.7 GB VRAM)
+#      + Breites Allgemeinwissen, gut Deutsch
+#      + Riesen-Community, viele Finetuned-Varianten
+#      + Speculative Decoding mit Llama 3.2 1B perfekt kompatibel (gleiche Familie)
+#      - Kein nativer Thinking-Mode
+#
+#    Option 2: Qwen2.5 7B Q5_K_M (5.5 GB VRAM)
+#      + Exzellent für Code + Deutsch
+#      + Thinking-Mode verfügbar (Qwen3-Varianten)
+#      - Draft-Modell-Kompatibilität unsicher (Qwen 0.5B als Draft?)
+#
+#    Option 3: Gemma 2 9B Q4_K_M (5.5 GB VRAM)
+#      + Google-Qualität, gutes Deutsch
+#      - Kein offizieller 1B Draft-Partner für Speculative Decoding
+#
+#  → EMPFEHLUNG: Llama 3.1 8B + Llama 3.2 1B
+#    Grund: Gleiche Tokenizer-Familie = höchste Draft-Akzeptanzrate bei
+#           Speculative Decoding. Qwen2.5 7B als Fallback wenn Dialog-
+#           Qualität nicht ausreicht.
+#
+#  DATEIEN DIE GEÄNDERT WERDEN:
+#    • brain_core/config.py          → neue Modell-Defaults
+#    • .env                          → Modell-Namen aktualisieren
+#    • docker-compose.yml            → Ollama OLLAMA_NUM_PARALLEL anpassen
+#
+#  ── SCHRITT B1: Modelle vorinstallieren ────────────────────────────────────
+#
+#    ollama pull llama3.1:8b-instruct-q4_K_M
+#    ollama pull llama3.2:1b-instruct-q4_K_M
+#
+#    Falls Qualitätstest enttäuschend:
+#    ollama pull qwen2.5:7b-instruct-q5_K_M
+#    ollama pull qwen2.5:0.5b-instruct-q8_0
+#
+#  ── SCHRITT B2: Config anpassen ────────────────────────────────────────────
+#
+#    config.py:
+#      ollama_heavy_model: str = "llama3.1:8b-instruct-q4_K_M"
+#      ollama_light_model: str = "llama3.2:1b-instruct-q4_K_M"  # Draft-Modell!
+#      ollama_num_parallel: int = 2   # Beide gleichzeitig laden
+#      ollama_max_loaded_models: int = 2
+#
+#    .env:
+#      OLLAMA_HEAVY_MODEL=llama3.1:8b-instruct-q4_K_M
+#      OLLAMA_LIGHT_MODEL=llama3.2:1b-instruct-q4_K_M
+#
+#  ── SCHRITT B3: Beide Modelle warm halten ──────────────────────────────────
+#
+#    heavy_llama.py: keep_alive Strategie anpassen.
+#      • Statt Idle-Unload nach 10s → keep_alive="5m" (Ollama Parameter)
+#      • Draft-Modell IMMER im VRAM (keep_alive=-1)
+#      • Oracle-Modell mindestens 2 Minuten (typische Gesprächspause)
+#
+#    Neues Konzept: "Warm Pool"
+#      • Beim Start: Beide Modelle einmal ansprechen → in VRAM laden
+#      • Draft bleibt PERMANENT (0.7GB — vernachlässigbar)
+#      • Oracle: 2min Idle → Unload. Sofort Reload bei nächstem Request (~1–2s)
+#
+#  ── SCHRITT B4: Qualitäts-Benchmark ─────────────────────────────────────────
+#
+#    Test-Script (test_model_quality.py):
+#      • 20 typische SOMA-Anfragen (Deutsch, Smart Home, Smalltalk, Technisch)
+#      • Vergleich: Qwen2.5-coder:14b vs Llama3.1:8b vs Qwen2.5:7b
+#      • Bewertungskriterien: Korrektheit, Natürlichkeit, Action-Tag-Qualität
+#      • Latenz-Messung: Time-to-First-Token + Total-Completion
+#
+#  TESTS FÜR PHASE B:
+#    1. Beide Modelle gleichzeitig im VRAM (nvidia-smi Validierung)
+#    2. Dialog-Qualität mindestens so gut wie mit 14B
+#    3. Action-Tags werden korrekt generiert
+#    4. VRAM-Verbrauch < 8 GB für beide Modelle zusammen
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PHASE C: NANO-INTENT PRE-ROUTER (Instant Action Tags, <5ms)
+#  ✅ IMPLEMENTIERT — 2026-03-18
+#  - C1: NanoIntentEngine erweitert: Timer, Volume, Media-Next/Prev/Stop/Pause Patterns
+#  - C2: nano_action_map.py (NEU) — Intent → [ACTION:...] Mapping
+#  - C3: Nano Pre-Route in route_stream() — feuert SOFORT, Oracle bestätigt parallel
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#  ZIEL: Offensichtliche Befehle ("Licht an", "Musik stopp") werden
+#        VOR dem LLM erkannt und ausgeführt. Das LLM generiert nur noch
+#        die natürliche Bestätigungs-Antwort PARALLEL zur Ausführung.
+#
+#  WARUM: "Licht an" braucht kein 8B-Modell. Regex erkennt das in <1ms.
+#         Die Aktion wird SOFORT gefeuert. Das LLM liefert nur die
+#         menschliche Antwort ("Mach ich, Licht geht an!") nach.
+#
+#  ARCHITEKTUR:
+#
+#    [User: "Soma, mach das Licht im Bad an"]
+#         │
+#         ▼
+#    [NanoIntentEngine.parse_intent()] ──► Intent erkannt? Confidence > 0.8?
+#         │                                         │
+#         │ JA (< 5ms)                              │ NEIN
+#         ▼                                         ▼
+#    [Action SOFORT feuern]                 [Weiter an Oracle-LLM]
+#    [HA-Call: light.turn_on]               [Streaming-Antwort]
+#         │
+#         ▼ (parallel, non-blocking)
+#    [Oracle-LLM: "Klar, Licht ist an!"]
+#    → TTS spricht Bestätigung
+#
+#  DATEIEN DIE GEÄNDERT WERDEN:
+#    • brain_core/engines/nano_intent.py    → Erweitern: mehr Patterns, HA-Integration
+#    • brain_core/logic_router.py           → Pre-Route: Nano VOR Heavy
+#    • brain_core/voice/pipeline.py         → Nano-Result + parallele LLM-Bestätigung
+#    • [NEU] brain_core/engines/nano_action_map.py → Intent → Action Tag Mapping
+#
+#  ── SCHRITT C1: NanoIntentEngine aufbohren ─────────────────────────────────
+#
+#  nano_intent.py:
+#    • Bestehende Patterns behalten + erweitern:
+#      - Erinnerungs-Patterns ("erinnere mich in 5 Minuten", "Timer 10 Minuten")
+#      - Media-Patterns erweitern ("nächstes Lied", "Playlist XY", "lauter/leiser")
+#      - System-Patterns ("wie spät ist es", "wie wird das Wetter")
+#    • Neues Feld in ParsedIntent: action_tag: str | None
+#      → Der fertige [ACTION:...] String, sofort executable
+#    • Confidence-Threshold: 0.8 für sofortige Ausführung (aktuell 0.5)
+#
+#  ── SCHRITT C2: Nano-Action-Map (NEU) ──────────────────────────────────────
+#
+#  Neue Datei: brain_core/engines/nano_action_map.py
+#    • Mapping: ParsedIntent → [ACTION:...] String
+#    • Beispiele:
+#        intent="light_control", action="an", room="bad"
+#        → '[ACTION:ha_call domain="light" service="turn_on" entity_id="light.bad"]'
+#
+#        intent="media_control", action="next"
+#        → '[ACTION:media_next]'
+#
+#        intent="reminder", minutes=5, topic="Nudeln"
+#        → '[ACTION:reminder minutes=5 topic="Nudeln"]'
+#
+#    • Braucht: HA-Entity-Registry (welche Lichter/Geräte gibt es?)
+#      → Kann aus ha_bridge.py gelesen werden (bereits vorhanden)
+#
+#  ── SCHRITT C3: Pre-Route im LogicRouter ───────────────────────────────────
+#
+#  logic_router.py — route() und route_stream() erweitern:
+#
+#    async def route_stream(self, request):
+#        # ── NANO PRE-CHECK (<5ms) ──
+#        nano = self._engines.get("nano")
+#        if nano:
+#            intent = nano.parse_intent(request.prompt)
+#            if intent and intent.confidence >= 0.8 and intent.action_tag:
+#                # Aktion SOFORT feuern (fire-and-forget)
+#                asyncio.create_task(self._execute_action(intent.action_tag))
+#                # Parallel: Oracle generiert natürliche Bestätigung
+#                # (mit Kontext dass Aktion schon läuft)
+#                request.metadata["nano_action_fired"] = intent.action_tag
+#                request.metadata["nano_intent"] = intent.intent
+#                # Weiter an Oracle für die Bestätigung...
+#
+#    System-Prompt Erweiterung wenn nano_action_fired:
+#        "Du hast gerade die Aktion '{action_tag}' ausgeführt.
+#         Bestätige dem Nutzer kurz und natürlich (1 Satz).
+#         KEIN neuer Action-Tag nötig — die Aktion läuft bereits!"
+#
+#  ── SCHRITT C4: Dashboard-Integration ──────────────────────────────────────
+#
+#    • Nano-Hit → sofortiges Dashboard-Event ("⚡ Nano: Licht an, Bad, <3ms")
+#    • Eigener Zähler in IntentStats für Nano-Treffer
+#
+#  TESTS FÜR PHASE C:
+#    1. "Licht an im Bad" → HA-Call in <10ms, TTS-Bestätigung in <500ms
+#    2. "Nächstes Lied" → Media-Skip in <10ms
+#    3. "Wie spät ist es" → Plugin-Trigger in <10ms
+#    4. "Was denkst du über KI-Ethik?" → Nano: kein Match → Oracle-Route
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PHASE D: SPECULATIVE DECODING INTEGRATION
+#  ✅ IMPLEMENTIERT — 2026-03-18
+#  - D1: speculative_engine.py (NEU) — Application-Level Spec. Decoding über Ollama
+#        Draft (qwen3:1.7b) generiert Batch-Tokens, Oracle (qwen3:8b) verifiziert
+#  - D2: config.py: speculative_enabled + speculative_draft_batch Settings
+#  - D3: main.py: SpeculativeEngine Boot + Registration + Shutdown
+#  - D4: logic_router.py route_stream(): Speculative > Heavy > Defer Priorität
+#  - D5: Nano-Confirm nutzt Speculative Engine wenn verfügbar
+#  - D6: Warm-Pool: Beide Modelle bei Start in VRAM geladen
+#  - Fallback: Wenn Draft fehlschlägt → pure Oracle-Streaming (graceful degradation)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#  ZIEL: Draft-Modell (1B) generiert spekulative Tokens, Oracle (8B)
+#        verifiziert in einem einzigen Forward Pass. 2–4× Speedup.
+#
+#  STRATEGIE-ENTSCHEIDUNG:
+#
+#    Option 1: llama.cpp Server mit --draft-model (nativ)
+#      + Speculative Decoding auf C++-Ebene (maximal effizient)
+#      + KV-Cache Management eingebaut
+#      - Ollama-Container müsste ersetzt werden
+#      - Weniger komfortable Model-Verwaltung
+#
+#    Option 2: Ollama + Application-Level Speculative Decoding
+#      + Ollama-Infrastruktur bleibt erhalten
+#      + Ollama kann ab v0.5+ parallel Modelle laden
+#      - Speculative Decoding auf Python-Ebene (langsamer als nativ)
+#      - Logits-Vergleich über HTTP-API ist overhead-intensiv
+#
+#    Option 3: Ollama für Oracle + llama.cpp für Draft (Hybrid)
+#      + Ollama bleibt für Heavy (bekannte Integration)
+#      + llama.cpp-Server als leichtgewichtiger Draft-Generator
+#      - Zwei verschiedene Backends pflegen
+#
+#  → EMPFEHLUNG: Option 1 — llama.cpp Server (llama-server)
+#    Grund: Nativer Speculative Decoding Support ist 3-5× effizienter als
+#           Application-Level. Ollama ist intern sowieso llama.cpp.
+#           Der Umstieg ist minimal — API ist fast identisch (/v1/chat/completions).
+#
+#  ALTERNATIV (falls Ollama bleiben soll): Option 2 mit vereinfachtem
+#  Application-Level Speculative Decoding (Draft generiert Entwurf,
+#  Oracle korrigiert — nicht token-by-token, sondern satzweise).
+#
+#  DATEIEN DIE GEÄNDERT WERDEN:
+#    • docker-compose.yml                          → llama-server statt ollama
+#    • brain_core/config.py                        → llama-server Config
+#    • brain_core/engines/heavy_llama.py            → llama-server API
+#    • brain_core/engines/light_phi.py              → Draft-Engine
+#    • [NEU] brain_core/engines/speculative_engine.py → Speculative Decoding Orchestrator
+#
+#  ── SCHRITT D1: llama-server Setup ─────────────────────────────────────────
+#
+#  docker-compose.yml — Ollama-Container durch llama-server ersetzen:
+#
+#    llama-server:
+#      image: ghcr.io/ggerganov/llama.cpp:server
+#      container_name: soma-llama
+#      command: >
+#        --model /models/llama-3.1-8b-instruct-q4_k_m.gguf
+#        --model-draft /models/llama-3.2-1b-instruct-q4_k_m.gguf
+#        --draft-max 8
+#        --draft-min 1
+#        --draft-p-min 0.5
+#        --gpu-layers 99
+#        --ctx-size 8192
+#        --parallel 2
+#        --port 8080
+#        --host 0.0.0.0
+#      volumes:
+#        - ./models:/models
+#      deploy:
+#        resources:
+#          reservations:
+#            devices:
+#              - capabilities: [gpu]
+#
+#  → Speculative Decoding komplett in C++, kein Python-Overhead!
+#  → API-Endpunkt: http://localhost:8080/v1/chat/completions (OpenAI-kompatibel)
+#
+#  ── SCHRITT D2: SpeculativeEngine (NEU) ────────────────────────────────────
+#
+#  Neue Datei: brain_core/engines/speculative_engine.py
+#    • Wrapper um llama-server's OpenAI-kompatible API
+#    • Erbt von BaseEngine
+#    • generate() und generate_stream() nutzen /v1/chat/completions
+#    • Speculative Decoding passiert transparent im Server
+#    • Logging: Akzeptanzrate der Draft-Tokens (für Tuning)
+#
+#  ── SCHRITT D3: Heavy/Light Engine Adapter ─────────────────────────────────
+#
+#  heavy_llama.py und light_phi.py:
+#    • Können als Fallback bestehen bleiben (Ollama-Backend)
+#    • Primär nutzt der LogicRouter jetzt die SpeculativeEngine
+#    • Config-Switch: config.speculative_enabled = True
+#
+#  ── SCHRITT D4: Benchmark & Tuning ─────────────────────────────────────────
+#
+#    • draft-max (wie viele Tokens Draft vorschlägt): Start mit 8
+#    • draft-p-min (Min. Confidence für Draft): Start mit 0.5
+#    • Messen: Tokens/Sekunde mit vs ohne Speculative Decoding
+#    • Ziel: ≥ 30 tok/s (aktuell vermutlich ~10-15 tok/s mit 14B)
+#
+#  TESTS FÜR PHASE D:
+#    1. Tokens/Sekunde messen (Ziel: 2-4× Speedup vs Single-Model)
+#    2. Antwortqualität identisch zu Oracle-Only
+#    3. VRAM-Verbrauch innerhalb Budget (< 8 GB für beide Modelle)
+#    4. Stress-Test: 10 aufeinanderfolgende Anfragen ohne Crash
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PHASE E: KV-CACHE STRATEGIE (Multi-Session Warm-Keeping)
+#  ✅ IMPLEMENTIERT — 2026-03-18
+#  - E1: _build_system_prompt() aufgeteilt in _build_static_prompt() + _build_dynamic_context()
+#        Statisch: Persona, Action-Tags, Sicherheit, Plugins (KV-Cache freundlich)
+#        Dynamisch: Consciousness, Memory, Emotion, Ambient (ändert sich pro Turn)
+#  - E2: SessionState erweitert: set_split_prompt(), static_system_hash, trim_stale()
+#        to_messages() sendet static + dynamic als separate system-Messages → Cache Hit
+#  - E3: _apply_split_prompt_to_session() für KV-Cache-optimierte Prompt-Delivery
+#  - E4: Config: session_stale_trim_turns=6, session_max_idle_secs=300
+#  - Rückwärtskompatibel: _build_system_prompt() ruft intern beide auf
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#  ZIEL: KV-Cache für laufende Gespräche warm halten. Kein Re-Processing
+#        des gesamten Kontexts bei jedem neuen Turn.
+#
+#  IST-ZUSTAND:
+#    • Ollama managed KV-Cache intern
+#    • SOMA sendet bei jedem Request die GESAMTE Message-History (base_engine.py)
+#    • Ollama erkennt Prefix-Match und skippt Re-Processing → semi-warm
+#    • Problem: System-Prompt ändert sich (Consciousness, Emotion) → Cache-Miss
+#
+#  SOLL-ZUSTAND:
+#    • System-Prompt in statischen + dynamischen Teil splitten
+#    • Statischer Teil (Persona, Action-Tags, Sicherheit): CACHET
+#    • Dynamischer Teil (Emotion, Memory): Als User-Message injizieren
+#    • Ergebnis: 80% des System-Prompts bleibt zwischen Turns identisch → Cache-Hit
+#
+#  DATEIEN DIE GEÄNDERT WERDEN:
+#    • brain_core/logic_router.py       → Prompt-Splitting
+#    • brain_core/engines/base_engine.py → Cache-Aware Session
+#    • brain_core/config.py             → Cache-Tuning-Parameter
+#
+#  ── SCHRITT E1: System-Prompt Splitting ────────────────────────────────────
+#
+#  _build_system_prompt() in logic_router.py aufteilen:
+#
+#    STATISCH (ändert sich NIE während einer Session):
+#      • SOMA Persona ("Du bist SOMA...")
+#      • Action-Tag-Referenz (komplett)
+#      • Sicherheitsregeln
+#      • System-Profil
+#      → Wird EINMAL als system-Message gesetzt und NICHT verändert.
+#
+#    DYNAMISCH (ändert sich bei jedem Turn):
+#      • Consciousness-Prefix (Körpergefühl, Stimmung)
+#      • Memory-Context (Erinnerungen, Fakten)
+#      • Emotionaler Kontext
+#      • Ambient Transcript
+#      → Wird als eigene "system"-Message NACH dem statischen Teil eingefügt.
+#         Oder als letzte User-Message mit Prefix "[KONTEXT]".
+#
+#  ── SCHRITT E2: Cache-Aware Session Management ────────────────────────────
+#
+#  base_engine.py → SessionState erweitern:
+#    • _static_system_hash: Hash des statischen System-Prompts
+#    • Wenn Hash identisch → Ollama/llama-server cached den Prefix
+#    • Nur dynamischer Teil wird neu berechnet
+#
+#  ── SCHRITT E3: Multi-Room Session Isolation ──────────────────────────────
+#
+#  Bereits vorhanden: session_id pro Voice-Session.
+#  Erweiterung:
+#    • session_id = f"voice_{room_id}" → pro Raum eigene Session
+#    • Jede Session hat eigenen History-Buffer
+#    • KV-Cache wird pro Session gehalten (llama-server: --parallel 2-4)
+#    • Stale Sessions (>5min idle): History auf letzte 3 Turns trimmen
+#
+#  TESTS FÜR PHASE E:
+#    1. Zweiter Turn im gleichen Gespräch: <50% Prompt-Eval-Time vs erster Turn
+#    2. Multi-Room: Session A und B haben unterschiedliche Kontexte
+#    3. nvidia-smi: KV-Cache belegt <2 GB bei 2 parallelen Sessions
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PHASE F: MEMORY-TRIAGE (Light-Engine für Gedächtnis-Entscheidungen)
+#  ✅ IMPLEMENTIERT — 2026-03-18
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#  ZIEL: Ein leichtgewichtiges Modell entscheidet in Echtzeit,
+#        welche Informationen ins Kurz- vs Langzeitgedächtnis gehören.
+#        Spart Heavy-Engine-Zyklen für Consolidation.
+#
+#  IST-ZUSTAND:
+#    • SalienceFilter (brain_core/memory/salience_filter.py) ist RULE-BASED
+#      → Funktioniert, aber kann subtile Bedeutung nicht erkennen
+#    • BackgroundConsolidator nutzt Heavy-Engine für Episoden → Fakten
+#      → TEUER: Heavy-Engine wird für Hintergrund-Tasks blockiert
+#    • DiaryWriter nutzt Heavy-Engine
+#      → TEUER: Ein Tagebuch-Eintrag blockiert User-Anfragen
+#
+#  SOLL-ZUSTAND:
+#    • SalienceFilter bleibt als schneller First-Pass (0ms, regel-basiert)
+#    • Light-Engine (1B Draft-Modell) für:
+#      a) Salience-Bewertung bei Grenzfällen ("Ist das wichtig?")
+#      b) Consolidation (Episoden → Fakten)
+#      c) Diary-Einträge (narrative Zusammenfassungen)
+#    • Heavy-Engine wird NUR noch für User-Anfragen verwendet
+#    • Qualitätskontrolle: Heavy-Engine prüft stichprobenartig (1 von 10)
+#      ob Light-Engines Gedächtnis-Entscheidungen korrekt waren
+#
+#  DATEIEN DIE GEÄNDERT WERDEN:
+#    • brain_core/memory/integration.py        → set_consolidation_llm auf Light
+#    • brain_core/memory/integration.py        → set_diary_llm auf Light
+#    • brain_core/main.py                      → LLM-Callbacks umverdrahten
+#    • brain_core/memory/salience_filter.py    → Optional: LLM-enriched Salience
+#
+#  ── SCHRITT F1: Consolidation auf Light-Engine umstellen ───────────────────
+#
+#  main.py lifespan — Consolidation-LLM ändern:
+#
+#    # IST (main.py Zeile ~244):
+#    async def _consolidation_llm(prompt: str) -> str:
+#        return await heavy_engine.generate(prompt=prompt, system_prompt="")
+#    set_consolidation_llm(_consolidation_llm)
+#
+#    # SOLL:
+#    async def _consolidation_llm(prompt: str) -> str:
+#        return await light_engine.generate(prompt=prompt, system_prompt="")
+#    set_consolidation_llm(_consolidation_llm)
+#
+#  → Light-Engine (1B) kann Fakten extrahieren. Weniger eloquent,
+#    aber für strukturierte Extraktion (KATEGORIE|SUBJEKT|FAKT) ausreichend.
+#    Blockiert NICHT die Heavy-Engine.
+#
+#  ── SCHRITT F2: Diary auf Light-Engine umstellen ───────────────────────────
+#
+#  Gleicher Pattern wie F1. Diary-Einträge sind kurze narrative Texte.
+#  1B-Modell kann das. Qualitätsverlust ist minimal und akzeptabel.
+#
+#  ── SCHRITT F3: Monolog auf Draft-Engine umstellen ─────────────────────────
+#
+#  InternalMonologue nutzt bereits Light-Engine → bleibt so.
+#  Wenn Draft = Light (1B), ist der Monolog automatisch auf Draft.
+#  KEIN UMBAU NÖTIG.
+#
+#  TESTS FÜR PHASE F:
+#    1. Consolidation läuft ohne Heavy-Engine-Blockade
+#    2. Fakten-Qualität mit Light-Engine: Stichprobe manuell prüfen
+#    3. Heavy-Engine wird NUR bei User-Anfragen aktiv (nvidia-smi Monitoring)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  REIHENFOLGE & ABHÄNGIGKEITEN
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#  Phase A (Streaming) ─────┐
+#                            ├──► Phase D (Speculative Decoding)
+#  Phase B (Modell-Swap) ───┘         │
+#                                      ▼
+#  Phase C (Nano Pre-Route) ◄── unabhängig, kann parallel zu A/B laufen
+#                                      │
+#  Phase E (KV-Cache) ◄─────── nach Phase D (llama-server muss stehen)
+#                                      │
+#  Phase F (Memory-Triage) ◄── unabhängig, kann jederzeit umgestellt werden
+#
+#  EMPFOHLENE REIHENFOLGE:
+#    1. Phase F (5 Min, sofort spürbar: Heavy-Engine entlasten)
+#    2. Phase A (1-2 Tage, größter Latenz-Gewinn)
+#    3. Phase C (0.5 Tage, Nano-Routing für sofortige Actions)
+#    4. Phase B (0.5 Tage, Modelle installieren + Config)
+#    5. Phase D (1 Tag, llama-server + Speculative Decoding)
+#    6. Phase E (0.5 Tage, Cache-Optimierung als Feinschliff)
+#
+#  Gesamtaufwand: ~4-5 Arbeitstage
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  LATENZ-ZIELE (End-to-End, nach allen Phasen)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#  ┌─────────────────────────────────────────────────────────────┐
+#  │  IST (aktuell)                   │  SOLL (nach Phase A-F)  │
+#  ├──────────────────────────────────┼──────────────────────────┤
+#  │  VAD → STT:             ~200ms   │  ~200ms (unverändert)    │
+#  │  STT → Action Tag:     3000-8000ms│  <200ms (Nano Pre-Route) │
+#  │  STT → erste Silbe TTS: 3000-8000ms│ <500ms (Streaming)     │
+#  │  STT → vollständige Antwort: 8-15s│  1-3s (Spec. Decoding)  │
+#  │  Tokens/Sekunde:         ~10-15  │  ~30-50 (Spec. Decoding) │
+#  │  Smart Home Aktion:     3-8s     │  <50ms (Nano Instant)    │
+#  └──────────────────────────────────┴──────────────────────────┘
+#
+#  Gesamter Round-Trip (User spricht → Soma antwortet hörbar):
+#    IST:   ~4-10 Sekunden
+#    SOLL:  ~0.5-1.5 Sekunden (bei Nano-Matches: <0.3s)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  WAS NICHT ANGEFASST WIRD (EXPLIZITE BESTANDSGARANTIEN)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#  ✅ brain_ego/ — Consciousness, Interoception, IdentityAnchor, Monologue
+#     → Alles bleibt exakt wie es ist. Prompt-Prefix wird weiter generiert.
+#
+#  ✅ brain_core/memory/ — 3-Layer System, Salience, Diary, Consolidation
+#     → Nur LLM-Callbacks ändern sich (Phase F). Architektur bleibt.
+#
+#  ✅ executive_arm/ — Agency, Toolset, PolicyEngine, Browser, Terminal
+#     → Wird nicht angefasst. Agent nutzt weiterhin Heavy-Engine.
+#
+#  ✅ evolution_lab/ — PluginManager, SelfImprover, SandboxRunner
+#     → Bleibt. Plugin-Generierung nutzt weiterhin Heavy-Engine.
+#
+#  ✅ brain_core/voice/ — VAD, STT, TTS, Emotion, Ambient, Streaming-STT
+#     → Nur pipeline.py wird erweitert (Streaming-Verarbeitung).
+#       Sub-Engines bleiben unverändert.
+#
+#  ✅ brain_core/safety/ — PitchAnalyzer, PromptInjector
+#     → Keine Änderung.
+#
+#  ✅ brain_core/discovery/ — MQTT, mDNS, HA-Bridge, Orchestrator
+#     → Keine Änderung.
+#
+#  ✅ shared/ — health_schemas, resilience, audio_types
+#     → Keine Änderung (ggf. neue StreamChunk-Schema in health_schemas).
+#
+#  ✅ soma_face_tablet/ — WebGL Sinuswelle, WebSocket Client
+#     → Keine Änderung (bekommt automatisch die neuen Stream-Events).
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  RISIKEN & MITIGATIONEN
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#  RISIKO 1: Llama 3.1 8B generiert schlechtere Action Tags als Qwen2.5 14B
+#    → MITIGATION: Benchmark in Phase B4. Fallback: Qwen2.5 7B Q5.
+#    → Action-Tag-Prompt ist sehr explizit. 8B-Modelle können das.
+#
+#  RISIKO 2: Speculative Decoding Draft-Akzeptanzrate zu niedrig (<50%)
+#    → MITIGATION: Gleiche Modell-Familie (Llama 3.x) maximiert Akzeptanz.
+#    → Tuning: draft-p-min anpassen (0.3-0.7 testen).
+#    → Fallback: Ohne Spec-Decoding ist Streaming allein schon 2-3× besser.
+#
+#  RISIKO 3: llama-server Migration bricht bestehende Ollama-Integration
+#    → MITIGATION: Ollama-Backend als Fallback behalten.
+#    → API ist zu 90% kompatibel (OpenAI-Format).
+#    → Config-Switch: config.backend = "llama-server" | "ollama"
+#
+#  RISIKO 4: Streaming-TTS klingt abgehackt (Satz-Splitting-Artefakte)
+#    → MITIGATION: Sentence-Buffer mit intelligenter Satzende-Erkennung.
+#    → Piper TTS ist sehr schnell (~50ms) — kurze Sätze klingen natürlich.
+#
+#  RISIKO 5: Memory-Qualität sinkt mit Light-Engine (Phase F)
+#    → MITIGATION: Stichproben-Validierung durch Heavy-Engine (1/10).
+#    → Rule-Based SalienceFilter bleibt als First-Pass (0ms).
+#    → Rollback: Consolidation zurück auf Heavy wenn Qualität leidet.
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  START-KOMMANDO
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#  Wenn du (Copilot / Claude Opus) diesen Bauplan liest:
+#
+#  1. Lies vision.txt für den vollen Kontext der Idee
+#  2. Arbeite die Phasen IN DER EMPFOHLENEN REIHENFOLGE ab:
+#     F → A → C → B → D → E
+#  3. Mach nach JEDER Phase einen lauffähigen Commit
+#  4. Teste nach jedem Schritt (die Tests stehen in jeder Phase)
+#  5. Fasse NICHT mehrere Phasen zusammen — eine nach der anderen
+#  6. Ändere NICHTS was unter "BESTANDSGARANTIEN" steht, außer ich sage es
+#
+#  Los geht's. Phase F zuerst — Heavy-Engine entlasten.
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PHASE G: DEEP-OPTIMIZATION ROUND (Post-Phase-F→E)
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Datum: 2025-07
+#  Status: ✅ IMPLEMENTIERT
+#  Ziel: ≤2s Response-Time, Action-Awareness, HA-State-Injection, Session-Trim
+#
+#  ─────────────────────────────────────────────────────────────────────────────
+#  G1: Engine-Priorität umgekehrt (logic_router.py)                        [✅]
+#  ─────────────────────────────────────────────────────────────────────────────
+#    VORHER: Speculative → Heavy → Defer (Round-Trip Spec = +500-2000ms)
+#    NACHHER: Heavy → Speculative → Defer
+#    Heavy = Pure Oracle Streaming → ~200ms First-Token (SCHNELLSTER Pfad)
+#    Speculative = Fallback NUR wenn Heavy beschaeftigt
+#
+#  ─────────────────────────────────────────────────────────────────────────────
+#  G2: Nano Instant Response (logic_router.py)                             [✅]
+#  ─────────────────────────────────────────────────────────────────────────────
+#    VORHER: Nano erkennt Intent → sendet trotzdem an LLM zur "Bestätigung" (1-3s!)
+#    NACHHER: Nano erkennt Intent → sofortige Template-Antwort (0ms LLM-Latenz)
+#    Templates: "Alles klar, [Gerät] wird [Aktion]." etc.
+#
+#  ─────────────────────────────────────────────────────────────────────────────
+#  G3: KV-Cache Split Prompt aktiviert (logic_router.py)                   [✅]
+#  ─────────────────────────────────────────────────────────────────────────────
+#    VORHER: _apply_split_prompt_to_session() existierte aber wurde NIE aufgerufen
+#    NACHHER: Wird VOR engine.generate_stream() aufgerufen wenn Session vorhanden
+#    Effekt: System-Prompt wird cached → nur User-Turn braucht Prefill = -300ms
+#
+#  ─────────────────────────────────────────────────────────────────────────────
+#  G4: Action-Awareness / Kurzzeitgedächtnis (NEU: action_awareness.py)    [✅]
+#  ─────────────────────────────────────────────────────────────────────────────
+#    NEUE DATEI: brain_core/action_awareness.py (479 Zeilen)
+#    → record_action(): Registriert jede gefeuerte Aktion mit Timestamp
+#    → get_action_context(): Generiert "DEINE LETZTEN AKTIONEN" fuer LLM-Prompt
+#    → Soma weiss jetzt: "Vor 2 Minuten habe ich das Licht eingeschaltet"
+#    → Max 50 Actions, 30min TTL, Auto-Cleanup
+#    → Aufrufer: pipeline.py (_stream_action_executor) + ha_bridge.py (call_service)
+#
+#  ─────────────────────────────────────────────────────────────────────────────
+#  G5: HA-State-Injection (ha_bridge.py + action_awareness.py)             [✅]
+#  ─────────────────────────────────────────────────────────────────────────────
+#    → ha_bridge.py komplett rewritten mit periodic sync (30s Intervall)
+#    → update_ha_states(): Bulk-Update aller HA-Entity-States
+#    → get_ha_state_context(): Generiert "SMART-HOME STATUS" fuer LLM-Prompt
+#    → Soma weiss jetzt: "Wohnzimmer-Licht ist seit 45 Minuten an (80%)"
+#    → Max 15 Entities im Kontext, sortiert nach aktiv-zuerst
+#    → Domain-spezifische Details (Temperatur, Helligkeit%, Media-Titel)
+#
+#  ─────────────────────────────────────────────────────────────────────────────
+#  G6: Bridge Timeout reduziert (pipeline.py)                              [✅]
+#  ─────────────────────────────────────────────────────────────────────────────
+#    VORHER: 2.5s Bridge-Timeout (zu lang, User wartet)
+#    NACHHER: 1.5s Bridge-Timeout
+#
+#  ─────────────────────────────────────────────────────────────────────────────
+#  G7: Memory Fetch Timeout (pipeline.py)                                  [✅]
+#  ─────────────────────────────────────────────────────────────────────────────
+#    VORHER: build_context_for_query() ohne Timeout → konnte blockieren
+#    NACHHER: asyncio.wait_for(..., timeout=0.2) → max 200ms
+#    Fallback: Leerer Kontext wenn Memory zu langsam (Antwort geht trotzdem)
+#
+#  ─────────────────────────────────────────────────────────────────────────────
+#  G8: Session Trim (logic_router.py)                                      [✅]
+#  ─────────────────────────────────────────────────────────────────────────────
+#    VORHER: Sessions wuchsen unbegrenzt → RAM-Leak + KV-Cache-Explosion
+#    NACHHER: trim_stale() nach jedem Stream (session_stale_trim_turns=6)
+#    Hält History bei max ~12 Turns (6 User + 6 Assistant)
+#
+#  ─────────────────────────────────────────────────────────────────────────────
+#  G9: Speculative Engine Rewrite (speculative_engine.py)                  [✅]
+#  ─────────────────────────────────────────────────────────────────────────────
+#    VORHER: Round-Trip Verifikation (539 Zeilen)
+#      → 2 HTTP-Calls pro Runde (Draft gen + Oracle verify)
+#      → Character-Level-Vergleich, MAX_SPECULATIVE_ROUNDS=50
+#      → Latenz-Addierer statt Latenz-Reduzierer!
+#    NACHHER: Draft-Prefill Architektur (~300 Zeilen)
+#      → Einfach: Pure Oracle Stream (schnellster First-Token)
+#      → Komplex: Draft generiert Hint (~200-400ms) → Oracle streamt mit Hint
+#      → KEIN Round-Trip, KEIN Verify, KEIN Token-Vergleich
+#      → Saubere Methoden: _draft_generate(), _oracle_stream(), _build_messages()
+#
+#  ─────────────────────────────────────────────────────────────────────────────
+#  G10: Dynamic Context Injection (logic_router.py)                        [✅]
+#  ─────────────────────────────────────────────────────────────────────────────
+#    _build_dynamic_context() injiziert jetzt:
+#      1. Action-Awareness-Kontext (letzte 10 Aktionen mit Zeitstempeln)
+#      2. HA-State-Kontext (aktuelle Geraetezustaende, max 15 Entities)
+#    → In den System-Prompt VOR dem LLM-Call eingefuegt
+#    → Soma hat jetzt "Situationsbewusstsein" fuer Smart-Home-Kontext
+#
+#  ─────────────────────────────────────────────────────────────────────────────
+#  MODIFIZIERTE DATEIEN:
+#  ─────────────────────────────────────────────────────────────────────────────
+#    brain_core/logic_router.py      — 5 Edits (G1, G2, G3, G8, G10)
+#    brain_core/action_awareness.py  — NEU (G4, G5)
+#    brain_core/discovery/ha_bridge.py — Full Rewrite (G5)
+#    brain_core/voice/pipeline.py    — 2 Edits (G6, G7)
+#    brain_core/engines/speculative_engine.py — Full Rewrite (G9)
+#
+#  ─────────────────────────────────────────────────────────────────────────────
+#  ERWARTETE PERFORMANCE-VERBESSERUNG:
+#  ─────────────────────────────────────────────────────────────────────────────
+#    Smart-Home-Commands: ~50ms (Nano Instant) statt ~2-4s
+#    Einfache Fragen:     ~200ms First-Token (Heavy Pure Oracle)
+#    Komplexe Fragen:     ~400-600ms First-Token (Draft-Prefill Fallback)
+#    Memory-Fetch:        max 200ms (Timeout-geschuetzt)
+#    Session-RAM:         Stabil (Trim nach jedem Stream)
+#    HA-Awareness:        Immer aktuell (30s Sync-Intervall)
+#    Action-Memory:       Letzte 30min verfuegbar im Kontext
+#
+#  SYNTAX-CHECK: Alle 5 Dateien ✅ (Pylance, keine Fehler)

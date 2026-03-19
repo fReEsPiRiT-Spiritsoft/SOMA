@@ -86,28 +86,101 @@ async def youtube_search(query: str, use_mpv: bool = False) -> str:
         return await open_url(url)
 
 
+async def _resolve_youtube_url(query: str, max_results: int = 5) -> str | None:
+    """
+    Nutzt yt-dlp um YouTube zu durchsuchen und die erste spielbare URL zu finden.
+    
+    ytdl://ytsearch1: scheitert oft weil das erste Ergebnis 'not available' ist.
+    Stattdessen: Mehrere Kandidaten holen → einzeln testen → erste funktionierende nehmen.
+    """
+    try:
+        # Schritt 1: Kandidaten-IDs holen (schnell, kein Download)
+        proc = await asyncio.create_subprocess_exec(
+            "yt-dlp",
+            f"ytsearch{max_results}:{query}",
+            "--flat-playlist",
+            "--print", "%(id)s",
+            "--no-warnings",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+        video_ids = [vid.strip() for vid in stdout.decode().strip().splitlines() if vid.strip()]
+
+        if not video_ids:
+            logger.warning("yt_resolve_no_results", query=query)
+            return None
+
+        logger.info("yt_resolve_candidates", query=query, count=len(video_ids))
+
+        # Schritt 2: Erste spielbare URL finden
+        for vid_id in video_ids:
+            url = f"https://www.youtube.com/watch?v={vid_id}"
+            check = await asyncio.create_subprocess_exec(
+                "yt-dlp",
+                "--simulate",
+                "-f", "bestaudio/best",
+                "--no-warnings",
+                url,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(check.communicate(), timeout=10.0)
+            if check.returncode == 0:
+                logger.info("yt_resolve_found", video_id=vid_id, url=url)
+                return url
+            else:
+                logger.debug("yt_resolve_skip", video_id=vid_id, 
+                             reason=stderr.decode()[:100])
+
+        logger.warning("yt_resolve_all_failed", query=query, tried=len(video_ids))
+        return None
+
+    except asyncio.TimeoutError:
+        logger.error("yt_resolve_timeout", query=query)
+        return None
+    except Exception as exc:
+        logger.error("yt_resolve_error", query=query, error=str(exc))
+        return None
+
+
 async def _play_via_mpv(query: str) -> str:
     """Spielt Audio direkt via mpv + yt-dlp (kein Browser nötig)."""
-    search_url = f"ytdl://ytsearch1:{query}"
+    # Erst spielbare URL finden (statt blindem ytsearch1)
+    url = await _resolve_youtube_url(query)
+
+    if not url:
+        # Fallback: Browser öffnen
+        logger.warning("mpv_fallback_browser", query=query)
+        browser_url = _build_youtube_autoplay_url(query)
+        return await open_url(browser_url)
+
     try:
         proc = await asyncio.create_subprocess_exec(
             "mpv",
             "--no-video",           # nur Audio
-            "--ytdl-format=bestaudio",
+            "--ytdl-format=bestaudio/best",
             "--title=SOMA Music",
-            search_url,
+            url,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
         )
-        logger.info("media_mpv_started", query=query)
-        # Nicht auf Ende warten – läuft im Hintergrund
+        # Kurz warten ob mpv sofort crashed
+        await asyncio.sleep(1.5)
+        if proc.returncode is not None and proc.returncode != 0:
+            stderr_out = (await proc.stderr.read()).decode()[:200] if proc.stderr else ""
+            logger.error("mpv_instant_crash", returncode=proc.returncode, stderr=stderr_out)
+            # Fallback: Browser
+            browser_url = _build_youtube_autoplay_url(query)
+            return await open_url(browser_url)
+
+        logger.info("media_mpv_started", query=query, url=url[:60])
         asyncio.create_task(_monitor_mpv(proc, query))
         return f"Spiele '{query}' via mpv."
     except Exception as exc:
         logger.error("media_mpv_failed", error=str(exc))
-        # Fallback zu Browser
-        url = _build_youtube_autoplay_url(query)
-        return await open_url(url)
+        browser_url = _build_youtube_autoplay_url(query)
+        return await open_url(browser_url)
 
 
 async def _monitor_mpv(proc: asyncio.subprocess.Process, query: str) -> None:

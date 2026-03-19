@@ -56,7 +56,7 @@ class SpeechEmotion:
       - User angry    → Soma bleibt sachlich-neutral (kein Gegendruck!)
       - User tired    → Soma wird ruhig und warm (langsam, leise)
     """
-    speed: float = 1.3        # 0.5 = langsam (beruhigend), 1.5 = schnell
+    speed: float = 1.0        # 0.5 = langsam (beruhigend), 1.5 = schnell (Standard: natürlich)
     pitch: float = 1.0        # 0.8 = tief (ernst), 1.2 = hoch (froehlich)
     volume: float = 1.0       # 0.5 = leise (nacht), 1.0 = normal
 
@@ -310,6 +310,7 @@ class TTSEngine:
             try:
                 text, emotion = await self._speak_queue.get()
                 self._speaking = True
+                self._speaking_since = time.monotonic()
 
                 await self._synthesize_and_play(text, emotion)
 
@@ -317,6 +318,7 @@ class TTSEngine:
                 self._speak_queue.task_done()
 
             except asyncio.CancelledError:
+                self._speaking = False
                 break
             except Exception as e:
                 logger.error("tts_speak_error", error=str(e))
@@ -405,6 +407,12 @@ class TTSEngine:
 
     @property
     def is_speaking(self) -> bool:
+        if self._speaking and hasattr(self, '_speaking_since'):
+            stuck_seconds = time.monotonic() - self._speaking_since
+            if stuck_seconds > 30:
+                logger.warning("tts_speaking_stuck_reset",
+                               stuck_s=round(stuck_seconds, 1))
+                self._speaking = False
         return self._speaking
 
     @property
@@ -413,6 +421,9 @@ class TTSEngine:
 
     async def stop_speaking(self):
         """Aktuelle Sprachausgabe abbrechen."""
+        # Flag sofort zurücksetzen — verhindert Permanent-Self-Mute
+        self._speaking = False
+
         # Queue leeren
         while not self._speak_queue.empty():
             try:

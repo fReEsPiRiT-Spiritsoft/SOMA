@@ -34,10 +34,11 @@ logger = structlog.get_logger("soma.voice.vad")
 VAD_SAMPLE_RATE = 16000     # WebRTC VAD braucht 16kHz
 VAD_FRAME_MS = 30           # 30ms Frames (WebRTC Standard)
 VAD_FRAME_BYTES = int(VAD_SAMPLE_RATE * VAD_FRAME_MS / 1000) * 2  # 16-bit PCM
-MIN_SPEECH_MS = 500         # Mindestens 500ms Sprache = valides Segment
+MIN_SPEECH_MS = 400         # Mindestens 400ms Sprache = valides Segment
 MAX_SPEECH_SEC = 30         # Max 30s pro Segment (Schutz vor Endlos-Buffer)
-SILENCE_GRACE_MS = 800      # 800ms Stille nach letztem Wort → Segment beendet
-PRE_SPEECH_MS = 300         # 300ms Audio VOR dem Sprechen mitnehmen
+SILENCE_GRACE_MS = 500      # 500ms Stille nach letztem Wort → Segment beendet
+SILENCE_GRACE_SHORT_MS = 300  # 300ms für kurze Kommandos (< 2s Sprache)
+PRE_SPEECH_MS = 200         # 200ms Audio VOR dem Sprechen mitnehmen
 
 
 @dataclass
@@ -134,7 +135,11 @@ class ContinuousVAD:
                 self._speech_buffer.append(pcm_16khz_16bit)
                 silence_ms = (now - self._last_speech_time) * 1000
 
-                if silence_ms >= SILENCE_GRACE_MS:
+                # Adaptive Grace: Kurze Befehle (< 2s) → schnellerer Cutoff
+                speech_duration_ms = (now - self._speech_start_time) * 1000
+                grace = SILENCE_GRACE_SHORT_MS if speech_duration_ms < 2000 else SILENCE_GRACE_MS
+
+                if silence_ms >= grace:
                     # ── Stille lang genug → Segment fertig ───────────
                     return self._finalize_segment(now)
 

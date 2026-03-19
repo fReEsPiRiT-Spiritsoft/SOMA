@@ -22,6 +22,7 @@ SOMAS Ton, Wortwahl und Entscheidungen.
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 
@@ -150,7 +151,7 @@ class Interoception:
     EXHAUSTION_THRESHOLD = 0.5       # Avg Arousal > 0.5 → Erschoepfung
 
     def __init__(self):
-        self._history: list[tuple[float, float]] = []  # (timestamp, arousal)
+        self._history: deque[tuple[float, float]] = deque()  # (timestamp, arousal)
         self._last_vector = SomaEmotionalVector()
         self._boot_time = time.monotonic()
 
@@ -214,9 +215,10 @@ class Interoception:
 
         # ── 6. Exhaustion: Langzeit-Muedigkeit ─────────────────────
         self._history.append((now, negative_peak))
-        # Alte Eintraege entfernen
+        # Alte Eintraege entfernen (popleft statt List-Rebuild)
         cutoff = now - self.EXHAUSTION_WINDOW_SEC
-        self._history = [(t, a) for t, a in self._history if t > cutoff]
+        while self._history and self._history[0][0] <= cutoff:
+            self._history.popleft()
         if len(self._history) > 3:
             avg_stress = sum(a for _, a in self._history) / len(self._history)
             vec.exhaustion = self._sigmoid_map(

@@ -1,0 +1,153 @@
+# VISION: SOMA — Near-Realtime LLM mit Action Tags (DLSS-Prinzip für lokale KI)
+
+---
+
+## KONTEXT & AUSGANGSLAGE
+
+Ich entwickle SOMA, ein lokales, autonomes Smart-Home-OS (kein Cloud-Zugriff, 100% privat).
+Die Hardware: 32 GB RAM, 12 GB VRAM (RTX-Klasse).
+
+Das Kernproblem lokaler LLMs ist die Latenz: Zwischen Eingabe und einer vollständigen Antwort
+vergehen mehrere Sekunden — für ein Ambient-OS, das in Echtzeit reagieren und Aktionen auslösen
+soll, ist das ein Showstopper.
+
+Die Lösung, die ich beschreibe, nennt sich **"DLSS-Prinzip für Text"** — analog zur Spielegrafik-
+Technik DLSS (KI-gestütztes Hochskalieren mit minimalem Rechenaufwand), aber auf LLM-Inferenz
+angewendet.
+
+---
+
+## KERNIDEE: DAS DREISCHICHT-MODELL
+
+### Schicht 1 — Nano-Modell (Instant, <5ms)
+- Regex/Pattern-Matcher oder Pico-LLM (0.1B Parameter)
+- Erkennt sofort: Ist das ein Befehl? (z. B. "Licht an", "Musik stoppen")
+- Löst **Action Tags** aus, BEVOR das große Modell fertig ist
+- Arbeitet auf Token-Level während der User noch tippt/spricht
+
+### Schicht 2 — Draft-Modell (Schnell, ~50ms)
+- Kleines Sprachmodell (1B–3B Parameter, z. B. Llama 3.2 1B / Phi-3 Mini)
+- Generiert spekulativ die nächsten 5–10 Tokens der Antwort
+- Nutzt **Speculative Decoding**: Das Ergebnis wird dem großen Modell als Hypothese vorgelegt
+
+### Schicht 3 — Oracle-Modell (Tief, ~500ms, nur als Schiedsrichter)
+- Großes Modell (8B, z. B. Llama 3 8B via Ollama)
+- Bestätigt oder verwirft die Draft-Tokens in **einem einzigen Parallelschritt**
+- Tritt nur bei Unsicherheit oder komplexen Anfragen voll in Aktion
+
+**Effekt:** Die wahrgenommene Antwortzeit entspricht dem kleinen Modell (~50–100ms),
+die Qualität entspricht dem großen Modell (8B+). Last auf der GPU sinkt dramatisch.
+
+---
+
+## TECHNIKEN IM DETAIL
+
+### 1. Speculative Decoding
+- Draft-Modell rät 5–10 Tokens
+- Großes Modell verifiziert im Single Forward Pass (parallele Verarbeitung)
+- Bei hoher Übereinstimmung: 3–5x Speedup ohne Qualitätsverlust
+- Implementierbar mit: `llama.cpp` (--draft-model Flag), `vLLM` (SpeculativeDecoding Config)
+
+### 2. KV-Cache (Key-Value-Cache)
+- Mathematische Zwischenwerte der bereits verarbeiteten Tokens bleiben im VRAM eingefroren
+- Neuer Input berechnet nur das Delta — keine vollständige Kontextneuberechnung
+- Kritisch für SOMA: Lange Multi-Turn-Gespräche bleiben schnell
+- Implementierung: Standard in Ollama / llama.cpp, muss konfiguriert und warmgehalten werden
+
+### 3. Quantisierung (4-bit / GGUF)
+- Reduziert Modellgewichte von float16 → int4
+- Llama 3 8B: von ~16 GB VRAM auf ~5 GB → passt bequem in 12 GB VRAM
+- Qualitätsverlust: <5% auf Benchmarks (messbar, aber im Dialog kaum spürbar)
+- Format: GGUF via llama.cpp oder AWQ/GPTQ via vLLM
+
+### 4. Action Tag Streaming (Pre-Commit)
+- Während die Antwort gestreamt wird, scannt ein leichtgewichtiger Parser den Token-Stream
+- Sobald ein Action-Tag-Muster (z. B. `<action:light_on room="wohnzimmer">`) eine
+  Konfidenz-Schwelle überschreitet, wird die Aktion **sofort ausgelöst** — ohne auf das
+  Ende der Antwort zu warten
+- Prinzip: "Probabilistic Early Execution"
+
+---
+
+## ZIEL-ARCHITEKTUR FÜR SOMA
+
+```
+[User Input / Wake-Word]
+        │
+        ▼
+[Nano-Intent Parser] ──► sofortiger Action-Tag (Licht, Musik, etc.)
+        │
+        ▼
+[Draft-LLM (1B)] ──► spekulative Antwort-Tokens (50ms)
+        │
+        ▼
+[Oracle-LLM (8B)] ──► Verifikation + Korrektur (als Schiedsrichter)
+        │
+        ▼
+[Response-Stream] ──► TTS + UI + weitere Action-Tags
+```
+
+**Warm-State:** Alle drei Modelle sind im RAM/VRAM vorgeladen (kein Cold-Start).
+**Queue-Fallback:** Bei Lastspitzen (Health Monitor schlägt an) werden Deep-Reasoning-Tasks
+in Redis geparkt. Nutzer erhält sofort: "Moment, ich sortiere meine Gedanken..."
+
+---
+
+## AUFGABE AN CLAUDE OPUS
+
+Ich möchte mit dir die **konkrete Implementierung** dieser Architektur für SOMA ausarbeiten.
+
+**Spezifisch benötige ich:**
+
+1. **Code-Architektur** für das Dreischicht-Modell in Python (FastAPI/asyncio)
+   - Wie werden die drei Modelle parallel vorgehalten und angesprochen?
+   - Wie sieht der Handoff zwischen Draft- und Oracle-Modell aus?
+
+2. **Speculative-Decoding-Integration**
+   - Konkrete Konfiguration für `llama.cpp` mit `--draft-model`
+   - Alternativ: `vLLM` Setup für Speculative Decoding auf einer einzelnen GPU (12 GB VRAM)
+
+3. **Action-Tag-Streaming-Parser**
+   - Leichtgewichtiger Token-Stream-Scanner in Python
+   - Konfidenz-basiertes Early-Execution-System für SOMA's Nano-Intent-Schicht
+
+4. **KV-Cache-Strategie**
+   - Wie halte ich den KV-Cache für SOMA's Multi-User/Multi-Room-Sessions warm?
+   - Session-Isolation: Verschiedene Räume, verschiedene Kontexte
+
+5. **Ressourcen-Budget** für 32 GB RAM / 12 GB VRAM
+   - Welche Modellkombination maximiert Geschwindigkeit bei dieser Hardware?
+   - Konkrete GGUF-Quantisierungsstufen (Q4_K_M vs Q5_K_M vs Q8_0)
+
+**Randbedingungen:**
+- 100% lokal (kein Cloud-API)
+- Ollama als primäres Backend (bereits in SOMA integriert)
+- Python / FastAPI / asyncio Stack
+- Multi-Room-fähig (mehrere parallele Sessions)
+- Latenz-Ziel: <200ms für Action-Tags, <500ms für erste sichtbare Antwort-Tokens
+
+---
+
+## ZUSAMMENFASSUNG DES PRINZIPS
+
+> Nicht das große Modell macht die Arbeit. Das kleine Modell macht die Arbeit.
+> Das große Modell ist nur der Schiedsrichter, der in Millisekunden "Ja" oder "Nein" sagt.
+> Action Tags feuern, bevor die Antwort fertig ist.
+> Der Nutzer erlebt Echtzeit. Die GPU entspannt sich.
+
+
+
+
+Verwerfe nicht das aktuelle große LLM was bereits integriert ist( es seidenn es gibt ein effizenteres was nicht an intelligenz verliert)
+Behlate die "awareness und intelligenz und das gedächtniss von soma bei. gerne ( wenns an rechenlast spart darf auch ein kleineres modell darüber entscheiden welche infos ins lang oder kurzzeit gedächtniss gehen(
+    wenn esnicht an qualität leidet
+))
+
+wir wollen dieses System so Schnell, Effizient, und intelligent wie nie zu vor kriegen. dafür darfst du ! Copilot! so viele token verheizen wie du willst!
+das energebniss der qualität, effizienz und Itelligenz von SOMA liegt im vordergrund.   schaffe etwas was so schnell, effizient und itnelligent ist wie nur möglich und es muss binnen kürzester Zeit antworten!
+
+"Harware antforderungen 12gb 3060
+32gb RAM
+50gb SSD zwischenpuffer
+i7 8700
+"

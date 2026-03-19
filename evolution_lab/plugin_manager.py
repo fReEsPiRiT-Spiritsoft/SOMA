@@ -38,6 +38,7 @@ import structlog
 
 from evolution_lab.code_validator import CodeValidator, ValidationReport, Severity
 from evolution_lab.sandbox_runner import SandboxRunner, SandboxResult, SandboxMode
+from evolution_lab.github_models import GitHubModelsClient
 
 logger = structlog.get_logger("soma.evolution")
 
@@ -220,7 +221,7 @@ class PluginGenerator:
         self.manager = manager
         self.sandbox_dir = SANDBOX_DIR
         self.sandbox_dir.mkdir(parents=True, exist_ok=True)
-        self._heavy_engine = heavy_engine  # LLM für Code-Generierung
+        self._heavy_engine = heavy_engine  # LLM für Code-Generierung (Fallback)
         self._prompt_template = self._load_prompt_template()
         # Phase 5: Code-Validator (Forbidden Patterns + AST + Black)
         self._validator = CodeValidator(format_code=True)
@@ -229,11 +230,53 @@ class PluginGenerator:
         # Status-Tracking für Dashboard
         self.last_generation: dict = {}
 
+        # ── GitHub Models API (primärer Code-Generator) ───────────────────
+        # Nutzt o1/o4-mini/GPT-4o für deutlich bessere Code-Qualität.
+        # Fallback auf lokales LLM wenn kein Token konfiguriert.
+        self._github_client: Optional[GitHubModelsClient] = None
+        self._init_github_client()
+
     def _load_prompt_template(self) -> str:
         prompt_path = Path(__file__).parent / "prompts" / "plugin_generator.txt"
         if prompt_path.exists():
             return prompt_path.read_text(encoding="utf-8")
         return "Schreib ein Python-Plugin gemäß SOMA-Plugin-Standard."
+
+    def _init_github_client(self) -> None:
+        """GitHub Models Client initialisieren falls Token vorhanden."""
+        try:
+            from brain_core.config import settings
+            token = settings.github_token
+            model = settings.github_models_model
+            if token and token.strip():
+                self._github_client = GitHubModelsClient(
+                    token=token.strip(),
+                    model=model or "o4-mini",
+                )
+                logger.info(
+                    "plugin_gen_using_github_models",
+                    model=model,
+                    info="Plugin-Code wird via GitHub Models API generiert",
+                )
+            else:
+                logger.info(
+                    "plugin_gen_using_local_llm",
+                    info="Kein GITHUB_TOKEN — Plugin-Code wird lokal generiert",
+                )
+        except Exception as exc:
+            logger.warning("github_models_init_failed", error=str(exc))
+            self._github_client = None
+
+    def _get_code_engine(self):
+        """
+        Gibt den besten verfügbaren Code-Generator zurück.
+        Priorität: GitHub Models API > Lokales LLM (Qwen3)
+        """
+        if self._github_client:
+            return self._github_client, "GitHub Models"
+        if self._heavy_engine:
+            return self._heavy_engine, "Lokales LLM"
+        return None, "Keins"
 
     # ── Dependency Management ────────────────────────────────────────────
 
@@ -346,11 +389,15 @@ class PluginGenerator:
             "error": None,
         }
 
-        if not self._heavy_engine:
-            return False, "Kein LLM verfügbar (heavy_engine fehlt)", ""
+        # ── Code-Engine wählen: GitHub Models (primär) > Lokales LLM ─────
+        code_engine, engine_name = self._get_code_engine()
+        if not code_engine:
+            return False, "Kein Code-Generator verfügbar (weder GitHub Models noch lokales LLM)", ""
 
-        # Alte Session clearen → kein Altlast aus vorherigen Versuchen
-        self._heavy_engine.drop_session(f"evolution_{name}")
+        await _emit(f"⚙️ Code-Engine: {engine_name}")
+
+        # Alte Session clearen (nur relevant für lokales LLM)
+        code_engine.drop_session(f"evolution_{name}")
 
         # ── LLM generiert den Code (mit Retry-Loop) ──────────────────────
         system_prompt = self._prompt_template
@@ -385,18 +432,35 @@ class PluginGenerator:
                 )
 
             try:
-                raw_code = await self._heavy_engine.generate(
+                raw_code = await code_engine.generate(
                     prompt=prompt,
                     system_prompt=system_prompt,
                     session_id=f"evolution_{name}",
                     options_override={"temperature": 0.1, "top_p": 0.95},
                 )
             except Exception as exc:
-                msg = f"LLM-Fehler: {exc}"
-                await _emit(f"❌ {msg}")
-                self.last_generation["status"] = "failed"
-                self.last_generation["error"] = msg
-                return False, msg, ""
+                # ── Fallback: Wenn GitHub Models fehlschlägt, lokales LLM probieren
+                if code_engine is self._github_client and self._heavy_engine:
+                    await _emit(f"⚠️ {engine_name} Fehler: {exc} — Fallback auf lokales LLM...")
+                    try:
+                        raw_code = await self._heavy_engine.generate(
+                            prompt=prompt,
+                            system_prompt=system_prompt,
+                            session_id=f"evolution_{name}",
+                            options_override={"temperature": 0.1, "top_p": 0.95},
+                        )
+                    except Exception as fallback_exc:
+                        msg = f"Beide Engines fehlgeschlagen. GitHub: {exc} | Lokal: {fallback_exc}"
+                        await _emit(f"❌ {msg}")
+                        self.last_generation["status"] = "failed"
+                        self.last_generation["error"] = msg
+                        return False, msg, ""
+                else:
+                    msg = f"LLM-Fehler: {exc}"
+                    await _emit(f"❌ {msg}")
+                    self.last_generation["status"] = "failed"
+                    self.last_generation["error"] = msg
+                    return False, msg, ""
 
             code = self._extract_code(raw_code)
             self.last_generation["code"] = code
@@ -488,7 +552,7 @@ class PluginGenerator:
 
                 self.last_generation["status"] = "installed"
                 await _emit(f"🚀 Plugin '{name}' installiert und geladen!", "EVOLUTION_OK")
-                self._heavy_engine.drop_session(f"evolution_{name}")
+                code_engine.drop_session(f"evolution_{name}")
                 return True, f"Plugin '{name}' erfolgreich generiert, validiert, getestet und geladen.", code
             else:
                 last_error = sandbox_result.feedback_for_llm or sandbox_result.error
@@ -499,7 +563,7 @@ class PluginGenerator:
                     self.last_generation["status"] = "failed"
                     self.last_generation["error"] = sandbox_result.error
                     await _emit(f"❌ Plugin fehlgeschlagen nach {MAX_GENERATION_RETRIES} Retries: {sandbox_result.error}")
-                    self._heavy_engine.drop_session(f"evolution_{name}")
+                    code_engine.drop_session(f"evolution_{name}")
                     return False, sandbox_result.error, code
 
         # Sollte nicht erreicht werden, aber sicherheitshalber

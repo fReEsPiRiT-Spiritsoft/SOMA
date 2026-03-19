@@ -70,6 +70,40 @@
             gap: 25px;
             align-items: center;
         }
+
+        /* Header action buttons (Thinking Stream + Soma Face) */
+        .header-actions {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-left: 18px;
+        }
+
+        .btn-header {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(0,255,136,0.12);
+            color: rgba(0,255,136,0.92);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            padding: 8px 12px;
+            border-radius: 8px;
+            text-decoration: none;
+            display: inline-flex;
+            gap: 8px;
+            align-items: center;
+            transition: background 0.18s ease, transform 0.08s ease;
+        }
+
+        .btn-header:hover {
+            background: rgba(0,255,136,0.06);
+            transform: translateY(-2px);
+        }
+
+        .btn-header.secondary {
+            color: rgba(255,255,255,0.85);
+            border-color: rgba(255,255,255,0.06);
+            background: rgba(255,255,255,0.02);
+        }
         
         .status-item {
             display: flex;
@@ -722,6 +756,10 @@
         <div class="logo">
             <h1>🧠 SOMA</h1>
             <span class="version">v1.0.0-genesis</span>
+        </div>
+        <div class="header-actions">
+            <a class="btn-header" href="http://127.0.0.1:5500/brain_memory_ui/dashboard/templates/thinking_stream.html" target="_blank" rel="noopener">🧠 Thinking Stream</a>
+            <a class="btn-header secondary" href="http://127.0.0.1:5500/soma_face_tablet/index.html" target="_blank" rel="noopener">🖥️ Soma Face</a>
         </div>
         <div class="status-bar">
             <div class="status-item">

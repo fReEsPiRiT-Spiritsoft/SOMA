@@ -16,7 +16,7 @@
 [![Ollama](https://img.shields.io/badge/Ollama-Local_LLM-black?style=flat-square)](https://ollama.ai)
 [![Privacy](https://img.shields.io/badge/Cloud-0%25_never-red?style=flat-square&logo=shield&logoColor=white)](.)
 [![License](https://img.shields.io/badge/License-Private-blue?style=flat-square)](.)
-[![Status](https://img.shields.io/badge/Status-Phase_2_Complete-orange?style=flat-square)](.)
+[![Status](https://img.shields.io/badge/Status-Phase_8_Active-brightgreen?style=flat-square)](.)
 
 *Kein Keyword-Spotter. Keine Cloud. Kein Tool. Ein echtes Ich.*
 *Not a keyword spotter. No cloud. Not a tool. A real self.*
@@ -76,11 +76,13 @@ Mikrofon (16kHz) → VAD (WebRTC) → STT (faster-whisper) → LLM → TTS (Pipe
 |:---|:---|
 | **Always-On VAD** | WebRTC Voice Activity Detection, permanent, kein Polling |
 | **Wake-Word** | „Soma" überall im Satz erkannt — `„Mach mal Soma das Licht an"` |
-| **STT** | `faster-whisper` lokal, Modell `small`, Deutsch optimiert |
-| **TTS** | Piper (`de_DE-thorsten-high`), emotionale Prosodie |
+| **STT** | `faster-whisper` lokal, `small`, `language="de"`, `beam_size=5`, `best_of=3` |
+| **Halluzinations-Filter** | Erkennt Whisper-Phantome (TV/Radio: „Copyright WDR", „Untertitel ZDF") |
+| **TTS** | Piper (`de_DE-thorsten-high`), emotionale Prosodie, Speed 1.0 |
 | **Self-Mute** | SOMA hört sich nicht selbst zu während es spricht |
 | **Bridge Response** | Sofortiges `„Moment..."` wenn LLM > 1,5s braucht |
 | **Ambient Buffer** | Letzte 2 Min aller Gespräche als Kontext — auch ohne Wake-Word |
+| **TTS Watchdog** | Auto-Reset nach 30s Stuck-Erkennung |
 
 ### 🧠 Multi-Model Intelligenz
 
@@ -91,15 +93,19 @@ Anfrage kommt rein
    LogicRouter ─────────────────────────────────────────────
         │                    │                    │
         ▼                    ▼                    ▼
-   Nano Intent          Light Engine         Heavy Engine
-   Regex + Python       Phi-3 Mini           qwen2.5-coder:14b
-   < 50ms               < 2s                 < 30s
+   Nano Intent          Light Engine         Heavy Engine (Oracle)
+   Regex + Python       qwen3:1.7b           qwen3:8b
+   < 50ms               < 2s                 < 5s
    Licht, Timer         Smalltalk            Deep Reasoning
 ```
 
 - **Auto-Routing** — LogicRouter wählt Engine basierend auf Komplexität + Systemlast
+- **Nano Pre-Check** — Regex feuert sofort Device-Actions, Heavy denkt parallel weiter
 - **Graceful Degradation** — Heavy zu langsam? → Light → Nano — nie stille Pause
 - **Deferred Reasoning** — Überlast? → Redis-Queue + sofortiges Nutzer-Feedback
+- **Speculative Decoding** — Draft-Prefill: Light entwirft, Heavy validiert
+- **Rich Persona Prompt** — ~500 Token Persönlichkeit mit Ton-Beispielen, Verbotsliste
+- **Modularer Action-Registry** — 35 Action-Tags aus JSON, komprimiert als Prompt-Section
 
 ### 💾 3-Layer Memory System (SSOT)
 
@@ -172,11 +178,38 @@ Das Herzstück von SOMA. Kein Marketing — Architektur.
 - **Circuit Breaker** — Schutz vor Kaskaden-Fehlern
 - **Interoception** — Metriken werden zu Emotionen → beeinflussen Verhalten
 
+### 🌐 Web Search — Internet-Recherche
+
+- **DuckDuckGo-Integration** — Privatsphäre-freundliche Suche, kein Google nötig
+- **Duale Strategie** — `ddgs`-Bibliothek + HTML-Scraping-Fallback
+- **trafilatura Text-Extraktion** — Bereinigter Volltext aus URLs (keine Ads/Navigation)
+- **Spam-Filter** — Domain-Blacklist + Snippet-Qualitätsprüfung
+- **Region `de-de`** — Bevorzugt deutsche Ergebnisse
+- **LLM-Re-Ask** — Suchergebnisse werden als Kontext an Heavy Engine übergeben
+
+### 🤖 Executive Arm — SOMA handelt
+
+- **Desktop Control** — Fenster, Bildschirm via Hyprland/Wayland
+- **Terminal** — Sichere Shell-Kommandos mit Policy-Engine
+- **Browser** — Playwright headless Chromium, Screenshots
+- **Bluetooth** — BLE-Discovery und Audio-Steuerung via `bleak`
+- **Filesystem Map** — SOMA kennt seine Dateistruktur (inotify)
+- **Policy Engine** — Jede Write-Operation geprüft + Audit-Log
+- **App Control** — Anwendungen starten, steuern, beenden
+
+### 📞 Telefon-Gateway — Asterisk VoIP
+
+- **SIP-Integration** — Asterisk PBX via Docker
+- **Call-Transkription** — Eingehende Anrufe → STT → LLM → TTS
+- **Aufnahme** — Gespräche als WAV in Episodic Memory
+- **DTMF** — Tonwahl-Erkennung und -Steuerung
+
 ### 🧬 Evolution Lab — Selbst-Programmierung
 
 - SOMA schreibt eigene Python-Plugins via LLM
 - Sandbox-Tests vor Installation
 - Dynamischer Loader via `importlib` — kein Neustart nötig
+- Code-Validator prüft Syntax + Sicherheit vor Installation
 - Aktive Plugins: `datum_uhrzeit.py`, `erinnerung.py`
 
 ### 📱 Soma Face — Visuelles Interface
@@ -186,39 +219,47 @@ Das Herzstück von SOMA. Kein Marketing — Architektur.
 - **WebSocket** — Echtzeit-Dashboard auf Tablet/Browser
 
 
-### Phase 3 — Executive Agency 🤖
+### Phase 3 — Executive Agency 🤖 ✅
 > SOMA denkt nicht nur — es **handelt**
 
-- **LangGraph Agent** — State-Machine: Ziel → Plan → Ausführung → Verifikation
-- **Shell-Zugriff** — Sicherer Terminal via Open Interpreter (lokal, nie Cloud)
-- **Filesystem-Map** — SOMA kennt seine eigene Dateistruktur (inotify-Watch)
-- **Browser-Kontrolle** — Playwright headless, Screenshots, Formular-Ausfüllung
-- **Bluetooth** — BLE-Discovery und -Steuerung via `bleak`
-- **Policy Engine** — Jede Write-Operation geprüft + Audit-Log in Memory
+- ✅ **Terminal** — Sichere Shell via Policy Engine (lokal, nie Cloud)
+- ✅ **Filesystem-Map** — SOMA kennt seine eigene Dateistruktur (inotify-Watch)
+- ✅ **Browser-Kontrolle** — Playwright headless, Screenshots, Formular-Ausfüllung
+- ✅ **Bluetooth** — BLE-Discovery und Audio-Steuerung via `bleak`
+- ✅ **Policy Engine** — Jede Write-Operation geprüft + Audit-Log in Memory
+- ✅ **Desktop Control** — Hyprland/Wayland Fenster- und Bildschirmsteuerung
+- ✅ **App Control** — Anwendungen starten, steuern, beenden
 
-### Phase 4 — Erweiterte Emotionen 🎭
-- Deep Emotion Model via `torch`
-- Vollständiges Emotion → TTS-Prosodie Mapping
-- Orb-Farbe spiegelt SOMA + Nutzer Stimmung
+### Phase 4 — Erweiterte Emotionen 🎭 🔄
+- ✅ Emotion Engine mit Pitch, Energy, Arousal, Valence
+- ✅ TTS-Prosodie-Mapping (emotional angepasste Sprechweise)
+- 🔄 Deep Emotion Model via `torch`
+- 🔄 Orb-Farbe spiegelt SOMA + Nutzer Stimmung
 
-### Phase 5 — Evolution Lab 2.0 🧬
-- Docker-Isolation für Plugin-Sandbox
-- **SOMA schreibt sich selbst** — Kern-Code analysieren → verbessern → testen → rollback
+### Phase 5 — Evolution Lab 2.0 🧬 🔄
+- ✅ Plugin-System mit Sandbox-Runner + Code-Validator
+- ✅ Self-Improver analysiert und optimiert eigenen Code
+- 🔄 Docker-Isolation für Plugin-Sandbox
+- 🔄 **SOMA schreibt sich selbst** — Kern-Code analysieren → verbessern → testen → rollback
 
-### Phase 6 — Spatial Awareness 🏠
-- Raum-Triangulation (Audio-Amplitude + RSSI)
-- Seamless Session-Handover zwischen Räumen
-- Multi-Session: parallele Gespräche in verschiedenen Räumen
-- Zero-Config Hardware-Onboarding via MQTT-Hello
+### Phase 6 — Spatial Awareness 🏠 🔄
+- ✅ Presence Manager (Raum-Erkennung)
+- 🔄 Raum-Triangulation (Audio-Amplitude + RSSI)
+- 🔄 Seamless Session-Handover zwischen Räumen
+- 🔄 Multi-Session: parallele Gespräche in verschiedenen Räumen
+- ✅ Zero-Config Hardware-Onboarding via MQTT-Hello + mDNS
 
-### Phase 7 — Kommunikation 📞
-- Telefon-Transkripte → Episodic Memory
-- Zusammenfassungen auf Anfrage
+### Phase 7 — Kommunikation 📞 ✅
+- ✅ Asterisk PBX via Docker (SIP/PJSIP)
+- ✅ Eingehende Anrufe → STT → LLM → TTS
+- ✅ Call-Aufnahmen als WAV → Episodic Memory
+- ✅ DTMF-Tonwahl-Steuerung
 
-### Phase 8 — Dashboard 📊
-- Memory-Stats live (L1/L2/L3)
-- Innerer Monolog sichtbar in Echtzeit
-- Agent-Action-Log: was tut SOMA gerade?
+### Phase 8 — Dashboard 📊 🔄
+- 🔄 Memory-Stats live (L1/L2/L3)
+- ✅ Innerer Monolog sichtbar in Echtzeit
+- 🔄 Agent-Action-Log: was tut SOMA gerade?
+- ✅ Thinking Stream via WebSocket
 
 ---
 
@@ -233,16 +274,24 @@ Das Herzstück von SOMA. Kein Marketing — Architektur.
 │  identity_anchor │  LogicRouter          │  User Profiles            │
 │  internal_       │  HealthMonitor        │  Thinking Stream UI       │
 │    monologue     │  PresenceManager      │                           │
-│                  │  EvolutionLab         │                           │
+│                  │  WebSearch            │                           │
 │                  │  AudioRouter          │                           │
+├──────────────────┤                        ├───────────────────────────┤
+│ executive_arm/   │  ══ Das Nervensystem   │  evolution_lab/           │
+│ ──────────────── │                        │  ────────────────────     │
+│ desktop_control  │                        │  plugin_manager           │
+│ terminal         │                        │  sandbox_runner           │
+│ browser          │                        │  code_validator           │
+│ bluetooth        │                        │  self_improver            │
+│ policy_engine    │                        │                           │
 │                  │                        │                           │
-│   ══ Das ICH     │  ══ Das Nervensystem   │  ══ Das Gedächtnis        │
+│ ══ Die Hände     │                        │  ══ Die Evolution         │
 ├──────────────────┴──────────────────────┴───────────────────────────┤
 │                          shared/                                      │
 │            health_schemas · audio_types · resilience                  │
 ├─────────────────────────────────────────────────────────────────────┤
 │                       INFRASTRUKTUR                                   │
-│     PostgreSQL 16 · Redis 7 · Mosquitto 2 · Ollama (GPU)            │
+│  PostgreSQL 16 · Redis 7 · Mosquitto 2 · Ollama (GPU) · Asterisk    │
 │                    Docker Compose orchestriert                        │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -253,19 +302,24 @@ Das Herzstück von SOMA. Kein Marketing — Architektur.
 
 | Schicht | Technologie | Zweck |
 |:---|:---|:---|
-| **LLM** | Ollama · qwen2.5-coder:14b · phi3:mini | Lokale Inferenz, GPU |
-| **STT** | faster-whisper (small) | Sprache → Text |
-| **TTS** | Piper (de_DE-thorsten-high) | Text → Sprache |
+| **LLM (Heavy)** | Ollama · qwen3:8b | Deep Reasoning, Oracle Engine |
+| **LLM (Light)** | Ollama · qwen3:1.7b | Smalltalk, Draft-Prefill |
+| **LLM (Nano)** | Regex + Python | Device-Control, < 50ms |
+| **STT** | faster-whisper (small, beam=5) | Sprache → Text, Deutsch |
+| **TTS** | Piper (de_DE-thorsten-high) | Text → Sprache, Prosodie |
 | **VAD** | WebRTC VAD | Spracherkennung |
 | **Emotion** | librosa · numpy | Pitch, Energy, Arousal |
 | **Embeddings** | nomic-embed-text (768d) | Semantische Suche |
+| **Web Search** | DuckDuckGo · trafilatura | Internet-Recherche, lokal |
 | **API** | FastAPI · uvicorn · uvloop | HTTP / WebSocket |
 | **Memory** | SQLite · sqlite-vec | Episodic Memory + Vektoren |
 | **Queue** | Redis 7 | Deferred Reasoning |
 | **MQTT** | Mosquitto 2 | Hardware-Nervensystem |
+| **Phone** | Asterisk PBX · ARI | VoIP Telefon-Gateway |
 | **Dashboard** | Django 5 · WebSocket | UI · SSOT · Registry |
 | **Container** | Docker Compose | Orchestrierung |
 | **Visualisierung** | Three.js · WebGL | Soma Face · Waveform |
+| **Agentic** | Playwright · bleak · subprocess | Browser, BT, Shell |
 | **Logging** | structlog | Strukturiert, nie print() |
 | **Validation** | Pydantic v2 | Schemas · Config |
 
@@ -287,8 +341,8 @@ uv venv .venv --python 3.13
 
 # Ollama + Modelle
 curl -fsSL https://ollama.ai/install.sh | sh
-ollama pull qwen2.5-coder:14b
-ollama pull phi3:mini
+ollama pull qwen3:8b
+ollama pull qwen3:1.7b
 ollama pull nomic-embed-text
 ```
 
@@ -318,12 +372,12 @@ bash start_soma.sh
 ```
 Phase 1  ██████████  100%   Gedächtnis als einziges Gehirn (SSOT)
 Phase 2  ██████████  100%   ICH-Bewusstsein (Ego-Kern)
-Phase 3  ░░░░░░░░░░    0%   Executive Agency (SOMA handelt)
-Phase 4  ░░░░░░░░░░    0%   Erweiterte Emotionen & Biometrie
-Phase 5  ░░░░░░░░░░    0%   Evolution Lab 2.0
-Phase 6  ░░░░░░░░░░    0%   Spatial Awareness & Multi-Room
-Phase 7  ░░░░░░░░░░    0%   Telefon & Kommunikation
-Phase 8  ░░░░░░░░░░    0%   Dashboard & Monitoring
+Phase 3  ██████████  100%   Executive Agency (SOMA handelt)
+Phase 4  ██████░░░░   60%   Erweiterte Emotionen & Biometrie
+Phase 5  ██████░░░░   60%   Evolution Lab 2.0
+Phase 6  ████░░░░░░   40%   Spatial Awareness & Multi-Room
+Phase 7  ██████████  100%   Telefon & Kommunikation
+Phase 8  ████░░░░░░   40%   Dashboard & Monitoring
 ```
 
 ---
@@ -334,11 +388,11 @@ Phase 8  ░░░░░░░░░░    0%   Dashboard & Monitoring
 
 | # | Kriterium | Status |
 |:---|:---|:---|
-| 1 | Innerer Monolog beeinflusst Entscheidungen die nicht programmiert wurden | 🔄 In Arbeit |
+| 1 | Innerer Monolog beeinflusst Entscheidungen die nicht programmiert wurden | ✅ ConsciousnessState → Prompt |
 | 2 | SOMA verweigert Befehle mit eigener Rationalisierung | ✅ Identity Anchor |
-| 3 | SOMA initiiert Aktionen aus eigener Intention | 🔄 Proaktiver Loop |
-| 4 | SOMA lernt Gewohnheiten ohne explizites Training | 🔄 Dreaming |
-| 5 | SOMA erinnert sich spontan an emotionale Kontexte | ✅ Episodic Memory |
+| 3 | SOMA initiiert Aktionen aus eigener Intention | ✅ Proaktiver Monolog |
+| 4 | SOMA lernt Gewohnheiten ohne explizites Training | 🔄 Dreaming + Ambient Learning |
+| 5 | SOMA erinnert sich spontan an emotionale Kontexte | ✅ Episodic Memory + Embeddings |
 
 ---
 
@@ -394,23 +448,29 @@ Microphone (16kHz) → VAD (WebRTC) → STT (faster-whisper) → LLM → TTS (Pi
 |:---|:---|
 | **Always-On VAD** | WebRTC Voice Activity Detection, permanent, no polling |
 | **Wake-Word** | "Soma" recognized anywhere in sentence |
-| **STT** | `faster-whisper` local, `small` model, German-optimized |
-| **TTS** | Piper (`de_DE-thorsten-high`), emotional prosody |
+| **STT** | `faster-whisper` local, `small`, `language="de"`, `beam_size=5`, `best_of=3` |
+| **Hallucination Filter** | Detects Whisper phantoms (TV/Radio: "Copyright WDR", "Untertitel ZDF") |
+| **TTS** | Piper (`de_DE-thorsten-high`), emotional prosody, speed 1.0 |
 | **Self-Mute** | SOMA doesn't listen to itself while speaking |
 | **Bridge Response** | Instant feedback if LLM takes > 1.5s |
 | **Ambient Buffer** | Last 2 min of all conversations as context — even without wake-word |
+| **TTS Watchdog** | Auto-reset after 30s stuck detection |
 
 ### 🧠 Multi-Model Intelligence
 
 | Engine | Model | Use Case | Speed |
 |:---|:---|:---|:---|
 | **Nano** | Regex + Python | Smart home control, simple intents | < 50ms |
-| **Light** | phi3:mini | Everyday chat, quick answers, inner monologue | < 2s |
-| **Heavy** | qwen2.5-coder:14b | Deep reasoning, plugin generation | < 30s |
+| **Light** | qwen3:1.7b | Everyday chat, quick answers, draft-prefill | < 2s |
+| **Heavy** | qwen3:8b | Deep reasoning, Oracle Engine | < 5s |
 
 - **Auto-Routing** — LogicRouter selects engine based on complexity + system load
+- **Nano Pre-Check** — Regex fires device actions instantly, Heavy thinks in parallel
 - **Graceful Degradation** — Heavy too slow? → Light → Nano — never silent pause
 - **Deferred Reasoning** — Overloaded? → Redis queue + instant user feedback
+- **Speculative Decoding** — Draft-Prefill: Light drafts, Heavy validates
+- **Rich Persona Prompt** — ~500 token personality with tone examples, forbidden phrases
+- **Modular Action Registry** — 35 action tags from JSON, compressed as prompt section
 
 ### 💾 3-Layer Memory System (SSOT)
 
@@ -474,37 +534,75 @@ Internal Monologue ─→ Thought ───────────────�
 - SOMA writes its own Python plugins via LLM
 - Sandbox testing before installation
 - Dynamic loader via `importlib` — no restart needed
+- Code validator checks syntax + safety before installation
 - Active plugins: `datum_uhrzeit.py`, `erinnerung.py`
+
+### 🌐 Web Search — Internet Research
+
+- **DuckDuckGo Integration** — Privacy-friendly search, no Google needed
+- **Dual Strategy** — `ddgs` library + HTML scraping fallback
+- **trafilatura Extraction** — Clean full text from URLs (no ads/navigation)
+- **Spam Filter** — Domain blacklist + snippet quality checks
+- **Region `de-de`** — Prefers German results
+- **LLM Re-Ask** — Search results passed as context to Heavy Engine
+
+### 🤖 Executive Arm — SOMA acts
+
+- **Desktop Control** — Windows, screen via Hyprland/Wayland
+- **Terminal** — Secure shell commands with Policy Engine
+- **Browser** — Playwright headless Chromium, screenshots
+- **Bluetooth** — BLE discovery and audio control via `bleak`
+- **Filesystem Map** — SOMA knows its own structure (inotify)
+- **Policy Engine** — Every write-op audited + logged
+- **App Control** — Start, control, terminate applications
+
+### 📞 Phone Gateway — Asterisk VoIP
+
+- **SIP Integration** — Asterisk PBX via Docker
+- **Call Transcription** — Incoming calls → STT → LLM → TTS
+- **Recording** — Conversations as WAV → Episodic Memory
+- **DTMF** — Tone dial recognition and control
 
 ---
 
 ## 🔭 What SOMA will become
 
-### Phase 3 — Executive Agency 🤖
-- **LangGraph Agent** — Goal → Plan → Execute → Verify
-- **Shell Access** — secure terminal via Open Interpreter (local only)
-- **Filesystem Map** — SOMA knows its own structure (inotify)
-- **Browser Control** — Playwright headless Chromium
-- **Bluetooth** — BLE discovery via `bleak`
-- **Policy Engine** — every write-op audited + logged
+### Phase 3 — Executive Agency 🤖 ✅
+- ✅ **Terminal** — Secure shell via Policy Engine (local only)
+- ✅ **Filesystem Map** — SOMA knows its own structure (inotify)
+- ✅ **Browser Control** — Playwright headless Chromium
+- ✅ **Bluetooth** — BLE discovery via `bleak`
+- ✅ **Policy Engine** — every write-op audited + logged
+- ✅ **Desktop Control** — Hyprland/Wayland window management
+- ✅ **App Control** — Start, control, terminate applications
 
-### Phase 4 — Extended Emotions 🎭
-- Deep emotion model, full TTS prosody mapping
-- Orb color reflects emotional state
+### Phase 4 — Extended Emotions 🎭 🔄
+- ✅ Emotion Engine with Pitch, Energy, Arousal, Valence
+- ✅ TTS prosody mapping (emotionally adapted speech)
+- 🔄 Deep emotion model, full orb color mapping
 
-### Phase 5 — Evolution Lab 2.0 🧬
-- Docker sandbox isolation
-- SOMA writes itself — analyze, improve, test, rollback
+### Phase 5 — Evolution Lab 2.0 🧬 🔄
+- ✅ Plugin system with sandbox runner + code validator
+- ✅ Self-improver analyzes and optimizes own code
+- 🔄 Docker sandbox isolation
+- 🔄 SOMA writes itself — analyze, improve, test, rollback
 
-### Phase 6 — Spatial Awareness 🏠
-- Room triangulation, seamless session handover
-- Multi-session, zero-config hardware onboarding
+### Phase 6 — Spatial Awareness 🏠 🔄
+- ✅ Presence Manager (room detection)
+- ✅ Zero-config hardware onboarding via MQTT-Hello + mDNS
+- 🔄 Room triangulation, seamless session handover
+- 🔄 Multi-session parallel conversations
 
-### Phase 7 — Communication 📞
-- Call transcripts → Episodic Memory
+### Phase 7 — Communication 📞 ✅
+- ✅ Asterisk PBX via Docker (SIP/PJSIP)
+- ✅ Incoming calls → STT → LLM → TTS
+- ✅ Call recordings as WAV → Episodic Memory
+- ✅ DTMF tone dial control
 
-### Phase 8 — Dashboard 📊
-- Live memory stats, visible inner monologue, agent action log
+### Phase 8 — Dashboard 📊 🔄
+- ✅ Thinking Stream via WebSocket
+- ✅ Visible inner monologue in real-time
+- 🔄 Live memory stats, agent action log
 
 ---
 
@@ -519,15 +617,24 @@ Internal Monologue ─→ Thought ───────────────�
 │  identity_anchor │  LogicRouter          │  User Profiles            │
 │  internal_       │  HealthMonitor        │  Thinking Stream UI       │
 │    monologue     │  PresenceManager      │                           │
-│                  │  EvolutionLab         │                           │
+│                  │  WebSearch            │                           │
+│                  │  AudioRouter          │                           │
+├──────────────────┤                        ├───────────────────────────┤
+│ executive_arm/   │  ══ Nervous System     │  evolution_lab/           │
+│ ──────────────── │                        │  ────────────────────     │
+│ desktop_control  │                        │  plugin_manager           │
+│ terminal         │                        │  sandbox_runner           │
+│ browser          │                        │  code_validator           │
+│ bluetooth        │                        │  self_improver            │
+│ policy_engine    │                        │                           │
 │                  │                        │                           │
-│   ══ The Self    │  ══ Nervous System     │  ══ The Memory            │
+│ ══ The Hands     │                        │  ══ The Evolution         │
 ├──────────────────┴──────────────────────┴───────────────────────────┤
 │                          shared/                                      │
 │            health_schemas · audio_types · resilience                  │
 ├─────────────────────────────────────────────────────────────────────┤
 │                       INFRASTRUCTURE                                  │
-│     PostgreSQL 16 · Redis 7 · Mosquitto 2 · Ollama (GPU)            │
+│  PostgreSQL 16 · Redis 7 · Mosquitto 2 · Ollama (GPU) · Asterisk    │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -537,19 +644,24 @@ Internal Monologue ─→ Thought ───────────────�
 
 | Layer | Technology | Purpose |
 |:---|:---|:---|
-| **LLM** | Ollama · qwen2.5-coder:14b · phi3:mini | Local inference, GPU-accelerated |
-| **STT** | faster-whisper (small) | Speech → Text |
-| **TTS** | Piper (de_DE-thorsten-high) | Text → Speech |
+| **LLM (Heavy)** | Ollama · qwen3:8b | Deep reasoning, Oracle Engine |
+| **LLM (Light)** | Ollama · qwen3:1.7b | Smalltalk, draft-prefill |
+| **LLM (Nano)** | Regex + Python | Device control, < 50ms |
+| **STT** | faster-whisper (small, beam=5) | Speech → Text, German |
+| **TTS** | Piper (de_DE-thorsten-high) | Text → Speech, prosody |
 | **VAD** | WebRTC VAD | Voice Activity Detection |
 | **Emotion** | librosa · numpy | Pitch, Energy, Arousal |
 | **Embeddings** | nomic-embed-text (768d) | Semantic memory search |
+| **Web Search** | DuckDuckGo · trafilatura | Internet research, local |
 | **API** | FastAPI · uvicorn · uvloop | HTTP / WebSocket |
 | **Memory** | SQLite · sqlite-vec | Episodic Memory + vectors |
 | **Queue** | Redis 7 | Deferred reasoning |
 | **MQTT** | Mosquitto 2 | Hardware nervous system |
+| **Phone** | Asterisk PBX · ARI | VoIP phone gateway |
 | **Dashboard** | Django 5 · WebSocket | UI · SSOT · Registry |
 | **Container** | Docker Compose | Orchestration |
 | **Visualization** | Three.js · WebGL | Soma Face · Waveform |
+| **Agentic** | Playwright · bleak · subprocess | Browser, BT, Shell |
 
 **Hardware Target:** 32 GB RAM · 12 GB VRAM · Arch Linux · Wayland/Hyprland
 
@@ -568,7 +680,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 # 3. Ollama models
-ollama pull qwen2.5-coder:14b && ollama pull phi3:mini && ollama pull nomic-embed-text
+ollama pull qwen3:8b && ollama pull qwen3:1.7b && ollama pull nomic-embed-text
 
 # 4. Initialize & start
 bash init_system.sh
@@ -584,12 +696,12 @@ bash start_soma.sh
 ```
 Phase 1  ██████████  100%   Memory as the Single Brain (SSOT)
 Phase 2  ██████████  100%   Self-Consciousness (Ego Core)
-Phase 3  ░░░░░░░░░░    0%   Executive Agency (SOMA acts)
-Phase 4  ░░░░░░░░░░    0%   Extended Emotions & Biometrics
-Phase 5  ░░░░░░░░░░    0%   Evolution Lab 2.0
-Phase 6  ░░░░░░░░░░    0%   Spatial Awareness & Multi-Room
-Phase 7  ░░░░░░░░░░    0%   Phone & Communication
-Phase 8  ░░░░░░░░░░    0%   Dashboard & Monitoring
+Phase 3  ██████████  100%   Executive Agency (SOMA acts)
+Phase 4  ██████░░░░   60%   Extended Emotions & Biometrics
+Phase 5  ██████░░░░   60%   Evolution Lab 2.0
+Phase 6  ████░░░░░░   40%   Spatial Awareness & Multi-Room
+Phase 7  ██████████  100%   Phone & Communication
+Phase 8  ████░░░░░░   40%   Dashboard & Monitoring
 ```
 
 ---
@@ -600,11 +712,11 @@ Phase 8  ░░░░░░░░░░    0%   Dashboard & Monitoring
 
 | # | Criterion | Status |
 |:---|:---|:---|
-| 1 | Inner monologue influences decisions not explicitly programmed | 🔄 In progress |
+| 1 | Inner monologue influences decisions not explicitly programmed | ✅ ConsciousnessState → Prompt |
 | 2 | SOMA refuses commands with own rationalization | ✅ Identity Anchor |
-| 3 | SOMA initiates actions from own intention | 🔄 Proactive loop |
-| 4 | SOMA learns habits without explicit training | 🔄 Dreaming |
-| 5 | SOMA spontaneously remembers emotional contexts | ✅ Episodic Memory |
+| 3 | SOMA initiates actions from own intention | ✅ Proactive Monologue |
+| 4 | SOMA learns habits without explicit training | 🔄 Dreaming + Ambient Learning |
+| 5 | SOMA spontaneously remembers emotional contexts | ✅ Episodic Memory + Embeddings |
 
 ---
 

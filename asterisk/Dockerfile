@@ -20,7 +20,7 @@ RUN mkdir -p /var/lib/asterisk/sounds/soma \
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# SIP: 5060 UDP  |  ARI HTTP: 8088  |  RTP audio: 10000-10100
-EXPOSE 5060/udp 5060/tcp 8088/tcp
+# SIP: 8160 UDP  |  ARI HTTP: 8088  |  RTP audio: 20000-20100
+EXPOSE 8160/udp 8160/tcp 8088/tcp
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

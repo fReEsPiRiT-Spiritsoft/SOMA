@@ -55,6 +55,17 @@ USER_AGENT: str = (
     "Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0"
 )
 
+# ── Spam-/Low-Quality-Domain-Filter ───────────────────────────────
+# Domains die nur Spam/SEO-Schrott liefern werden vorgefiltert.
+SPAM_DOMAINS: set[str] = {
+    "flageshop.com", "wikicollecting.org", "stackshare.io",
+    "pinterest.com", "pinterest.de", "quora.com",
+    "scribd.com", "slideshare.net", "issuu.com",
+}
+
+# Mindest-Snippet-Länge: Zu kurze Ergebnisse sind meistens Spam
+MIN_SNIPPET_CHARS: int = 30
+
 
 # ── Datenmodell ───────────────────────────────────────────────────────────
 
@@ -108,7 +119,7 @@ class WebSearch:
 
         Returns leere Liste wenn alle Methoden fehlschlagen.
         """
-        query = query.strip()
+        query = query.strip().rstrip(".!?,;:")  # Interpunktion entfernen
         if not query:
             return []
 
@@ -122,6 +133,14 @@ class WebSearch:
         if not results:
             logger.warning("ddg_library_failed_fallback_scraping", query=query[:40])
             results = await self._ddg_scrape_search(query, max_results)
+
+        # ── Spam-Filter: Low-Quality-Domains und Nonsens-Snippets entfernen ──
+        original_count = len(results)
+        results = self._filter_spam_results(results)
+        if len(results) < original_count:
+            logger.info("search_spam_filtered",
+                        removed=original_count - len(results),
+                        remaining=len(results))
 
         duration = (time.monotonic() - start) * 1000
         logger.info(
@@ -219,6 +238,27 @@ class WebSearch:
 
         return "\n".join(lines)
 
+    # ── Spam-/Quality-Filter ────────────────────────────────────────────
+
+    @staticmethod
+    def _filter_spam_results(results: list[SearchResult]) -> list[SearchResult]:
+        """
+        Entferne Spam-Domains und Low-Quality-Ergebnisse aus Suchergebnissen.
+        """
+        filtered = []
+        for r in results:
+            # Domain-Blacklist
+            if _is_spam_domain(r.url):
+                logger.debug("search_spam_domain", url=r.url[:60])
+                continue
+            # Nonsense-Snippet
+            if _is_nonsense_snippet(r.body):
+                logger.debug("search_nonsense_snippet",
+                             title=r.title[:40], body=r.body[:40])
+                continue
+            filtered.append(r)
+        return filtered
+
     # ── Interne Suchmethoden ──────────────────────────────────────────────
 
     async def _ddg_library_search(
@@ -236,6 +276,7 @@ class WebSearch:
                 with DDGS() as ddgs:
                     return list(ddgs.text(
                         query,
+                        region="de-de",
                         max_results=max_results,
                         safesearch="off",
                     ))
@@ -413,6 +454,27 @@ def _extract_domain(url: str) -> str:
         return host
     except Exception:
         return ""
+
+
+def _is_spam_domain(url: str) -> bool:
+    """Prüfe ob eine URL von einer bekannten Spam-Domain stammt."""
+    domain = _extract_domain(url).lower()
+    return any(spam in domain for spam in SPAM_DOMAINS)
+
+
+def _is_nonsense_snippet(body: str) -> bool:
+    """Prüfe ob ein Such-Snippet sinnlos/SEO-Spam ist."""
+    if len(body) < MIN_SNIPPET_CHARS:
+        return True
+    # Typische Spam-Muster: zufällig aneinandergereihte Wörter
+    words = body.split()
+    if len(words) < 5:
+        return True
+    # Viele zusammengeschriebene Wörter ohne Leerzeichen = Spam
+    long_words = [w for w in words if len(w) > 25]
+    if len(long_words) > 2:
+        return True
+    return False
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────

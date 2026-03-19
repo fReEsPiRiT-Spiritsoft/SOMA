@@ -79,6 +79,39 @@ def set_speak_callback(cb):
     _speak_callback = cb
 
 
+async def execute(*args, **kwargs):
+    """
+    Haupt-Einstiegspunkt für Plugin-Dispatch.
+    Wird aufgerufen via [ACTION:monitor_listening monitor="1"] etc.
+    
+    Params (als kwargs):
+      monitor: str  — Monitor-Nummer (1-basiert), default "0" = alle
+      action: str   — "screenshot" | "observe" | "stop" | "window" | "analyze" (default)
+    """
+    action = kwargs.get("action", "analyze").lower()
+    monitor_str = kwargs.get("monitor", "0")
+    
+    try:
+        monitor_num = int(monitor_str)
+    except (ValueError, TypeError):
+        monitor_num = 0
+
+    if action == "observe":
+        interval = int(kwargs.get("interval", "30"))
+        return await start_observing(interval_sec=interval, monitor=monitor_num)
+    elif action == "stop":
+        return await stop_observing()
+    elif action == "window":
+        info = await get_active_window()
+        return f"Aktives Fenster: {info['title']} (App: {info['app']})"
+    elif action == "screenshot":
+        path = await take_screenshot(monitor=monitor_num)
+        return f"Screenshot gespeichert: {path}" if path else "Screenshot fehlgeschlagen"
+    else:
+        # Default: Vollanalyse (Screenshot + OCR + aktives Fenster)
+        return await analyze_screen(monitor=monitor_num)
+
+
 # ── System Dependency Check ───────────────────────────────────────────────
 
 async def _check_system_deps() -> list[str]:

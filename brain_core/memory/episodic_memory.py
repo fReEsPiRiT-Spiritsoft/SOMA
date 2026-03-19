@@ -8,7 +8,6 @@ Gespeichert in SQLite. Vector-Search via numpy Dot-Product.
 from __future__ import annotations
 
 import os
-import hashlib
 import asyncio
 import time
 import sqlite3
@@ -18,7 +17,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-import aiohttp
+
+from brain_core.memory.embedding_service import get_embedding_service
 
 logger = logging.getLogger("soma.memory.episodic")
 
@@ -63,7 +63,6 @@ class EpisodicMemory:
         self._db_path = DB_PATH
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: Optional[sqlite3.Connection] = None
-        self._embed_cache: dict[str, np.ndarray] = {}
         self._ready = False
 
     async def initialize(self):
@@ -136,35 +135,11 @@ class EpisodicMemory:
                     f"Migrated episodes table: added {col_name}"
                 )
 
-    # ── Embedding via Ollama ─────────────────────────────────────────
+    # ── Embedding via Shared Service ──────────────────────────────────
 
     async def _embed(self, text: str) -> Optional[np.ndarray]:
-        """Lokales Embedding via Ollama — ~10ms pro Call."""
-        cache_key = hashlib.md5(text[:500].encode()).hexdigest()
-        if cache_key in self._embed_cache:
-            return self._embed_cache[cache_key]
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{OLLAMA_URL}/api/embeddings",
-                    json={"model": EMBED_MODEL, "prompt": text[:500]},
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        vec = np.array(data["embedding"], dtype=np.float32)
-                        norm = np.linalg.norm(vec)
-                        if norm > 0:
-                            vec /= norm
-                        self._embed_cache[cache_key] = vec
-                        if len(self._embed_cache) > 500:
-                            oldest = next(iter(self._embed_cache))
-                            del self._embed_cache[oldest]
-                        return vec
-        except Exception as e:
-            logger.debug(f"Embedding failed: {e}")
-        return None
+        """Embedding via shared EmbeddingService (persistent session + LRU cache)."""
+        return await get_embedding_service().embed(text)
 
     # ── Store ────────────────────────────────────────────────────────
 

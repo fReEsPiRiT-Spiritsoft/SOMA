@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Optional
+from typing import Optional, AsyncGenerator
 
 import httpx
 import structlog
@@ -160,11 +160,13 @@ class HeavyLlamaEngine(BaseEngine):
             messages.append({"role": "user", "content": prompt})
 
         # Basis-Options + optionaler Override (z.B. temperature=0.1 für Code-Generierung)
+        # SPEED: num_ctx=8192 statt 16384 — spart ~40% VRAM, schnellerer Prompt-Eval.
+        # Voice-Konversation braucht selten mehr. Plugin-Generierung kann überschreiben.
         ollama_options = {
-            "num_ctx": 16384,
-            "temperature": 0.4,
-            "top_p": 0.85,
-            "repeat_penalty": 1.15,
+            "num_ctx": 8192,
+            "temperature": 0.65,     # Menschlicher! 0.4 war zu robotisch/vorhersagbar
+            "top_p": 0.9,            # Breiteres Vokabular für natürliche Sprache
+            "repeat_penalty": 1.08,   # Subtiler — 1.15 erzeugt unnatürliche Wortvermeidung
         }
         if options_override:
             ollama_options.update(options_override)
@@ -180,6 +182,7 @@ class HeavyLlamaEngine(BaseEngine):
                 "model": self._model,
                 "messages": messages,
                 "stream": False,
+                "keep_alive": settings.ollama_heavy_keep_alive,
                 "options": ollama_options,
             }
             # Qwen3: think=false deaktiviert den internen Reasoning-Modus
@@ -211,6 +214,97 @@ class HeavyLlamaEngine(BaseEngine):
         )
 
         return response
+
+    async def generate_stream(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        session_id: Optional[str] = None,
+        options_override: Optional[dict] = None,
+    ) -> AsyncGenerator[str, None]:
+        """Streame Antwort Token für Token via Ollama Chat API (stream=True).
+
+        Yields einzelne Token-Chunks während der Generierung.
+        Session-History wird am Ende korrekt aktualisiert.
+        """
+        if not self._client:
+            raise RuntimeError("HeavyEngine nicht initialisiert")
+
+        self._last_request_time = time.monotonic()
+        self._model_loaded = True
+
+        # Session-Kontext
+        messages = []
+        if session_id:
+            session = self.get_or_create_session(
+                session_id, system_prompt=system_prompt or ""
+            )
+            session.add_turn("user", prompt)
+            messages = session.to_messages(system_prompt)
+        else:
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+
+        ollama_options = {
+            "num_ctx": 8192,
+            "temperature": 0.65,     # Menschlicher! 0.4 war zu robotisch/vorhersagbar
+            "top_p": 0.9,            # Breiteres Vokabular für natürliche Sprache
+            "repeat_penalty": 1.08,   # Subtiler — 1.15 erzeugt unnatürliche Wortvermeidung
+        }
+        if options_override:
+            ollama_options.update(options_override)
+
+        use_thinking = self._should_use_thinking(prompt)
+
+        payload = {
+            "model": self._model,
+            "messages": messages,
+            "stream": True,
+            "keep_alive": settings.ollama_heavy_keep_alive,
+            "options": ollama_options,
+        }
+        if not use_thinking:
+            payload["think"] = False
+
+        full_response = ""
+        self._is_generating = True
+        try:
+            async with self._client.stream(
+                "POST", "/api/chat", json=payload, timeout=120.0
+            ) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.strip():
+                        continue
+                    import json as _json
+                    try:
+                        chunk = _json.loads(line)
+                    except _json.JSONDecodeError:
+                        continue
+                    if chunk.get("done"):
+                        break
+                    token = chunk.get("message", {}).get("content", "")
+                    if token:
+                        full_response += token
+                        yield token
+        finally:
+            self._is_generating = False
+            self._last_request_time = time.monotonic()
+
+        # Session updaten mit vollständiger Antwort
+        if session_id:
+            session = self._sessions.get(session_id)
+            if session:
+                session.add_turn("assistant", full_response)
+
+        logger.info(
+            "heavy_stream_complete",
+            model=self._model,
+            prompt_len=len(prompt),
+            response_len=len(full_response),
+            thinking=use_thinking,
+        )
 
     @staticmethod
     def _should_use_thinking(prompt: str) -> bool:

@@ -30,7 +30,8 @@ from dataclasses import dataclass
 from typing import Optional, Callable, Awaitable
 
 import numpy as np
-import aiohttp
+
+from brain_core.memory.embedding_service import get_embedding_service
 
 logger = logging.getLogger("soma.memory.diary")
 
@@ -153,24 +154,8 @@ class DiaryWriter:
     # ── Embedding ────────────────────────────────────────────────────
 
     async def _embed(self, text: str) -> Optional[np.ndarray]:
-        """Embedding via Ollama fuer spaeteres Retrieval."""
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{OLLAMA_URL}/api/embeddings",
-                    json={"model": EMBED_MODEL, "prompt": text[:500]},
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        vec = np.array(data["embedding"], dtype=np.float32)
-                        norm = np.linalg.norm(vec)
-                        if norm > 0:
-                            vec /= norm
-                        return vec
-        except Exception as e:
-            logger.debug(f"Diary embedding failed: {e}")
-        return None
+        """Embedding via shared EmbeddingService (persistent session + LRU cache)."""
+        return await get_embedding_service().embed(text)
 
     # ══════════════════════════════════════════════════════════════════
     #  WRITE — Tagebucheintraege erstellen

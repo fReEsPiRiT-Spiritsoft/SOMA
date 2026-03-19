@@ -16,6 +16,7 @@ from brain_core.memory.preloader import SpeculativePreloader
 from brain_core.memory.background_tasks import BackgroundConsolidator
 from brain_core.memory.prompt_builder import build_system_prompt
 from brain_core.memory.two_phase import TwoPhaseResponder  # noqa: F401
+from brain_core.memory.embedding_service import get_embedding_service
 
 logger = logging.getLogger("soma.memory.integration")
 
@@ -28,6 +29,9 @@ _consolidator: Optional[BackgroundConsolidator] = None
 async def init_memory_system() -> MemoryOrchestrator:
     """Einmal beim Start aufrufen (main.py lifespan)."""
     global _orchestrator, _preloader, _consolidator
+
+    # Shared Embedding Service (persistent aiohttp session + LRU cache)
+    await get_embedding_service().initialize()
 
     _orchestrator = MemoryOrchestrator()
     await _orchestrator.initialize()
@@ -175,3 +179,11 @@ def set_diary_llm(llm_callable):
     """Separates LLM fuer Diary (z.B. Light-Engine statt Heavy)."""
     if _orchestrator and _orchestrator.diary:
         _orchestrator.diary.set_llm(llm_callable)
+
+
+async def shutdown_memory_system():
+    """Sauber herunterfahren: Consolidator + Embedding Service."""
+    if _consolidator:
+        _consolidator.stop()
+    await get_embedding_service().shutdown()
+    logger.info("memory_system_shutdown")

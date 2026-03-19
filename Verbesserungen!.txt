@@ -7,3 +7,44 @@ Router ausgabe muss in den kontext mit einfließen
 
 
 Erinnerungsanfragen werden ins gedächtniss gespeichert, beim nächsten promt sagt er die erinnerung mit anstadt eigenständig nach ablaufen der Zeit die erinnerung auszusprechen ( Timer / Kalender funktion)
+
+Neuen Sytsem Prompt generieren im kontext des Gedächtnisses der Plugin generierung und der Actions Calls
+
+Soma soll iohren "User" anhand der stimme identifizeren können. dann gibts ja noch den child mode der aufjedenfall noch geupdatet werden muss. und spricht mal eine fremde persn darf soma gern 
+fragen wer da ist, die Stimme mit Namen ( wenn er gesagt wird) Speichern und die person wieder erkennen.  sollte eine "Fremde" Person keinen namen sagen oder etwas komisches und böse absichten haben, 
+darf ein "Notsystem"(wird später noch   implementiert) getriggert werden
+
+
+Thinking der Monologe und dreaming sollen eigenen eigenen fab und visualisierungs sprektrum im orb und der sinus kurve haben
+
+Kontrollieren ob langzeit gedächtniss und kurzeitgedächntis richtig funktionieren
+(LLM Mitgeben die gewichtung der priorität ihreer gedanken und dessen inhalt zu bedenken und zu filtern was ins langzeit und  was ins kurzzeit gedächtniss muss /soll)
+Daraus soll die KI alle 24 betriebsstunden mit einem guten Prompt ( async Dreamingstream und bei anfragen (wenn system überlastung in den Workflow einbinden und mit dem kleinen
+LLM bescheid geben das es abgearbeitet wird. ) Die datenbank aufräumen sortieren strukturieren (gerne erinnerungen in kontextbezogene stichwörter schreiben die beim abrufen verstanden werden),
+ größtes gewicht zum beahlten der daten)
+
+
+Suche mit KI  Wir kriegen es sicher hin das SOMA eine KI im internet (über brwoser erreichbar OHNE API)  für rescherchen zu verwenden
+
+Ambient Buffer 	Letzte 2 Min aller Gespräche als Kontext — auch ohne Wake-Word(Richtig implementieren und auf 10 sekunden reduzieren (nach beendigung der sprach ausgabe!))
+
+Wirklich analysiert?: 
+Audio-Features: Pitch, Energy, Speaking Rate, Jitter, Shimmer
+
+
+Child Detection — Pitch > 250 Hz → Child-Safe Mode automatisch (Sicher?)
+
+
+Evolution-Lab und Konsoleneingaben durch Copilot API einbinden.
+
+Hard gecodete dinge wie meine IP adresse(asterisk)
+
+und eben solche API Keys. sollen über das Dashboard konfigurierbar sein.   über das Dashboard Soll ebenfalls auf den Erinnerungsspeicher zugegriffen werden können mit edit und Delete
+
+
+Wenn ich sage SOma, nächstes Lied, dann soll sie erstmal schauen wo läuft grad Musik lokal, browser, mediaplayer oder sonst wo. und dann dort das näcshte lied starten.
+
+Wenn bereits musik läuft und ich sage spiele xy   dann soll sie natürlich auch das programm verwendet in dem bereits  musik läuft!:
+
+
+Youtube play pause sollte auch klappen mit focus firefox und leertaste z.b. 

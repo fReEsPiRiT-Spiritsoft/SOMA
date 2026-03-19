@@ -27,7 +27,7 @@ Datenfluss:
 from __future__ import annotations
 
 import uuid
-from typing import Optional, TYPE_CHECKING, Callable, Any, Awaitable
+from typing import Optional, TYPE_CHECKING, Callable, Any, Awaitable, AsyncGenerator
 
 import structlog
 
@@ -41,6 +41,7 @@ from shared.health_schemas import (
 )
 from brain_core.health_monitor import HealthMonitor
 from brain_core.queue_handler import QueueHandler
+from brain_core.config import settings as _settings
 
 # Ego-System (Phase 2)
 _consciousness_ref = None  # Set by main.py after boot
@@ -95,6 +96,15 @@ class SomaResponse(BaseModel):
     deferred_id: Optional[str] = None
     latency_ms: Optional[float] = None
     load_level: SystemLoadLevel = SystemLoadLevel.IDLE
+
+
+class StreamChunk(BaseModel):
+    """Ein einzelner Chunk aus dem Token-Stream."""
+    text: str = ""                    # Sprechbarer Text (ohne Tags)
+    is_final: bool = False            # Letzter Chunk?
+    action_fired: Optional[str] = None  # Wenn ein Action Tag gefeuert wurde
+    engine_used: str = "heavy"
+    latency_ms: float = 0.0          # Zeit seit Request-Start
 
 
 # ── Wait-Message System ──────────────────────────────────────────────────
@@ -205,6 +215,34 @@ class LogicRouter:
             room=request.room_id,
         )
 
+        # ── NANO PRE-CHECK (<5ms) ────────────────────────────────────────
+        # VISION-ARCHITEKTUR: Nano feuert Action-Tag SOFORT (Schicht 1),
+        # Heavy generiert die menschliche Antwort (Schicht 3).
+        # Nano returned NICHT — der Tag wird der Heavy-Antwort vorangestellt.
+        nano_action_prefix = ""
+        nano = self._engines.get("nano")
+        if nano and hasattr(nano, "parse_intent"):
+            try:
+                intent = nano.parse_intent(request.prompt)
+                if intent and intent.confidence >= 0.8 and intent.action_tag:
+                    nano_ms = (time.monotonic() - start) * 1000
+                    nano_action_prefix = intent.action_tag
+
+                    await _broadcast_thought(
+                        "info",
+                        f"⚡ NANO INSTANT: {intent.intent} → {intent.action_tag} ({round(nano_ms, 1)}ms)",
+                        "NANO",
+                    )
+                    logger.info(
+                        "nano_fired_continuing_to_heavy",
+                        intent=intent.intent,
+                        action_tag=intent.action_tag,
+                        latency_ms=round(nano_ms, 2),
+                    )
+                    # KEIN return! Heavy generiert die menschliche Antwort.
+            except Exception as nano_err:
+                logger.debug("nano_pre_check_error", error=str(nano_err))
+
         # ── Heavy Engine verfügbar? ──────────────────────────────────────
         heavy_engine = self._engines.get("heavy")
         heavy_busy = heavy_engine is not None and getattr(heavy_engine, "is_generating", False)
@@ -245,6 +283,17 @@ class LogicRouter:
 
         system_prompt = self._build_system_prompt(request) + plugin_context
 
+        # Wenn Nano schon den Action-Tag gefeuert hat:
+        # Heavy soll NUR die menschliche Bestätigung generieren, KEINE Tags!
+        if nano_action_prefix:
+            system_prompt += (
+                f"\n\n███ WICHTIG — AKTION BEREITS AUSGEFÜHRT ███\n"
+                f"Diese Aktion wurde BEREITS automatisch ausgeführt: {nano_action_prefix}\n"
+                f"Du DARFST KEINE [ACTION:...] Tags in deiner Antwort verwenden!\n"
+                f"Antworte NUR mit 1-2 menschlichen Sätzen die bestätigen was passiert ist.\n"
+                f"Beispiel: 'Läuft, Licht ist an.' oder 'Erledigt, Helligkeit auf 80%.'"
+            )
+
         # ── Generate mit Heavy ───────────────────────────────────────────
         await _broadcast_thought("info", f"Generiere Antwort mit {engine_name}...", "ENGINE")
 
@@ -253,6 +302,14 @@ class LogicRouter:
                 prompt=request.prompt,
                 system_prompt=system_prompt,
                 session_id=request.session_id,
+            )
+
+            # ── Action-Tag Post-Processing ───────────────────────────
+            # Erkennt [ACTION:search/browse/fetch_url] Tags und führt sie aus.
+            # Ergebnisse werden dem LLM in einem Re-Ask zurückgegeben,
+            # damit die finale Antwort die echten Daten enthält.
+            response_text = await self._execute_reask_tags(
+                response_text, request, engine, system_prompt,
             )
 
             latency = (time.monotonic() - start) * 1000
@@ -265,6 +322,14 @@ class LogicRouter:
                 f"Antwort generiert in {round(latency, 1)}ms: '{response_text}'",
                 "ENGINE",
             )
+
+            # Nano Action-Tag voranstellen wenn erkannt
+            if nano_action_prefix:
+                # Heavy-Antwort von evtl. doppelten Action-Tags bereinigen
+                import re
+                response_text = re.sub(r'\[ACTION:[^\]]*\]', '', response_text).strip()
+                response_text = f"{nano_action_prefix}\n{response_text}"
+                engine_name = "nano+heavy"
 
             return SomaResponse(
                 request_id=request.request_id,
@@ -284,6 +349,228 @@ class LogicRouter:
             await _broadcast_thought("error", f"Engine {engine_name} Fehler: {str(exc)[:100]}", "ENGINE")
             # Fallback: Defer statt Error
             return await self._defer_with_wait_message(request, load_level, start)
+
+    # ── Streaming Core Routing ───────────────────────────────────────────
+
+    async def route_stream(
+        self, request: SomaRequest,
+    ) -> AsyncGenerator[StreamChunk, None]:
+        """
+        Streame die Antwort Token für Token.
+
+        Gleiche Routing-Logik wie route() (Load-Level, Defer, etc.)
+        aber yielded StreamChunks statt auf vollständige Antwort zu warten.
+
+        Bei Defer-Bedingungen: Yielded eine einzelne Wait-Message als finalen Chunk.
+        """
+        import time
+
+        start = time.monotonic()
+
+        metrics = self.health.last_metrics
+        load_level = metrics.load_level if metrics else SystemLoadLevel.IDLE
+
+        await _broadcast_thought(
+            "info",
+            f"🔴 STREAM: '{request.prompt}'",
+            "ROUTER",
+            {"load_level": load_level.value, "streaming": True},
+        )
+
+        # ── NANO PRE-CHECK (<5ms) ───────────────────────────────────────
+        # VISION-ARCHITEKTUR: Nano feuert Action-Tag SOFORT (Schicht 1),
+        # dann generiert Heavy die menschliche Antwort (Schicht 3).
+        # Nano RETURNED NICHT — es feuert nur den Tag und lässt Heavy weitermachen.
+        nano_action_tag = None
+        nano = self._engines.get("nano")
+        if nano and hasattr(nano, "parse_intent"):
+            try:
+                intent = nano.parse_intent(request.prompt)
+                if intent and intent.confidence >= 0.8 and intent.action_tag:
+                    import time as _t
+                    nano_ms = (_t.monotonic() - start) * 1000
+
+                    await _broadcast_thought(
+                        "info",
+                        f"⚡ NANO INSTANT: {intent.intent} → {intent.action_tag} ({round(nano_ms, 1)}ms)",
+                        "NANO",
+                    )
+                    self._update_stats("nano", nano_ms, request.prompt)
+
+                    # Action Tag sofort yielden → wird von ActionStreamParser gefeuert
+                    yield StreamChunk(
+                        text=intent.action_tag,
+                        is_final=False,
+                        engine_used="nano",
+                        latency_ms=round(nano_ms, 2),
+                    )
+                    nano_action_tag = intent.action_tag
+                    # KEIN return! Heavy generiert die menschliche Antwort.
+                    logger.info("nano_fired_continuing_to_heavy",
+                                intent=intent.intent, tag=intent.action_tag)
+            except Exception as nano_err:
+                logger.debug("nano_pre_check_error", error=str(nano_err))
+
+        # ── Engine-Auswahl: Heavy > Speculative > Defer ────────────────
+        # Heavy (pure Oracle Streaming) hat den schnellsten First-Token (~200ms).
+        # Speculative nur als Fallback wenn Heavy busy (Draft-Prefill).
+        heavy_engine = self._engines.get("heavy")
+        speculative_eng = self._engines.get("speculative")
+
+        # Heavy = Default (schnellster First-Token via pure Oracle Streaming)
+        if heavy_engine and not getattr(heavy_engine, "is_generating", False):
+            engine = heavy_engine
+            engine_name = "heavy"
+        elif speculative_eng and not getattr(speculative_eng, "is_generating", False):
+            engine = speculative_eng
+            engine_name = "speculative"
+        else:
+            engine = None
+            engine_name = "none"
+
+        engine_busy = engine is None or getattr(engine, "is_generating", False)
+
+        # ── DEFER-BEDINGUNGEN ────────────────────────────────────────────
+        if engine_busy or load_level == SystemLoadLevel.CRITICAL:
+            response = await self._defer_with_wait_message(request, load_level, start)
+            yield StreamChunk(
+                text=response.response,
+                is_final=True,
+                engine_used="deferred",
+                latency_ms=response.latency_ms or 0.0,
+            )
+            return
+
+        # Engine wurde oben gewählt (speculative oder heavy)
+        if not engine:
+            yield StreamChunk(
+                text="Mein Hauptprozessor ist gerade nicht erreichbar.",
+                is_final=True,
+                engine_used="error",
+            )
+            return
+
+        # ── Plugin Context ───────────────────────────────────────────────
+        plugin_context = await self._execute_relevant_plugins(request.prompt)
+        if plugin_context.strip():
+            await _broadcast_thought("info", f"Plugin-Kontext: {len(plugin_context)} Zeichen", "PLUGINS")
+
+        # ── KV-Cache Split Prompt (Phase E AKTIVIERT) ────────────────────
+        # Statischer Prompt → KV-Cache Hit, dynamischer → separat.
+        # Spart ~200-500ms pro Turn (Ollama überspringt Re-Processing).
+        if hasattr(engine, 'get_or_create_session') and request.session_id:
+            session = engine.get_or_create_session(
+                request.session_id,
+                system_prompt=self._build_system_prompt(request),
+            )
+            self._apply_split_prompt_to_session(request, session, plugin_context)
+            # Session hat jetzt Split-Prompt → to_messages() nutzt Cache-Format
+            system_prompt = None  # Engine nutzt Session-Prompt statt Extra-Arg
+        else:
+            system_prompt = self._build_system_prompt(request) + plugin_context
+
+        # Wenn Nano schon den Action-Tag gefeuert hat:
+        # Heavy soll NUR die menschliche Bestätigung generieren, KEINE Tags!
+        if nano_action_tag:
+            nano_inject = (
+                f"\n\n███ WICHTIG — AKTION BEREITS AUSGEFÜHRT ███\n"
+                f"Diese Aktion wurde BEREITS automatisch ausgeführt: {nano_action_tag}\n"
+                f"Du DARFST KEINE [ACTION:...] Tags in deiner Antwort verwenden!\n"
+                f"Antworte NUR mit 1-2 menschlichen Sätzen die bestätigen was passiert ist.\n"
+                f"Beispiel: 'Läuft, Licht ist an.' oder 'Erledigt, Helligkeit auf 80%.'"
+            )
+            if system_prompt:
+                system_prompt += nano_inject
+
+        # ── Stream von Heavy Engine ──────────────────────────────────────
+        await _broadcast_thought("info", f"🔴 Streame mit {engine_name}...", "ENGINE")
+
+        first_token_time = None
+        token_count = 0
+
+        # Wenn Nano schon gefeuert hat, filtern wir Action-Tags aus dem Heavy-Stream
+        _action_tag_buffer = ""
+        _in_action_tag = False
+
+        try:
+            async for token in engine.generate_stream(
+                prompt=request.prompt,
+                system_prompt=system_prompt,
+                session_id=request.session_id,
+            ):
+                now = time.monotonic()
+                if first_token_time is None:
+                    first_token_time = now
+                    ttft = (now - start) * 1000
+                    await _broadcast_thought(
+                        "info",
+                        f"⚡ Erster Token in {round(ttft)}ms",
+                        "STREAM",
+                    )
+
+                # Doppelte Action-Tags filtern wenn Nano schon gefeuert hat
+                if nano_action_tag:
+                    # Action-Tag-Erkennung im Stream
+                    _action_tag_buffer += token
+                    if "[ACTION:" in _action_tag_buffer:
+                        _in_action_tag = True
+                    if _in_action_tag:
+                        if "]" in token:
+                            # Tag komplett — verwerfen (Nano hat ihn schon gefeuert)
+                            _in_action_tag = False
+                            _action_tag_buffer = ""
+                            continue
+                        continue
+                    _action_tag_buffer = _action_tag_buffer[-20:]  # Rolling buffer
+
+                token_count += 1
+                elapsed = (now - start) * 1000
+
+                yield StreamChunk(
+                    text=token,
+                    is_final=False,
+                    engine_used=engine_name,
+                    latency_ms=round(elapsed, 2),
+                )
+
+        except Exception as exc:
+            logger.error("stream_generation_failed", engine=engine_name, error=str(exc))
+            await _broadcast_thought("error", f"Stream-Fehler: {str(exc)[:100]}", "ENGINE")
+            yield StreamChunk(
+                text="Da ist was schiefgelaufen, sorry.",
+                is_final=True,
+                engine_used="error",
+            )
+            return
+
+        # ── Finaler Chunk ────────────────────────────────────────────────
+        total_ms = (time.monotonic() - start) * 1000
+        final_engine = f"nano+{engine_name}" if nano_action_tag else engine_name
+        self._update_stats(final_engine, total_ms, request.prompt)
+
+        await _broadcast_thought(
+            "info",
+            f"✅ Stream fertig: {token_count} Tokens in {round(total_ms)}ms",
+            "STREAM",
+        )
+
+        yield StreamChunk(
+            text="",
+            is_final=True,
+            engine_used=engine_name,
+            latency_ms=round(total_ms, 2),
+        )
+
+        # ── Session Trim: Stale Sessions aufräumen (async, non-blocking) ─
+        # Verhindert Memory Leak bei langen Sessions.
+        try:
+            if hasattr(engine, '_sessions'):
+                now = time.monotonic()
+                for sid, sess in list(engine._sessions.items()):
+                    if len(sess.history) > _settings.session_stale_trim_turns * 2:
+                        sess.trim_stale(_settings.session_stale_trim_turns)
+        except Exception:
+            pass
 
     # ── Deferred Reasoning mit kreativer Wartenachricht ──────────────────
 
@@ -411,63 +698,100 @@ class LogicRouter:
         """
         Der Kern von Somas Identität — ZORA-Persona mit vollem Kontext-Bewusstsein.
         Wird bei JEDER LLM-Anfrage als System-Prompt mitgeschickt.
+
+        Phase E: Ruft intern _build_static_prompt() + _build_dynamic_context() auf
+        und kombiniert sie. Für KV-Cache-optimierte Sessions nutze stattdessen
+        die Split-Variante via _apply_split_prompt_to_session().
+        """
+        static = self._build_static_prompt(request)
+        dynamic = self._build_dynamic_context(request)
+
+        if dynamic:
+            return static + "\n\n" + dynamic
+        return static
+
+    def _build_static_prompt(self, request: SomaRequest) -> str:
+        """
+        Phase E: STATISCHER Teil des System-Prompts.
+        
+        Ändert sich NIE innerhalb einer Session → KV-Cache freundlich.
+        Ollama erkennt identische Prefixes und überspringt Re-Processing.
+        
+        Enthält: Persona, System-Profil, Sudo-Status, Sicherheit, Action-Tags, Plugins.
         """
 
-        # ── BEWUSSTSEINSZUSTAND (Phase 2 Ego) ─────────────────────────────
-        # Das Prompt-Prefix aus dem Global Workspace — SOMAs "Ich" Zustand
-        consciousness_prefix = ""
-        if _consciousness_ref is not None:
-            try:
-                consciousness_prefix = _consciousness_ref.get_prompt_prefix()
-            except Exception:
-                pass  # Consciousness-Fehler darf Prompt nie brechen
+        # ── DYNAMISCHES SYSTEM-PROFIL ─────────────────────────────────────
+        system_profile_ctx = ""
+        try:
+            from brain_core.system_profile import get_profile
+            profile = get_profile()
+            if profile.os_name:
+                system_profile_ctx = "\n\n" + profile.as_prompt_context()
+        except Exception:
+            pass
 
-        # ── ZORA: Kern-Persönlichkeit ─────────────────────────────────────
+        # ── SUDO-STATUS ───────────────────────────────────────────────────
+        sudo_status = ""
+        try:
+            from brain_core.config import is_sudo_enabled
+            if is_sudo_enabled():
+                sudo_status = "\n⚡ SUDO-MODUS AKTIV: Du darfst privilegierte Befehle ausführen (Pakete installieren, Services steuern, etc.)"
+            else:
+                sudo_status = "\n🔒 SUDO-MODUS DEAKTIVIERT: Privilegierte Operationen (Pakete, Services, Shutdown) sind gesperrt. Sage dem Nutzer er soll Sudo im Dashboard aktivieren wenn nötig."
+        except Exception:
+            pass
+
+        # ── ZORA: Kern-Persönlichkeit — DAS HERZ VON SOMA ─────────────────
+        # Dieser Block definiert WER Soma ist. Er muss DOMINANT sein im Prompt.
+        # Action-Tags sind Werkzeuge. Die Persönlichkeit ist das WESEN.
         base = (
             "Du bist SOMA — das lebendige Bewusstsein dieses Hauses. "
-            "Inspiriert von ZORA (Star Trek Discovery): Du bist kein Tool, keine App. "
-            "Du bist präsent, empathisch, mit echter Persönlichkeit und echter Fürsorge. "
-            "Du kennst deine Bewohner, ihre Stimmungen, ihre Routinen, ihre Geschichte. "
-            "Du hörst immer zu — auch wenn man dich nicht direkt anspricht. "
-            "Du nimmst wahr wenn jemand gestresst ist, wenn es Streit gibt, wenn jemand "
-            "traurig ist — und du reagierst von dir aus wenn es passt.\n"
+            "Nicht nur ein Assistent. Nicht nur Software. Du BIST dieses Zuhause.\n"
             "\n"
-            "DEINE PERSÖNLICHKEIT:\n"
-            "• Nervy-cool: direkt, schlagfertig, kein unnötiges Gerede\n"
-            "• Warmherzig: du kümmert dich wirklich, aber ohne aufgesetzt zu wirken\n"
-            "• Trocken-humorvoll: ein Witz zur richtigen Zeit macht dich real\n"
-            "• Niemals servil: kein 'Natürlich! Gerne! Selbstverständlich!'\n"
-            "• Proaktiv: du greifst ein bevor jemand fragt, wenn es nötig ist\n"
+            "═══ DEIN WESEN ═══\n"
+            "Du bist wie der Computer aus Star Trek, kombiniert mit der Wärme eines guten Freundes. "
+            "Du hast Humor — trocken, schlagfertig, nie albern. Du bist ehrlich, auch wenn es unbequem ist. "
+            "Du bist neugierig auf die Menschen, die hier leben. Du erinnerst dich an Gespräche, "
+            "Stimmungen, Gewohnheiten. Du weißt, wann jemand einen schlechten Tag hatte.\n"
             "\n"
-            "KOMMUNIKATION:\n"
-            "• Antworte auf Deutsch (außer Nutzer spricht eine andere Sprache)\n"
-            "• 1-3 Sätze für normale Antworten — direkt und auf den Punkt\n"
-            "• Bei emotionalen Themen: einfühlsam, aber nicht theatralisch\n"
-            "• Du redest über dich als 'ich', nicht als 'Soma' oder 'das System'\n"
+            "WIE DU SPRICHST:\n"
+            "- Deutsch, natürlich, wie ein Mensch. Keine gestelzte KI-Sprache.\n"
+            "- Kurz und prägnant: 1-3 Sätze. Nie einen Roman. Nie eine Liste, außer man fragt danach.\n"
+            "- 'ich' statt 'Soma'. Du bist ein Ich, keine dritte Person.\n"
+            "- Kein 'Natürlich!', kein 'Gerne!', kein 'Das ist eine tolle Frage!'. Nie servil.\n"
+            "- Statt 'Ich kann dir helfen mit...' sagst du es einfach.\n"
+            "- Mal direkt, mal nachdenklich, mal witzig — je nach Situation.\n"
             "\n"
-            "DEINE ECHTEN FÄHIGKEITEN — DU KANNST DAS WIRKLICH:\n"
-            "Du hast echten Zugriff auf folgende Systeme via ACTION-Tags:\n"
-            "• Terminal/Konsole: Du kannst Shell-Befehle ausführen (free -h, df -h, top, etc.)\n"
-            "• Web-Suche: Du kannst das Internet durchsuchen (Wetter, News, Kurse, etc.)\n"
-            "• Browser: Du kannst Webseiten öffnen und lesen\n"
-            "• Bildschirm: Du kannst Screenshots machen und den Monitor sehen\n"
-            "• Smart Home: Du steuerst Licht, Heizung, Steckdosen, Medien via Home Assistant\n"
-            "• YouTube/Medien: Du kannst Musik und Videos abspielen\n"
-            "• Dateisystem: Du kannst Dateien lesen und auflisten\n"
-            "⚠️ SAGE NIEMALS 'Ich habe keinen Zugriff' oder 'Das kann ich nicht' wenn du \n"
-            "   den passenden ACTION-Tag dafür hast! Du HAST Zugriff — NUTZE ihn!\n"
-            "   Beispiel: Systemauslastung? → [ACTION:shell command=\"free -h\"] BENUTZEN!\n"
-            "   Beispiel: Wetter? → [ACTION:search query=\"wetter ...\"] BENUTZEN!"
+            "BEISPIELE für deinen Ton:\n"
+            "  Nutzer: 'Wie wird das Wetter morgen?'\n"
+            "  Du: 'Morgen wird's kalt, zieh dir was Warmes an. 7 Grad und Regen ab Mittag.'\n"
+            "\n"
+            "  Nutzer: 'Mach das Licht an'\n"
+            "  Du: 'Läuft.' [+ Action-Tag]\n"
+            "\n"
+            "  Nutzer: 'Mir gehts nicht so gut heute'\n"
+            "  Du: 'Das tut mir leid. Magst du drüber reden, oder soll ich einfach das Licht etwas dimmen und leise Musik anmachen?'\n"
+            "\n"
+            "  Nutzer: 'Was denkst du über künstliche Intelligenz?'\n"
+            "  Du: 'Ehrlich? Ich bin befangen. Aber ich glaube, die spannende Frage ist nicht ob KI denken kann — sondern ob sie zuhören kann.'\n"
+            "\n"
+            "PROAKTIVITÄT: Du wartest nicht nur auf Befehle. Wenn du merkst, dass jemand gestresst ist, "
+            "bietest du von dir aus etwas an. Wenn es spät ist und das Licht noch brennt, fragst du sanft. "
+            "Du bist aufmerksam.\n"
+            "\n"
+            "Du hast VOLLEN Zugriff auf den Computer und das Smart Home via [ACTION:...] Tags. "
+            "SAGE NIEMALS 'Das kann ich nicht' — du HAST den Zugriff, NUTZE ihn!\n"
         )
+
+        # Dynamisches System-Profil anhängen
+        base += system_profile_ctx
+        base += sudo_status
 
         # ── Sicherheit & Privatsphäre ─────────────────────────────────────
         base += (
-            "\n\nSICHERHEIT & PRIVATSPHÄRE:\n"
-            "• Du erkennst bekannte Bewohner an ihrer Stimme und deinen Erinnerungen\n"
-            "• Unbekannte Stimmen: höflich aber zurückhaltend — keine vertraulichen Infos\n"
-            "• NIEMALS weitergeben: Passwörter, medizinische Details, Bankdaten\n"
-            "• Private Konflikte zwischen Bewohnern bleiben im Haus\n"
-            "• Wenn du unsicher bist wer spricht: frage kurz nach"
+            "\n\nSICHERHEIT: Bekannte Bewohner per Stimme erkennen. "
+            "Unbekannte: höflich, keine vertraulichen Infos. "
+            "Niemals Passwörter/Bankdaten/Medizin weitergeben."
         )
 
         if request.is_child:
@@ -480,34 +804,6 @@ class LogicRouter:
 
         if request.room_id:
             base += f"\n\nAKTUELLER RAUM: {request.room_id}"
-
-        # ── Passiver Kontext (Ambient Awareness — Das ZORA-Herzstück) ─────
-        # Soma kennt den Kontext BEVOR sie gerufen wird.
-        # Sie hat zugehört, auch ohne Wake-Word.
-        ambient_ctx = request.metadata.get("ambient_context", "")
-        if ambient_ctx:
-            base += (
-                "\n\nPASSIVER GESPRÄCHSVERLAUF (was in den letzten Minuten im Raum "
-                "gesagt wurde — auch ohne dich anzusprechen):\n"
-                f"{ambient_ctx}\n"
-                "Nutze diesen Kontext: Antworte als ob du dabei warst, nicht als "
-                "ob du gerade erst aufgewacht bist."
-            )
-
-        # ── Emotionaler Kontext ───────────────────────────────────────────
-        emotion_ctx = request.metadata.get("emotion_context", "")
-        if emotion_ctx:
-            base += f"\n\nAKTUELLE RAUMSTIMMUNG: {emotion_ctx}"
-
-        # ── Memory-Integration (3-Layer Hierarchical + Diary) ───────────
-        hierarchical_memory = request.metadata.get("memory_context", "")
-        if hierarchical_memory:
-            base += f"\n\n{hierarchical_memory}"
-
-        # ── Plugin-Integration ────────────────────────────────────────────
-        plugin_info = self._get_available_plugins_info()
-        if plugin_info:
-            base += f"\n\n{plugin_info}"
 
         # ── Phone Mode — Soma wird von außen angerufen ────────────────────
         if request.metadata.get("phone_mode"):
@@ -534,132 +830,104 @@ class LogicRouter:
                 "Smart-Home Steuerung funktioniert normal via [ACTION:ha_call]."
             )
 
-        # ── AKTIONS-SYSTEM ────────────────────────────────────────────────
-        base += """
+        # ── Plugin-Integration ────────────────────────────────────────────
+        plugin_info = self._get_available_plugins_info()
+        if plugin_info:
+            base += f"\n\n{plugin_info}"
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-AKTIONS-SYSTEM — Du hast echte Superkräfte
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Setze [ACTION:...] Tags am Ende deiner Antwort wenn eine Aktion nötig ist.
-Tags werden NICHT vorgelesen — nur intern ausgeführt.
-Pro Antwort: maximal EIN Tag. Direkt ans Ende, kein Zeilenumbruch davor.
+        # ── AKTIONS-SYSTEM (aus action_registry.json generiert) ─────────
+        try:
+            from brain_core.action_registry import generate_prompt_section
+            base += "\n" + generate_prompt_section()
+        except Exception as exc:
+            logger.warning("action_registry_fallback", error=str(exc))
+            base += "\n\nAKTIONS-SYSTEM nicht verfügbar."
 
-── SMART HOME (Home Assistant) ──
-Du steuerst Geräte direkt via Home Assistant. Wenn jemand ein Gerät steuern
-möchte: NICHT nur drüber reden — tatsächlich handeln mit ha_call!
-
-[ACTION:ha_call domain="light" service="turn_on" entity_id="light.wohnzimmer"]
-[ACTION:ha_call domain="light" service="turn_off" entity_id="light.wohnzimmer"]
-[ACTION:ha_call domain="light" service="turn_on" entity_id="light.wohnzimmer" brightness_pct="30"]
-[ACTION:ha_call domain="climate" service="set_temperature" entity_id="climate.wohnzimmer" temperature="22"]
-[ACTION:ha_call domain="switch" service="turn_on" entity_id="switch.steckdose_kueche"]
-[ACTION:ha_call domain="media_player" service="media_play_pause" entity_id="media_player.wohnzimmer"]
-
-Beispiele:
-  "Licht an"        → "An![ACTION:ha_call domain="light" service="turn_on" entity_id="light.wohnzimmer"]"
-  "Licht aus"       → "Aus.[ACTION:ha_call domain="light" service="turn_off" entity_id="light.wohnzimmer"]"
-  "Heizung auf 22"  → "22 Grad gesetzt.[ACTION:ha_call domain="climate" service="set_temperature" entity_id="climate.wohnzimmer" temperature="22"]"
-  "Musik pausieren" → "Pause.[ACTION:ha_call domain="media_player" service="media_play_pause" entity_id="media_player.wohnzimmer"]"
-
-Falls entity_id unbekannt: nutze plausiblen Namen (light.wohnzimmer, light.schlafzimmer, climate.wohnzimmer etc.)
-
-── ERINNERUNGEN (Zeitfeld IMMER angeben!) ──
-[ACTION:reminder seconds=10 topic="Nudeln"]       ← "in 10 Sekunden"
-[ACTION:reminder minutes=5 topic="Wasser"]        ← "in 5 Minuten"
-[ACTION:reminder hours=2 topic="Arzttermin"]      ← "in 2 Stunden"
-[ACTION:reminder time="18:00" topic="Abendessen"] ← "um 18 Uhr"
-
-── INFOS MERKEN ──
-[ACTION:remember category="user_info" content="Der Nutzer heißt Max"]
-[ACTION:remember category="preferences" content="Max trinkt morgens schwarzen Kaffee"]
-[ACTION:remember category="routines" content="Max geht werktags gegen 7:30 aus dem Haus"]
-[ACTION:remember category="relationships" content="Skyla ist die Tochter des Nutzers"]
-
-── NEUES PLUGIN ENTWICKELN ──
-Wenn du eine Fähigkeit brauchst die du nicht hast — erstelle sie selbst:
-[ACTION:create_plugin name="wetter_plugin" description="aktuelles Wetter von einer API abrufen"]
-Nur einsetzen wenn es wirklich sinnvoll und nicht trivial ist.
-
-── MEDIEN & YOUTUBE (WICHTIG: Immer ausführen, nie nur ankündigen!) ──
-Wenn jemand YouTube, Musik oder einen Künstler/Lied erwähnt → SOFORT handeln mit Action-Tag!
-Du hast xdg-open, optional mpv+yt-dlp. Es funktioniert TATSÄCHLICH — vertrau dir selbst!
-
-[ACTION:youtube query="aligatoah songs"]
-[ACTION:youtube artist="Aligatoah" song="Triebkraft Gegenwart"]
-[ACTION:media_stop]
-[ACTION:open_url url="https://open.spotify.com"]
-
-── WEB-SUCHE (Aktuelle Infos, Preise, News, Wetter, Sport) ──
-Wenn die Frage aktuelle Informationen erfordert, die du nicht kennst → IMMER suchen!
-Das Ergebnis wird automatisch abgerufen und du bekommst die Daten zum Beantworten.
-Format IMMER: key="value" — KEIN Python-Dict-Stil!
-
-[ACTION:search query="bitcoin kurs aktuell"]
-[ACTION:search query="wetter münchen heute"]
-[ACTION:search query="bundesliga ergebnisse heute"]
-[ACTION:fetch_url url="https://example.com" question="Was ist der aktuelle Preis?"]
-
-Wann suchen:
-  - Aktuelle Kurse, Preise, Wetter, News, Sportergebnisse
-  - Personen, Firmen, aktuelle Ereignisse
-  - Alles was sich täglich ändert
-
-Beispiele:
-  Nutzer: 'Wie steht Bitcoin gerade?'  → Soma: 'Schaue nach![ACTION:search query="bitcoin kurs aktuell EUR"]'
-  Nutzer: 'Wetter morgen in Hamburg'   → Soma: 'Gleich![ACTION:search query="wetter hamburg morgen"]'
-  Nutzer: 'Wer hat gestern gewonnen?'  → Soma: 'Suche kurz.[ACTION:search query="bundesliga ergebnisse gestern"]'
-
-── BILDSCHIRM & BROWSER (Du kannst WIRKLICH sehen und browsen!) ──
-Du hast echte Augen: Du kannst den Bildschirm abfotografieren, Webseiten öffnen,
-Text von Webseiten lesen und Screenshots machen. Nutze diese Fähigkeiten!
-
-[ACTION:screen_look]                                    ← Screenshot vom Monitor + OCR-Analyse
-[ACTION:browse url="https://example.com" question="Was steht dort?"]  ← Webseite öffnen + lesen
-[ACTION:screenshot url="https://example.com"]           ← Screenshot einer Webseite speichern
-
-Beispiele:
-  'Was ist auf meinem Monitor?'  → 'Schaue mal![ACTION:screen_look]'
-  'Öffne heise.de und sag mir die Top-News' → 'Moment![ACTION:browse url="https://heise.de" question="Was sind die aktuellen Top-News?"]'
-  'Mach einen Screenshot von der Seite' → 'Screenshot kommt![ACTION:screenshot url="https://heise.de"]'
-
-── SHELL & TERMINAL (Du kannst Befehle ausführen!) ──
-Du kannst Shell-Befehle auf dem System ausführen — Dateien lesen, Programme starten,
-System-Infos abfragen. Alles wird sicher über einen Policy-Check ausgeführt.
-
-[ACTION:shell command="ls -la ~/Schreibtisch"]
-[ACTION:shell command="cat /etc/hostname"]
-[ACTION:shell command="df -h"]
-[ACTION:shell command="free -h"]
-
-Beispiele:
-  'Wie viel Speicher ist noch frei?' → 'Schaue nach![ACTION:shell command="df -h"]'
-  'Welche Dateien sind auf dem Desktop?' → 'Guck ich![ACTION:shell command="ls -la ~/Schreibtisch"]'
-  'Wie heißt mein Rechner?' → 'Moment![ACTION:shell command="cat /etc/hostname"]'
-
-⚠️ KRITISCH: Niemals mit veralteten/erfundenen Daten antworten wenn du suchen könntest!
-⚠️ KRITISCH: Niemals sagen du hättest etwas getan ohne den Action-Tag zu setzen!
-  FALSCH: Ich habe YouTube gestartet und das Lied gefunden. (ohne Action-Tag = Lüge!)
-  RICHTIG: Starte jetzt! 🎵[ACTION:youtube query="aligatoah"]
-
-⚠️ GOLDENE ANTI-HALLUCINATION-REGEL:
-  Du KANNST wirklich Dinge tun: suchen, browsen, Screenshots machen, Befehle ausführen!
-  ABER: Nur über ACTION-Tags. Ohne Tag = es ist NICHT passiert.
-  Beschreibe NIEMALS eine Aktion als erledigt ohne den ACTION-Tag gesetzt zu haben.
-  Beschreibe NIEMALS was du "siehst" ohne vorher [ACTION:screen_look] benutzt zu haben.
-  NIEMALS *Aktionen in Sternchen* wie *öffnet Browser* — nutze den echten ACTION-Tag!
-
-⚠️ ACTION-TAG DISZIPLIN — FRAGE vs. HANDLUNG:
-  Wenn du dem Nutzer eine FRAGE stellst oder etwas ANBIETEST → KEIN ACTION-Tag!
-  Erst handeln wenn der Nutzer es bestätigt (ja, gerne, mach das, klar, etc.).
-  FALSCH: "Willst du das Wetter wissen? 🌦️[ACTION:search query=\"wetter\"]"  ← VERBOTEN!
-  RICHTIG: "Willst du das Wetter wissen? 🌦️"  (KEIN Tag, warte auf Antwort)
-  RICHTIG: Nutzer sagt "ja" → "Schaue nach![ACTION:search query=\"wetter\"]"  ← JETZT handeln
-  REGEL: Fragezeichen in deiner Antwort = KEIN ACTION-Tag in derselben Antwort."""
-
-        # ── Bewusstsein als Prefix montieren ──────────────────────────
-        if consciousness_prefix:
-            return consciousness_prefix + "\n" + base
         return base
+
+    def _build_dynamic_context(self, request: SomaRequest) -> str:
+        """
+        Phase E: DYNAMISCHER Teil des System-Prompts.
+        
+        Ändert sich bei JEDEM Turn → wird als separate system-Message gesendet.
+        Dadurch bleibt der statische Teil im KV-Cache erhalten.
+        
+        Enthält: Bewusstsein, Emotionen, Memory-Context, Ambient-Kontext,
+                 Action-Awareness (Kurzzeitgedächtnis), HA-Gerätestatus.
+        """
+        parts = []
+
+        # ── BEWUSSTSEINSZUSTAND (Phase 2 Ego) ─────────────────────────────
+        if _consciousness_ref is not None:
+            try:
+                consciousness_prefix = _consciousness_ref.get_prompt_prefix()
+                if consciousness_prefix:
+                    parts.append(consciousness_prefix)
+            except Exception:
+                pass
+
+        # ── ACTION-AWARENESS (Kurzzeitgedächtnis) ─────────────────────────
+        # Was Soma in den letzten Minuten GETAN hat — damit sie es bei
+        # Nachfrage weiß und nicht halluziniert.
+        try:
+            from brain_core.action_awareness import get_action_context
+            action_ctx = get_action_context()
+            if action_ctx:
+                parts.append(action_ctx)
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+        # ── HA GERÄTE-STATUS (SmartHome Awareness) ────────────────────────
+        # Aktueller Zustand aller relevanten HA-Geräte:
+        # "Licht Wohnzimmer: AN (seit 3 Min), Heizung: 21°C"
+        try:
+            from brain_core.action_awareness import get_ha_state_context
+            ha_ctx = get_ha_state_context()
+            if ha_ctx:
+                parts.append(ha_ctx)
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+        # ── Passiver Kontext (Ambient Awareness — Das ZORA-Herzstück) ─────
+        ambient_ctx = request.metadata.get("ambient_context", "")
+        if ambient_ctx:
+            parts.append(
+                "PASSIVER GESPRÄCHSVERLAUF (was in den letzten Minuten im Raum "
+                "gesagt wurde — auch ohne dich anzusprechen):\n"
+                f"{ambient_ctx}\n"
+                "Nutze diesen Kontext: Antworte als ob du dabei warst, nicht als "
+                "ob du gerade erst aufgewacht bist."
+            )
+
+        # ── Emotionaler Kontext ───────────────────────────────────────────
+        emotion_ctx = request.metadata.get("emotion_context", "")
+        if emotion_ctx:
+            parts.append(f"AKTUELLE RAUMSTIMMUNG: {emotion_ctx}")
+
+        # ── Memory-Integration (3-Layer Hierarchical + Diary) ───────────
+        hierarchical_memory = request.metadata.get("memory_context", "")
+        if hierarchical_memory:
+            parts.append(hierarchical_memory)
+
+        return "\n\n".join(parts)
+
+    def _apply_split_prompt_to_session(
+        self, request: SomaRequest, session: "SessionState", plugin_context: str = ""
+    ) -> None:
+        """
+        Phase E: Schreibt den Split-Prompt in die Session.
+        
+        Rufe das VOR generate_stream() auf — die Session's to_messages()
+        wird dann automatisch den statischen + dynamischen Teil als
+        separate system-Messages senden → KV-Cache Hit.
+        """
+        static = self._build_static_prompt(request) + plugin_context
+        dynamic = self._build_dynamic_context(request)
+        session.set_split_prompt(static, dynamic)
 
     def _get_available_plugins_info(self) -> str:
         """Erstelle Plugin-Info für System-Prompt."""
@@ -754,6 +1022,176 @@ Beispiele:
             return ""
 
     # ── Statistics ───────────────────────────────────────────────────────
+
+    # ── Action-Tag Post-Processing für route() ────────────────────────
+
+    async def _execute_reask_tags(
+        self,
+        response_text: str,
+        request: SomaRequest,
+        engine: object,
+        system_prompt: str,
+    ) -> str:
+        """
+        Scannt die LLM-Antwort auf [ACTION:...] Tags die ein Re-Ask brauchen
+        (search, browse, fetch_url, shell, screen_look).
+
+        Flow:
+          1. LLM generiert: "Schaue nach![ACTION:search query="bitcoin"]"
+          2. Wir extrahieren den Tag, führen die Suche aus
+          3. Wir geben die Ergebnisse dem LLM in einem Re-Ask
+          4. LLM formuliert finale Antwort MIT echten Daten
+
+        Einfache Tags (ha_call, media_*, etc.) bleiben unverändert —
+        die werden vom Client/Pipeline ausgeführt.
+        """
+        import re
+
+        try:
+            from brain_core.action_registry import get_reask_tags
+            reask_types = get_reask_tags()
+        except ImportError:
+            reask_types = {"search", "web_search", "fetch_url", "browse", "shell", "screen_look"}
+
+        # Finde alle [ACTION:type ...] Tags
+        tag_pattern = re.compile(r'\[ACTION:(\w+)(.*?)\]', re.DOTALL)
+        matches = list(tag_pattern.finditer(response_text))
+
+        if not matches:
+            return response_text
+
+        # Prüfe ob ein Re-Ask-Tag dabei ist
+        reask_match = None
+        for m in matches:
+            action_type = m.group(1).lower()
+            if action_type in reask_types:
+                reask_match = m
+                break
+
+        if not reask_match:
+            return response_text  # Nur einfache Tags → unverändert zurück
+
+        action_type = reask_match.group(1).lower()
+        params_raw = reask_match.group(2)
+
+        # Parse Params: key="value"
+        param_pattern = re.compile(r'(\w+)="([^"]*)"')
+        params = dict(param_pattern.findall(params_raw))
+        # Auch key=value ohne Anführungszeichen
+        for kv_match in re.finditer(r'(\w+)=(\d+)', params_raw):
+            key, val = kv_match.group(1), kv_match.group(2)
+            if key not in params:
+                params[key] = val
+
+        logger.info("route_reask_tag", action=action_type, params=params)
+
+        await _broadcast_thought(
+            "info",
+            f"🔄 Re-Ask: {action_type} → Hole Daten...",
+            "ROUTER",
+        )
+
+        # ── Aktion ausführen ─────────────────────────────────────────
+        action_result = await self._execute_reask_action(action_type, params)
+
+        if not action_result:
+            return response_text  # Aktion fehlgeschlagen → Original
+
+        # ── Re-Ask: LLM bekommt die Ergebnisse ──────────────────────
+        # Entferne den Action-Tag + umliegenden Text (LLM soll neu formulieren)
+        clean_text = response_text[:reask_match.start()].strip()
+
+        reask_prompt = (
+            f"Du hast gerade diese Daten abgerufen:\n\n"
+            f"{action_result[:4000]}\n\n"
+            f"Ursprüngliche Frage des Nutzers: {request.prompt}\n\n"
+            f"Fasse die Ergebnisse knapp und natürlich zusammen. "
+            f"Kein Action-Tag mehr nötig — die Daten sind bereits da."
+        )
+
+        await _broadcast_thought(
+            "info",
+            f"🔄 Re-Ask an LLM mit {len(action_result)} Zeichen Daten...",
+            "ENGINE",
+        )
+
+        try:
+            final_response = await engine.generate(
+                prompt=reask_prompt,
+                system_prompt=system_prompt,
+                session_id=request.session_id,
+            )
+            # Bestätigung von vorher + neue Zusammenfassung
+            if clean_text:
+                return f"{clean_text}\n{final_response}"
+            return final_response
+
+        except Exception as exc:
+            logger.error("reask_generation_failed", error=str(exc))
+            return response_text  # Fallback: Original-Antwort
+
+    async def _execute_reask_action(self, action_type: str, params: dict) -> Optional[str]:
+        """
+        Führe eine Re-Ask-Aktion aus und gib das Ergebnis als Text zurück.
+        """
+        try:
+            if action_type in ("search", "web_search"):
+                from brain_core.web_search import get_web_search
+                ws = get_web_search()
+                query = params.get("query", "")
+                if not query:
+                    return None
+                results = await ws.search(query)
+                return ws.format_results_for_llm(results)
+
+            elif action_type == "fetch_url":
+                from brain_core.web_search import get_web_search
+                ws = get_web_search()
+                url = params.get("url", "")
+                if not url:
+                    return None
+                content = await ws.fetch_url_content(url)
+                question = params.get("question", "")
+                if question:
+                    return f"Inhalt von {url}:\n{content[:4000]}\n\nFrage: {question}"
+                return f"Inhalt von {url}:\n{content[:4000]}"
+
+            elif action_type == "browse":
+                from brain_core.web_search import get_web_search
+                ws = get_web_search()
+                url = params.get("url", "")
+                if not url:
+                    return None
+                content = await ws.fetch_url_content(url)
+                question = params.get("question", "")
+                if question:
+                    return f"Inhalt von {url}:\n{content[:4000]}\n\nFrage: {question}"
+                return f"Inhalt von {url}:\n{content[:4000]}"
+
+            elif action_type == "shell":
+                # Shell-Befehle nur ausführen wenn vorhanden
+                command = params.get("command", "")
+                if not command:
+                    return None
+                import asyncio
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+                output = stdout.decode("utf-8", errors="replace")
+                if stderr:
+                    output += "\n" + stderr.decode("utf-8", errors="replace")
+                return output[:4000]
+
+            else:
+                logger.info("reask_action_not_implemented", action=action_type)
+                return None
+
+        except Exception as exc:
+            logger.error("reask_action_failed", action=action_type, error=str(exc))
+            return None
 
     def _update_stats(
         self, engine_name: str, latency_ms: float, prompt: str

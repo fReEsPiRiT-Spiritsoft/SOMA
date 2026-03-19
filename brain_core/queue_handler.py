@@ -204,7 +204,7 @@ class QueueHandler:
                     if not _wait_logged:
                         logger.debug("queue_worker_waiting", reason="engine_busy")
                         _wait_logged = True
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(5.0)  # 5s statt 1s — weniger Polling
                     continue
                 _wait_logged = False
 
@@ -231,8 +231,8 @@ class QueueHandler:
                             error=str(exc),
                         )
                 else:
-                    # Keine Arbeit → kurz warten
-                    await asyncio.sleep(2.0)
+                    # Keine Arbeit → warten
+                    await asyncio.sleep(5.0)
 
             except asyncio.CancelledError:
                 break

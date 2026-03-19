@@ -1,5 +1,6 @@
 # brain_core/engines/__init__.py
 """
 SOMA-AI Multi-Model Engine Layer
-Heavy (Llama 3 8B) ↔ Light (Phi-3) ↔ Nano (Python Intents)
+Oracle (Qwen3 8B) ↔ Draft (Qwen3 1.7B) ↔ Nano (Python Intents)
++ Speculative Engine (Draft→Oracle Application-Level Speculative Decoding)
 """

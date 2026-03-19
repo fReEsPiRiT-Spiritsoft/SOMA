@@ -16,7 +16,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-import aiohttp
+
+from brain_core.memory.embedding_service import get_embedding_service
 
 logger = logging.getLogger("soma.memory.semantic")
 
@@ -48,6 +49,12 @@ class SemanticMemory:
         self._db_path = DB_PATH
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: Optional[sqlite3.Connection] = None
+        # TTL-Cache fuer haeufig abgefragte Daten (60s)
+        self._prefs_cache: Optional[list] = None
+        self._prefs_ts: float = 0.0
+        self._personality_cache: dict[str, str] = {}
+        self._personality_ts: dict[str, float] = {}
+        self._CACHE_TTL = 60.0  # Sekunden
 
     async def initialize(self):
         loop = asyncio.get_event_loop()
@@ -83,23 +90,8 @@ class SemanticMemory:
     # ── Embedding ────────────────────────────────────────────────────
 
     async def _embed(self, text: str) -> Optional[np.ndarray]:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{OLLAMA_URL}/api/embeddings",
-                    json={"model": EMBED_MODEL, "prompt": text[:300]},
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        vec = np.array(data["embedding"], dtype=np.float32)
-                        norm = np.linalg.norm(vec)
-                        if norm > 0:
-                            vec /= norm
-                        return vec
-        except Exception:
-            pass
-        return None
+        """Embedding via shared EmbeddingService (persistent session + LRU cache)."""
+        return await get_embedding_service().embed(text)
 
     # ── Store / Reinforce ────────────────────────────────────────────
 
@@ -119,6 +111,9 @@ class SemanticMemory:
         await loop.run_in_executor(
             None, self._upsert_fact, category, subject, fact, confidence, blob, now,
         )
+        # Cache invalidieren bei neuen Fakten
+        self._prefs_cache = None
+        self._personality_cache.pop(subject, None)
 
     def _upsert_fact(self, category, subject, fact, confidence, blob, now):
         if not self._conn:
@@ -194,12 +189,12 @@ class SemanticMemory:
         ).fetchall()
 
     def _fetch_by_category(self, category: str) -> list:
-        """Alle Fakten einer bestimmten Kategorie laden."""
+        """Alle Fakten einer bestimmten Kategorie laden (ohne Embedding-BLOBs)."""
         if not self._conn:
             return []
         return self._conn.execute(
             "SELECT id, category, subject, fact, confidence, "
-            "source_count, last_confirmed, embedding "
+            "source_count, last_confirmed "
             "FROM facts WHERE category = ? "
             "ORDER BY confidence DESC LIMIT 50",
             (category,),
@@ -208,8 +203,10 @@ class SemanticMemory:
     # ── Personality Snapshot ─────────────────────────────────────────
 
     async def get_user_preferences(self) -> list[Fact]:
-        """Alle Nutzer-Präferenzen (IMMER laden, nicht Similarity-gefiltert).
-        Diese werden bei JEDER Antwort im Prompt injiziert."""
+        """Alle Nutzer-Präferenzen — mit 60s TTL-Cache."""
+        now = time.time()
+        if self._prefs_cache is not None and (now - self._prefs_ts) < self._CACHE_TTL:
+            return self._prefs_cache
         loop = asyncio.get_event_loop()
         rows = await loop.run_in_executor(None, self._fetch_by_category, "preference")
         facts = []
@@ -219,33 +216,42 @@ class SemanticMemory:
                 confidence=row[4], source_count=row[5], last_confirmed=row[6],
                 embedding=None,
             ))
+        self._prefs_cache = facts
+        self._prefs_ts = now
         return facts
 
     async def get_personality_snapshot(self, subject: str = "Nutzer") -> str:
-        """Alle Fakten über eine Person als kompakter Prompt-Block.
-        Preferences werden hier ausgelassen — die kommen separat."""
+        """Alle Fakten über eine Person — mit 60s TTL-Cache pro Subject."""
+        now = time.time()
+        cached_ts = self._personality_ts.get(subject, 0.0)
+        if subject in self._personality_cache and (now - cached_ts) < self._CACHE_TTL:
+            return self._personality_cache[subject]
         loop = asyncio.get_event_loop()
         rows = await loop.run_in_executor(None, self._fetch_facts, subject)
         if not rows:
+            self._personality_cache[subject] = ""
+            self._personality_ts[subject] = now
             return ""
         lines = []
         for row in rows:
             conf = row[4]
             cat = row[1]
-            # Preferences kommen in eigener Sektion → hier ausschließen
             if cat == "preference":
                 continue
             if conf >= 0.4:
                 lines.append(f"- {row[3]} (Sicherheit: {conf:.0%})")
-        if not lines:
-            return ""
-        return f"Bekannte Fakten über {subject}:\n" + "\n".join(lines[:20])
+        result = ""
+        if lines:
+            result = f"Bekannte Fakten über {subject}:\n" + "\n".join(lines[:20])
+        self._personality_cache[subject] = result
+        self._personality_ts[subject] = now
+        return result
     # ── Category Query & Delete (für Plugins) ─────────────────────────────
 
     async def get_facts_by_category(self, category: str) -> list["Fact"]:
         """Alle Fakten einer Kategorie — für Plugin-eigene Datenhaltung (z.B. Reminder)."""
         loop = asyncio.get_event_loop()
-        rows = await loop.run_in_executor(None, self._fetch_by_category, category)
+        rows = await loop.run_in_executor(None, self._fetch_by_category_recent, category)
         facts = []
         for row in rows:
             facts.append(Fact(
@@ -255,23 +261,25 @@ class SemanticMemory:
             ))
         return facts
 
-    def _fetch_by_category(self, category: str) -> list:
+    def _fetch_by_category_recent(self, category: str) -> list:
+        """Fuer Plugins: nach last_confirmed sortiert, ohne BLOBs."""
         if not self._conn:
             return []
         return self._conn.execute(
             "SELECT id, category, subject, fact, confidence, "
-            "source_count, last_confirmed, embedding "
+            "source_count, last_confirmed "
             "FROM facts WHERE category = ? "
-            "ORDER BY last_confirmed DESC",
+            "ORDER BY last_confirmed DESC LIMIT 200",
             (category,),
         ).fetchall()
 
     async def forget_fact(self, subject: str, fact: str = None):
-        """Löscht einen Fakt (oder alle Fakten eines Subjekts) aus L3.
-        Wird z.B. von Reminder-Plugin aufgerufen wenn eine Erinnerung ausgelöst wurde.
-        """
+        """Löscht einen Fakt — invalidiert Cache."""
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self._delete_fact, subject, fact)
+        # Cache invalidieren
+        self._prefs_cache = None
+        self._personality_cache.pop(subject, None)
 
     def _delete_fact(self, subject: str, fact_text):
         if not self._conn:

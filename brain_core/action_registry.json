@@ -1,0 +1,457 @@
+{
+  "_meta": {
+    "version": "1.0",
+    "description": "SOMA-AI Action Tag Registry — Single Source of Truth für alle Action Tags",
+    "format": "[ACTION:type key=\"value\" key2=\"value2\"]",
+    "notes": "Wird von action_registry.py geladen → generiert System-Prompt + validiert Tags"
+  },
+
+  "categories": {
+    "smart_home": {
+      "icon": "🏠",
+      "label": "SMART HOME",
+      "tags": {
+        "ha_call": {
+          "description": "Home Assistant Service Call (Licht, Heizung, Schalter, etc.)",
+          "params": {
+            "domain":         {"required": true,  "type": "string", "hint": "light, climate, switch, media_player, ..."},
+            "service":        {"required": true,  "type": "string", "hint": "turn_on, turn_off, toggle, set_temperature, ..."},
+            "entity_id":      {"required": true,  "type": "string", "hint": "light.wohnzimmer, climate.schlafzimmer, ..."},
+            "brightness_pct": {"required": false, "type": "number", "hint": "0-100"},
+            "temperature":    {"required": false, "type": "number", "hint": "Grad Celsius"},
+            "hvac_mode":      {"required": false, "type": "string", "hint": "heat, cool, auto, off"},
+            "volume_level":   {"required": false, "type": "number", "hint": "0.0-1.0"},
+            "color_temp":     {"required": false, "type": "number"},
+            "rgb_color":      {"required": false, "type": "string"}
+          },
+          "examples": [
+            "[ACTION:ha_call domain=\"light\" service=\"turn_on\" entity_id=\"light.wohnzimmer\"]",
+            "[ACTION:ha_call domain=\"light\" service=\"turn_on\" entity_id=\"light.wohnzimmer\" brightness_pct=\"80\"]",
+            "[ACTION:ha_call domain=\"climate\" service=\"set_temperature\" entity_id=\"climate.wohnzimmer\" temperature=\"22\"]",
+            "[ACTION:ha_call domain=\"switch\" service=\"turn_on\" entity_id=\"switch.steckdose_kueche\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": true,
+          "needs_reask": false
+        },
+        "ha_tts": {
+          "description": "Hausdurchsage über HA-Lautsprecher (Piper TTS → HA media_player)",
+          "params": {
+            "text": {"required": true, "type": "string", "hint": "Die Nachricht die gesprochen wird"},
+            "room": {"required": false, "type": "string", "hint": "all, wohnzimmer, küche, ... (default: all)"}
+          },
+          "examples": [
+            "[ACTION:ha_tts text=\"Das Essen ist fertig!\" room=\"all\"]",
+            "[ACTION:ha_tts text=\"Mia, komm bitte runter.\" room=\"kinderzimmer\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": false
+        }
+      }
+    },
+
+    "memory": {
+      "icon": "🧠",
+      "label": "ERINNERUNGEN & MERKEN",
+      "tags": {
+        "reminder": {
+          "description": "Timer oder Erinnerung setzen",
+          "params": {
+            "minutes":  {"required": false, "type": "number", "hint": "Minuten bis Erinnerung"},
+            "seconds":  {"required": false, "type": "number"},
+            "hours":    {"required": false, "type": "number"},
+            "time":     {"required": false, "type": "string", "hint": "Uhrzeit z.B. 18:00"},
+            "topic":    {"required": true,  "type": "string", "hint": "Woran erinnern?"}
+          },
+          "examples": [
+            "[ACTION:reminder minutes=5 topic=\"Nudeln abgießen\"]",
+            "[ACTION:reminder time=\"18:00\" topic=\"Abendessen\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": true,
+          "needs_reask": false
+        },
+        "remember": {
+          "description": "Information ins Langzeitgedächtnis speichern",
+          "params": {
+            "category": {"required": true,  "type": "string", "hint": "user_info, preference, fact, ..."},
+            "content":  {"required": true,  "type": "string", "hint": "Was soll gemerkt werden?"}
+          },
+          "examples": [
+            "[ACTION:remember category=\"user_info\" content=\"Der Nutzer heißt Patrick\"]",
+            "[ACTION:remember category=\"preference\" content=\"Mag keine Pilze\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": false
+        }
+      }
+    },
+
+    "media": {
+      "icon": "🎵",
+      "label": "MEDIEN",
+      "description": "SMART: erkennt aktiven Player automatisch!",
+      "tags": {
+        "youtube": {
+          "description": "Musik/Video abspielen (mpv/Browser auto-detect)",
+          "params": {
+            "query":  {"required": false, "type": "string", "hint": "Suchbegriff"},
+            "artist": {"required": false, "type": "string"},
+            "song":   {"required": false, "type": "string"}
+          },
+          "examples": [
+            "[ACTION:youtube query=\"aligatoah\"]",
+            "[ACTION:youtube artist=\"Rammstein\" song=\"Du Hast\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": false
+        },
+        "media_next":   {"description": "Nächstes Lied",       "params": {}, "examples": ["[ACTION:media_next]"],   "tts_confirm": true, "nano_capable": true, "needs_reask": false},
+        "media_prev":   {"description": "Vorheriges Lied",     "params": {}, "examples": ["[ACTION:media_prev]"],   "tts_confirm": true, "nano_capable": true, "needs_reask": false},
+        "media_pause":  {"description": "Musik pausieren",     "params": {}, "examples": ["[ACTION:media_pause]"],  "tts_confirm": true, "nano_capable": true, "needs_reask": false},
+        "media_resume": {"description": "Musik fortsetzen",    "params": {}, "examples": ["[ACTION:media_resume]"], "tts_confirm": true, "nano_capable": true, "needs_reask": false},
+        "media_toggle": {"description": "Play/Pause Toggle",   "params": {}, "examples": ["[ACTION:media_toggle]"], "tts_confirm": true, "nano_capable": true, "needs_reask": false},
+        "media_stop":   {"description": "Alles stoppen",       "params": {}, "examples": ["[ACTION:media_stop]"],   "tts_confirm": true, "nano_capable": true, "needs_reask": false},
+        "now_playing":  {"description": "Was läuft gerade?",   "params": {}, "examples": ["[ACTION:now_playing]"],  "tts_confirm": false, "nano_capable": false, "needs_reask": false}
+      },
+      "rules": [
+        "\"Nächstes Lied/Skip\" → [ACTION:media_next] (NICHT youtube!)",
+        "\"Pause/Stop\" → [ACTION:media_pause] oder [ACTION:media_stop]",
+        "\"Weiter/Play\" → [ACTION:media_resume]",
+        "\"Spiele XY\" bei laufender Musik → [ACTION:youtube query=\"XY\"]"
+      ]
+    },
+
+    "web": {
+      "icon": "🌐",
+      "label": "WEB & RECHERCHE",
+      "tags": {
+        "search": {
+          "description": "Web-Suche (DuckDuckGo) — Ergebnisse werden dir zurückgegeben, fasse sie zusammen!",
+          "params": {
+            "query": {"required": true, "type": "string", "hint": "Suchbegriff"}
+          },
+          "examples": [
+            "[ACTION:search query=\"bitcoin kurs aktuell\"]",
+            "[ACTION:search query=\"Wetter Berlin morgen\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": true
+        },
+        "fetch_url": {
+          "description": "Webseite abrufen und Frage dazu beantworten",
+          "params": {
+            "url":      {"required": true,  "type": "string"},
+            "question": {"required": false, "type": "string", "hint": "Frage an den Seiteninhalt"}
+          },
+          "examples": [
+            "[ACTION:fetch_url url=\"https://example.com\" question=\"Was steht dort?\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": true
+        },
+        "browse": {
+          "description": "URL im echten Browser öffnen und Inhalt analysieren",
+          "params": {
+            "url":      {"required": true,  "type": "string"},
+            "question": {"required": false, "type": "string"}
+          },
+          "examples": [
+            "[ACTION:browse url=\"https://heise.de\" question=\"Top-News?\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": true
+        },
+        "open_url": {
+          "description": "URL im Standard-Browser öffnen (kein Inhalt lesen)",
+          "params": {
+            "url": {"required": true, "type": "string"}
+          },
+          "examples": [
+            "[ACTION:open_url url=\"https://youtube.com\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": false
+        }
+      }
+    },
+
+    "screen": {
+      "icon": "🖥️",
+      "label": "BILDSCHIRM",
+      "tags": {
+        "screen_look": {
+          "description": "Screenshots der Monitore machen und analysieren",
+          "params": {
+            "monitor": {"required": false, "type": "string", "hint": "1, 2, 3 oder leer für alle"}
+          },
+          "examples": [
+            "[ACTION:screen_look]",
+            "[ACTION:screen_look monitor=\"1\"]"
+          ],
+          "tts_confirm": false,
+          "nano_capable": false,
+          "needs_reask": true
+        }
+      }
+    },
+
+    "shell": {
+      "icon": "⚙️",
+      "label": "SHELL",
+      "tags": {
+        "shell": {
+          "description": "Shell-Befehl ausführen (Ergebnis kommt zurück)",
+          "params": {
+            "command": {"required": true, "type": "string"}
+          },
+          "examples": [
+            "[ACTION:shell command=\"free -h\"]",
+            "[ACTION:shell command=\"ls -la ~/Downloads\"]"
+          ],
+          "tts_confirm": false,
+          "nano_capable": false,
+          "needs_reask": true,
+          "notes": "Mehrstufig: bis zu 3 Befehle pro Antwort. Shell nur als Fallback — spezialisierte Tags bevorzugen!"
+        }
+      }
+    },
+
+    "audio_display": {
+      "icon": "🔊",
+      "label": "AUDIO & DISPLAY",
+      "tags": {
+        "volume": {
+          "description": "System-Lautstärke steuern",
+          "params": {
+            "level":  {"required": false, "type": "number", "hint": "0-100"},
+            "action": {"required": false, "type": "string", "hint": "get, mute, unmute"}
+          },
+          "examples": [
+            "[ACTION:volume level=\"50\"]",
+            "[ACTION:volume action=\"mute\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": true,
+          "needs_reask": false
+        },
+        "brightness": {
+          "description": "Monitor-Helligkeit",
+          "params": {
+            "level": {"required": true, "type": "number", "hint": "0-100"}
+          },
+          "examples": ["[ACTION:brightness level=\"70\"]"],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": false
+        }
+      }
+    },
+
+    "files": {
+      "icon": "📁",
+      "label": "DATEIEN",
+      "tags": {
+        "file": {
+          "description": "Dateisystem-Operationen",
+          "params": {
+            "action":  {"required": true,  "type": "string", "hint": "read, write, list, search, grep, copy, move, delete, info, mkdir, open"},
+            "path":    {"required": true,  "type": "string"},
+            "content": {"required": false, "type": "string", "hint": "Für write"},
+            "pattern": {"required": false, "type": "string", "hint": "Für search/grep"},
+            "append":  {"required": false, "type": "string", "hint": "true/false für write"}
+          },
+          "examples": [
+            "[ACTION:file action=\"read\" path=\"~/Dokumente/notizen.txt\"]",
+            "[ACTION:file action=\"write\" path=\"/tmp/test.txt\" content=\"Hallo\" append=\"true\"]",
+            "[ACTION:file action=\"search\" pattern=\"BeamNG\" path=\"~\"]",
+            "[ACTION:file action=\"open\" path=\"~/Downloads\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": false
+        }
+      }
+    },
+
+    "apps": {
+      "icon": "🪟",
+      "label": "APPS & FENSTER",
+      "tags": {
+        "app": {
+          "description": "Anwendungen starten/stoppen/auflisten",
+          "params": {
+            "action": {"required": true,  "type": "string", "hint": "open, close, list"},
+            "name":   {"required": false, "type": "string", "hint": "App-Name"}
+          },
+          "examples": [
+            "[ACTION:app action=\"open\" name=\"firefox\"]",
+            "[ACTION:app action=\"list\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": false
+        },
+        "window": {
+          "description": "Fenster-Management",
+          "params": {
+            "action": {"required": true,  "type": "string", "hint": "focus, list, minimize, maximize, close"},
+            "name":   {"required": false, "type": "string"}
+          },
+          "examples": [
+            "[ACTION:window action=\"focus\" name=\"Firefox\"]",
+            "[ACTION:window action=\"list\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": false
+        }
+      }
+    },
+
+    "system": {
+      "icon": "🖥️",
+      "label": "SYSTEM",
+      "tags": {
+        "process": {
+          "description": "Prozess-Verwaltung",
+          "params": {
+            "action": {"required": true,  "type": "string", "hint": "list, kill"},
+            "target": {"required": false, "type": "string"},
+            "filter": {"required": false, "type": "string"},
+            "force":  {"required": false, "type": "string", "hint": "true/false"}
+          },
+          "examples": ["[ACTION:process action=\"list\" filter=\"python\"]"],
+          "tts_confirm": true, "nano_capable": false, "needs_reask": false
+        },
+        "service": {
+          "description": "Systemd-Services steuern",
+          "params": {
+            "name":   {"required": true,  "type": "string"},
+            "action": {"required": true,  "type": "string", "hint": "status, start, stop, restart, list"}
+          },
+          "examples": ["[ACTION:service name=\"docker\" action=\"status\"]"],
+          "tts_confirm": true, "nano_capable": false, "needs_reask": false
+        },
+        "package": {
+          "description": "Pakete installieren/entfernen",
+          "params": {
+            "action": {"required": true,  "type": "string", "hint": "search, install, remove, list"},
+            "name":   {"required": false, "type": "string"}
+          },
+          "examples": ["[ACTION:package action=\"install\" name=\"htop\"]"],
+          "tts_confirm": true, "nano_capable": false, "needs_reask": false
+        },
+        "sysinfo": {
+          "description": "Systeminformationen abrufen",
+          "params": {},
+          "examples": ["[ACTION:sysinfo]"],
+          "tts_confirm": false, "nano_capable": false, "needs_reask": false
+        },
+        "disk": {
+          "description": "Festplatten-Info",
+          "params": {},
+          "examples": ["[ACTION:disk]"],
+          "tts_confirm": false, "nano_capable": false, "needs_reask": false
+        },
+        "power": {
+          "description": "System-Power (Neustart, Herunterfahren, Sperren)",
+          "params": {
+            "action": {"required": true, "type": "string", "hint": "lock, suspend, reboot, shutdown"}
+          },
+          "examples": ["[ACTION:power action=\"lock\"]"],
+          "tts_confirm": true, "nano_capable": false, "needs_reask": false
+        }
+      }
+    },
+
+    "bluetooth": {
+      "icon": "📶",
+      "label": "BLUETOOTH",
+      "tags": {
+        "bluetooth": {
+          "description": "Bluetooth-Geräte verwalten (IMMER statt shell/bluetoothctl!)",
+          "params": {
+            "action": {"required": true,  "type": "string", "hint": "auto, scan, list, connect, disconnect, remove"},
+            "device": {"required": false, "type": "string", "hint": "Gerätename oder Nr."}
+          },
+          "examples": [
+            "[ACTION:bluetooth action=\"auto\" device=\"JBL\"]",
+            "[ACTION:bluetooth action=\"scan\"]"
+          ],
+          "tts_confirm": true, "nano_capable": false, "needs_reask": false,
+          "notes": "NIEMALS shell/bluetoothctl für Bluetooth!"
+        }
+      }
+    },
+
+    "misc": {
+      "icon": "🔧",
+      "label": "SONSTIGES",
+      "tags": {
+        "clipboard": {
+          "description": "Zwischenablage lesen/schreiben",
+          "params": {
+            "action":  {"required": true,  "type": "string", "hint": "get, set"},
+            "content": {"required": false, "type": "string"}
+          },
+          "examples": ["[ACTION:clipboard action=\"get\"]", "[ACTION:clipboard action=\"set\" content=\"Hallo\"]"],
+          "tts_confirm": true, "nano_capable": false, "needs_reask": false
+        },
+        "notify": {
+          "description": "Desktop-Benachrichtigung senden",
+          "params": {
+            "title":   {"required": true,  "type": "string"},
+            "message": {"required": true,  "type": "string"},
+            "urgency": {"required": false, "type": "string", "hint": "low, normal, critical"}
+          },
+          "examples": ["[ACTION:notify title=\"SOMA\" message=\"Timer abgelaufen!\" urgency=\"critical\"]"],
+          "tts_confirm": true, "nano_capable": false, "needs_reask": false
+        },
+        "wallpaper": {
+          "description": "Hintergrundbild setzen",
+          "params": {"path": {"required": true, "type": "string"}},
+          "examples": ["[ACTION:wallpaper path=\"~/Bilder/bg.jpg\"]"],
+          "tts_confirm": true, "nano_capable": false, "needs_reask": false
+        },
+        "network": {
+          "description": "Netzwerk-Info und WLAN-Steuerung",
+          "params": {
+            "action":   {"required": true,  "type": "string", "hint": "info, wifi, connect"},
+            "ssid":     {"required": false, "type": "string"},
+            "password": {"required": false, "type": "string"}
+          },
+          "examples": ["[ACTION:network action=\"info\"]"],
+          "tts_confirm": true, "nano_capable": false, "needs_reask": false
+        },
+        "create_plugin": {
+          "description": "SOMA lernt neue Fähigkeit (Evolution Lab)",
+          "params": {
+            "name":        {"required": true, "type": "string"},
+            "description": {"required": true, "type": "string"}
+          },
+          "examples": ["[ACTION:create_plugin name=\"wetter_plugin\" description=\"Wetter abrufen\"]"],
+          "tts_confirm": true, "nano_capable": false, "needs_reask": false
+        }
+      }
+    }
+  },
+
+  "rules": [
+    "NIEMALS sagen du hättest etwas getan OHNE Action-Tag. Ohne Tag = nicht passiert.",
+    "NIEMALS *Aktionen in Sternchen*. Nutze echte ACTION-Tags.",
+    "Wenn Antwort NUR eine Frage ist → KEIN Tag. Erst handeln nach Bestätigung.",
+    "Handlung + Nachfrage OK: 'Öffne Firefox![ACTION:app action=\"open\" name=\"firefox\"] Was willst du suchen?'",
+    "Spezialisierte Tags statt shell! Für URLs: open_url, für Apps: app, für Ordner: file action=\"open\".",
+    "TTS-REGEL: Deine Antwort wird per Sprache vorgelesen. Tags werden NICHT vorgelesen. Schreibe IMMER eine kurze, natürliche Bestätigung (3-8 Wörter) VOR oder NACH dem Tag!",
+    "WEB-REGEL: Bei search/fetch_url/browse bekommst du die Ergebnisse ZURÜCK. Fasse sie dann in deiner Antwort zusammen!",
+    "BLUETOOTH: IMMER [ACTION:bluetooth] statt shell/bluetoothctl!"
+  ]
+}
