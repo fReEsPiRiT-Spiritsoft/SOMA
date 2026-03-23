@@ -748,6 +748,7 @@ Phase 8  ████░░░░░░   40%   Dashboard & Monitoring
 
 
 <div align="center">
+  Images
   <img width="1842" height="946" alt="grafik" src="https://github.com/user-attachments/assets/6f3bd9ca-c236-4f07-8f1a-a4b69cd98295" />
   <img width="1842" height="946" alt="grafik" src="https://github.com/user-attachments/assets/43a54c29-e46a-4576-8157-94bea80fed6e" />
   <img width="1842" height="946" alt="grafik" src="https://github.com/user-attachments/assets/ae5f360d-9c20-49a9-984b-1d9bd73c6268" />
