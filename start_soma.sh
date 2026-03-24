@@ -32,16 +32,59 @@ set -o pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# ── Python: venv-Pfad direkt nutzen ──────────────────────────────────────
-VENV="$SCRIPT_DIR/.venv"
-PYTHON="$VENV/bin/python"
-
 # ── Colors & Helpers ─────────────────────────────────────────────────────
 G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; C='\033[0;36m'; B='\033[1m'; NC='\033[0m'
 ok()   { echo -e "  ${G}✓${NC} $1"; }
 warn() { echo -e "  ${Y}⚠${NC} $1"; }
 fail() { echo -e "  ${R}✗${NC} $1"; }
 hdr()  { echo -e "\n${C}── $1 ──${NC}"; }
+
+# ── Python: venv-Pfad direkt nutzen ──────────────────────────────────────
+VENV="$SCRIPT_DIR/.venv"
+PYTHON="$VENV/bin/python"
+PIP="$VENV/bin/pip"
+
+# ── Venv & Requirements Bootstrap ────────────────────────────────────────
+bootstrap_venv() {
+    hdr "Python-Umgebung"
+
+    # Python 3.11+ prüfen
+    local SYS_PYTHON
+    SYS_PYTHON=$(command -v python3 2>/dev/null || command -v python 2>/dev/null)
+    if [ -z "$SYS_PYTHON" ]; then
+        fail "Python 3 nicht gefunden! Bitte installieren: sudo apt install python3"
+        exit 1
+    fi
+    local PY_VER
+    PY_VER=$("$SYS_PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
+    ok "System-Python $PY_VER gefunden ($SYS_PYTHON)"
+
+    # Venv anlegen falls nicht vorhanden
+    if [ ! -f "$VENV/bin/python" ]; then
+        echo -e "  ${Y}…${NC} Erstelle virtuelle Umgebung (.venv)…"
+        "$SYS_PYTHON" -m venv "$VENV"
+        ok ".venv erstellt"
+    fi
+
+    # pip upgraden (einmalig, silent)
+    "$PIP" install --upgrade pip --quiet 2>/dev/null
+
+    # Prüfen ob requirements.txt neuer als venv-Marker ist
+    local REQ_FILE="$SCRIPT_DIR/requirements.txt"
+    local MARKER="$VENV/.soma_installed"
+    if [ ! -f "$MARKER" ] || [ "$REQ_FILE" -nt "$MARKER" ]; then
+        echo -e "  ${Y}…${NC} Installiere Python-Abhängigkeiten (requirements.txt)…"
+        if "$PIP" install -r "$REQ_FILE" --quiet 2>&1 | grep -E "ERROR|error" | head -5; then
+            fail "Einige Pakete konnten nicht installiert werden – prüfe die Ausgabe oben."
+        else
+            touch "$MARKER"
+            ok "Alle Abhängigkeiten installiert"
+        fi
+    else
+        ok "Python-Abhängigkeiten aktuell (requirements.txt unverändert)"
+    fi
+}
+bootstrap_venv
 
 # ── Directories ──────────────────────────────────────────────────────────
 PIDDIR="$SCRIPT_DIR/.pids"

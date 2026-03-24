@@ -1,62 +1,54 @@
-annotated-types==0.7.0
-attrs==26.1.0
-autocommand==2.2.2
-btrfsutil==6.19.1
-build==1.4.0
-certifi==2026.2.25
-cffi==2.0.0
-charset-normalizer==3.4.6
-cryptography==46.0.5
-cupshelpers==1.0
-dasbus==1.7
-dbus-python==1.4.0
-defusedxml==0.7.1
-evdev==1.9.3
-filelock==3.25.2
-git-filter-repo==2.47.0
-Glances==4.5.2
-idna==3.11
-input-remapper @ file:///home/patricks/.cache/paru/clone/input-remapper-git/src/input-remapper
-installer==0.7.0
-jaraco.collections==5.1.0
-jaraco.context==6.0.1
-jaraco.functools==4.1.0
-jaraco.text==4.0.0
-Jinja2==3.1.6
-lit==22.1.1.dev0
-lxml==6.0.2
-Mako==1.3.10.dev0
-Markdown==3.10.2
-MarkupSafe==3.0.3
-meson==1.10.2
-more-itertools==10.8.0
-nftables==0.1
-opendht==3.7.7
-orjson==3.11.7
-packaging==26.0
-pkg_resources==81.0.0
-platformdirs==4.9.4
-psutil==7.2.2
-pycairo==1.29.0
-pycparser==3.0
-pycups==2.0.4
-pydantic==2.12.5
-pydantic_core==2.41.5
-Pygments==2.19.2
-PyGObject==3.54.5
-pyproject_hooks==1.2.0
-QTermWidget==2.3.0
-Reflector==2023.6.28.0.36.1
-requests==2.32.5
-setuptools==82.0.1
-shtab==1.8.0
-smbus==1.1
-TBB==0.2
-tqdm==4.67.3
-typing-inspection==0.4.2
-typing_extensions==4.15.0
-ufw==0.36.2
-urllib3==2.6.3
-wheel==0.46.3
-yt-dlp==2026.3.17
-yt-dlp-ejs==0.8.0
+# ============================================================================
+# SOMA-AI – Python-Abhängigkeiten
+# Installieren mit: pip install -r requirements.txt
+# (wird automatisch von start_soma.sh in einem .venv erledigt)
+# ============================================================================
+
+# ── Core API (FastAPI + ASGI-Server) ─────────────────────────────────────
+fastapi>=0.115
+uvicorn[standard]>=0.34        # [standard] bringt uvloop, websockets, httptools
+starlette>=0.41
+
+# ── HTTP-Clients ─────────────────────────────────────────────────────────
+httpx>=0.28
+aiohttp>=3.11
+
+# ── Datenvalidierung ─────────────────────────────────────────────────────
+pydantic>=2.10
+pydantic-settings>=2.7
+
+# ── Datenbank / Cache ────────────────────────────────────────────────────
+redis[asyncio]>=5.2
+psycopg2-binary>=2.9           # Django → PostgreSQL
+
+# ── Django (Memory-UI / SSOT) ────────────────────────────────────────────
+django>=5.1
+python-dotenv>=1.0
+
+# ── System-Monitoring ────────────────────────────────────────────────────
+psutil>=7.0
+
+# ── Logging ──────────────────────────────────────────────────────────────
+structlog>=25.0
+
+# ── MQTT (Discovery & Home-Assistant-Bridge) ─────────────────────────────
+aiomqtt>=2.5
+paho-mqtt>=2.1                 # Basis für aiomqtt
+
+# ── Audio / Sprache ──────────────────────────────────────────────────────
+numpy>=2.0
+webrtcvad-wheels>=2.0          # VAD (Voice Activity Detection)
+faster-whisper>=1.2            # Lokale STT (Speech-to-Text)
+soundfile>=0.13                # Audio-Datei I/O
+librosa>=0.11                  # Audio-Analyse (Stimmung, Pitch)
+audioop-lts>=0.2               # Python 3.13+ Kompatibilität für Audioop
+
+# ── TTS (Text-to-Speech) ─────────────────────────────────────────────────
+piper-tts>=1.4                 # Lokale TTS-Engine
+
+# ── Web-Suche (WebSearch-Modul) ───────────────────────────────────────────
+# httpx ist bereits oben – keine weiteren Abhängigkeiten nötig
+
+# ── Hilfsbibliotheken ────────────────────────────────────────────────────
+rich>=14.0                     # Schöne Terminal-Ausgaben
+requests>=2.32                 # Sync HTTP (Setup-Checks)
