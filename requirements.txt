@@ -1,40 +1,44 @@
 annotated-types==0.7.0
-attrs==25.4.0
+attrs==26.1.0
 autocommand==2.2.2
-btrfsutil==6.19
+btrfsutil==6.19.1
 build==1.4.0
-certifi==2026.1.4
+certifi==2026.2.25
 cffi==2.0.0
-charset-normalizer==3.4.4
+charset-normalizer==3.4.6
 cryptography==46.0.5
 cupshelpers==1.0
+dasbus==1.7
 dbus-python==1.4.0
 defusedxml==0.7.1
-filelock==3.24.0
+evdev==1.9.3
+filelock==3.25.2
 git-filter-repo==2.47.0
-Glances==4.5.0.5
+Glances==4.5.2
 idna==3.11
+input-remapper @ file:///home/patricks/.cache/paru/clone/input-remapper-git/src/input-remapper
 installer==0.7.0
 jaraco.collections==5.1.0
 jaraco.context==6.0.1
 jaraco.functools==4.1.0
 jaraco.text==4.0.0
 Jinja2==3.1.6
-lit==21.1.8.dev0
+lit==22.1.1.dev0
 lxml==6.0.2
 Mako==1.3.10.dev0
 Markdown==3.10.2
-MarkupSafe==3.0.2
-meson==1.10.1
+MarkupSafe==3.0.3
+meson==1.10.2
 more-itertools==10.8.0
 nftables==0.1
+opendht==3.7.7
 orjson==3.11.7
 packaging==26.0
 pkg_resources==81.0.0
-platformdirs==4.9.2
+platformdirs==4.9.4
 psutil==7.2.2
 pycairo==1.29.0
-pycparser==2.23
+pycparser==3.0
 pycups==2.0.4
 pydantic==2.12.5
 pydantic_core==2.41.5
@@ -44,7 +48,7 @@ pyproject_hooks==1.2.0
 QTermWidget==2.3.0
 Reflector==2023.6.28.0.36.1
 requests==2.32.5
-setuptools==82.0.0
+setuptools==82.0.1
 shtab==1.8.0
 smbus==1.1
 TBB==0.2
@@ -53,17 +57,6 @@ typing-inspection==0.4.2
 typing_extensions==4.15.0
 ufw==0.36.2
 urllib3==2.6.3
-websockets>=12.0
 wheel==0.46.3
-
-# ── SOMA Memory System (Vector Embeddings) ───────────────────────
-numpy>=1.24.0
-aiohttp>=3.9.0
-
-yt-dlp==2026.2.4
-yt-dlp-ejs==0.4.0
-# ── SOMA Internet-Zugriff (WebSearch) ────────────────────────────
-ddgs>=9.0.0              # DuckDuckGo Suche (kein API-Key nötig)
-beautifulsoup4>=4.12.0   # HTML-Parsing (Fallback-Scraper)
-lxml>=5.0.0              # Schneller HTML/XML-Parser
-trafilatura>=2.0.0       # Saubere Textextraktion aus Webseiten
+yt-dlp==2026.3.17
+yt-dlp-ejs==0.8.0
