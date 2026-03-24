@@ -48,6 +48,47 @@ PIDDIR="$SCRIPT_DIR/.pids"
 LOGDIR="$SCRIPT_DIR/.logs"
 mkdir -p "$PIDDIR" "$LOGDIR"
 
+# ── First-Run Bootstrap: .env & Erinnerungsdateien anlegen ───────────────
+bootstrap_firstrun() {
+    # .env aus .env.example erstellen falls nicht vorhanden
+    if [ ! -f "$SCRIPT_DIR/.env" ]; then
+        if [ -f "$SCRIPT_DIR/.env.example" ]; then
+            cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
+            warn ".env nicht gefunden – wurde aus .env.example erstellt."
+            warn "Bitte trage deine echten Zugangsdaten in .env ein!"
+        else
+            fail ".env und .env.example fehlen – bitte manuell anlegen."
+        fi
+    fi
+
+    # data/-Verzeichnis sicherstellen
+    mkdir -p "$SCRIPT_DIR/data"
+
+    # Leere Erinnerungsdateien anlegen falls nicht vorhanden
+    if [ ! -f "$SCRIPT_DIR/data/soma_memory.json" ]; then
+        echo "[]" > "$SCRIPT_DIR/data/soma_memory.json"
+        ok "data/soma_memory.json angelegt (leer)"
+    fi
+    if [ ! -f "$SCRIPT_DIR/data/consciousness_state.json" ]; then
+        cat > "$SCRIPT_DIR/data/consciousness_state.json" <<'EOF'
+{
+  "mood": "neutral",
+  "body_valence": 0.5,
+  "body_arousal": 0.5,
+  "current_thought": "",
+  "diary_insight": "",
+  "attention_focus": "",
+  "uptime_feeling": "Ich bin gerade erst aufgewacht",
+  "update_count": 0,
+  "saved_at": 0,
+  "saved_at_human": "never"
+}
+EOF
+        ok "data/consciousness_state.json angelegt (leer)"
+    fi
+}
+bootstrap_firstrun
+
 # ── Load Environment ─────────────────────────────────────────────────────
 if [ -f "$SCRIPT_DIR/.env" ]; then
     set -a

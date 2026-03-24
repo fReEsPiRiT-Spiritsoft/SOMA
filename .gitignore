@@ -17,9 +17,20 @@ node_modules/
 # Modelle (zu groß für GitHub, werden beim Start automatisch geladen)
 .models/
 
-# Umgebungsvariablen
+# Umgebungsvariablen (echte Werte – niemals committen)
 .env
 copilot-instructions.md
 .github
 
 soma_instructions.md
+
+# Laufzeit-Daten & persönliche Erinnerungen (werden lokal generiert)
+data/soma_memory.db
+data/soma_memory.db-shm
+data/soma_memory.db-wal
+data/soma_memory.json
+data/consciousness_state.json
+data/phone_recordings/
+
+# Django Laufzeit-Datenbank
+brain_memory_ui/db.sqlite3
