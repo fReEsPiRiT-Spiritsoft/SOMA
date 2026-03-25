@@ -18,10 +18,12 @@ node_modules/
 # Modelle (zu groß für GitHub, werden beim Start automatisch geladen)
 .models/
 
+
 # Umgebungsvariablen (echte Werte – niemals committen)
 .env
 copilot-instructions.md
 .github
+.github/
 
 soma_instructions.md
 
