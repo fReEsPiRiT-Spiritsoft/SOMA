@@ -280,7 +280,7 @@ class STTEngine:
             "soma", "sooma", "so ma", "sohma", "somma", "zoma",
             "somar", "soomar", "somah", "sommar",
             "suma", "zooma", "söma", "söhma",
-            "hey soma", "hej soma", "hallo soma",
+            "hey soma", "hej soma", "hallo soma", "Sommer",
         ]
         return any(variant in t for variant in soma_variants)
 

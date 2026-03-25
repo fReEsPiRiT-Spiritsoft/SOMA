@@ -47,8 +47,21 @@ audioop-lts>=0.2               # Python 3.13+ Kompatibilität für Audioop
 piper-tts>=1.4                 # Lokale TTS-Engine
 
 # ── Web-Suche (WebSearch-Modul) ───────────────────────────────────────────
-# httpx ist bereits oben – keine weiteren Abhängigkeiten nötig
+trafilatura>=1.6               # Clean-Text-Extraktion aus Webseiten
+beautifulsoup4>=4.12           # HTML-Parsing (Fallback)
+
+# ── mDNS / Device Discovery ──────────────────────────────────────────────
+zeroconf>=0.131                # mDNS-Scanner fuer Geraete im Netzwerk
+
+# ── Bluetooth (Smart Home Geraete) ───────────────────────────────────────
+bleak>=0.21                    # BLE (Bluetooth Low Energy) Scanner/Client
+
+# ── GPU-Monitoring ────────────────────────────────────────────────────────
+GPUtil>=1.4                    # NVIDIA GPU Auslastung/Temperatur
+
+# ── WebSocket (Tablet Face, Dashboard) ────────────────────────────────────
+websockets>=12.0               # WebSocket-Client fuer Echtzeit-Streams
 
 # ── Hilfsbibliotheken ────────────────────────────────────────────────────
-rich>=14.0                     # Schöne Terminal-Ausgaben
+rich>=14.0                     # Schoene Terminal-Ausgaben
 requests>=2.32                 # Sync HTTP (Setup-Checks)

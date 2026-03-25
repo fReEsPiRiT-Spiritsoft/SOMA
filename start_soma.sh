@@ -1,27 +1,24 @@
 #!/usr/bin/env bash
 # ============================================================================
-# SOMA-AI – Vollständiger Systemstart (Überarbeitet)
+# SOMA-AI – Vollstaendiger Systemstart & Fresh-Install Bootstrap
 # ============================================================================
-# Startet alle Services in der richtigen Reihenfolge mit:
-#   - Stale-Process-Cleanup (Zombie-Ports freigeben)
-#   - Log-Rotation (alte Logs kürzen)
-#   - Django DB-Migration (Schema aktuell halten)
-#   - Ollama Model-Verification (fehlende Modelle nachziehen)
-#   - Umfassende Health-Checks & Fehler-Diagnose
 #
-# Reihenfolge:
-#   0. Autorisierung + Cleanup
-#   1. Docker Daemon
-#   2. PostgreSQL, Redis, Mosquitto (Docker)
-#   3. Ollama (System-Service, kein Docker — GPU-Passthrough)
-#   4. Ollama Modelle verifizieren
-#   5. Django SSOT (Port 8200) + Migrationen
-#   6. Brain Core (Port 8100)
-#   7. Final Health-Check
+# Diese Datei macht ein voellig frisches Linux SOMA-ready:
+#   Phase 0: System-Pakete (apt/pacman/dnf)
+#   Phase 1: Docker Engine installieren & starten
+#   Phase 2: Python venv + pip Dependencies
+#   Phase 3: Ollama installieren & Modelle laden
+#   Phase 4: .env Konfiguration sicherstellen
+#   Phase 5: Mosquitto-Config erstellen
+#   Phase 6: Docker-Container (Postgres, Redis, Mosquitto)
+#   Phase 7: Ollama Modelle verifizieren + KV-Cache Warmup
+#   Phase 8: Django SSOT (Migrationen + Start)
+#   Phase 9: Brain Core (FastAPI + Voice + Ego + Memory)
+#   Phase 10: Final Health-Check & Summary
 #
 # Usage:
-#   ./start_soma.sh           # Alles starten
-#   ./start_soma.sh --status  # Status prüfen
+#   ./start_soma.sh           # Alles installieren & starten
+#   ./start_soma.sh --status  # Status pruefen
 #   ./start_soma.sh --logs    # Live Logs anzeigen
 #
 # Stoppen: ./stop_all.sh
@@ -32,128 +29,28 @@ set -o pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# ── Marker-Datei fuer First-Run ─────────────────────────────────────────
+FIRST_RUN_MARKER="$SCRIPT_DIR/.soma_first_run_done"
+
 # ── Colors & Helpers ─────────────────────────────────────────────────────
 G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; C='\033[0;36m'; B='\033[1m'; NC='\033[0m'
 ok()   { echo -e "  ${G}✓${NC} $1"; }
 warn() { echo -e "  ${Y}⚠${NC} $1"; }
 fail() { echo -e "  ${R}✗${NC} $1"; }
-hdr()  { echo -e "\n${C}── $1 ──${NC}"; }
+hdr()  { echo -e "\n${C}━━ $1 ━━${NC}"; }
 
-# ── Python: venv-Pfad direkt nutzen ──────────────────────────────────────
+# ── Python: venv-Pfade ──────────────────────────────────────────────────
 VENV="$SCRIPT_DIR/.venv"
 PYTHON="$VENV/bin/python"
 PIP="$VENV/bin/pip"
 
-# ── Venv & Requirements Bootstrap ────────────────────────────────────────
-bootstrap_venv() {
-    hdr "Python-Umgebung"
-
-    # Python 3.11+ prüfen
-    local SYS_PYTHON
-    SYS_PYTHON=$(command -v python3 2>/dev/null || command -v python 2>/dev/null)
-    if [ -z "$SYS_PYTHON" ]; then
-        fail "Python 3 nicht gefunden! Bitte installieren: sudo apt install python3"
-        exit 1
-    fi
-    local PY_VER
-    PY_VER=$("$SYS_PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
-    ok "System-Python $PY_VER gefunden ($SYS_PYTHON)"
-
-    # Venv anlegen falls nicht vorhanden
-    if [ ! -f "$VENV/bin/python" ]; then
-        echo -e "  ${Y}…${NC} Erstelle virtuelle Umgebung (.venv)…"
-        "$SYS_PYTHON" -m venv "$VENV"
-        ok ".venv erstellt"
-    fi
-
-    # pip upgraden (einmalig, silent)
-    "$PIP" install --upgrade pip --quiet 2>/dev/null
-
-    # Prüfen ob requirements.txt neuer als venv-Marker ist
-    local REQ_FILE="$SCRIPT_DIR/requirements.txt"
-    local MARKER="$VENV/.soma_installed"
-    if [ ! -f "$MARKER" ] || [ "$REQ_FILE" -nt "$MARKER" ]; then
-        echo -e "  ${Y}…${NC} Installiere Python-Abhängigkeiten (requirements.txt)…"
-        if "$PIP" install -r "$REQ_FILE" --quiet 2>&1 | grep -E "ERROR|error" | head -5; then
-            fail "Einige Pakete konnten nicht installiert werden – prüfe die Ausgabe oben."
-        else
-            touch "$MARKER"
-            ok "Alle Abhängigkeiten installiert"
-        fi
-    else
-        ok "Python-Abhängigkeiten aktuell (requirements.txt unverändert)"
-    fi
-}
-bootstrap_venv
-
 # ── Directories ──────────────────────────────────────────────────────────
 PIDDIR="$SCRIPT_DIR/.pids"
 LOGDIR="$SCRIPT_DIR/.logs"
-mkdir -p "$PIDDIR" "$LOGDIR"
+mkdir -p "$PIDDIR" "$LOGDIR" "$SCRIPT_DIR/data"
 
-# ── First-Run Bootstrap: .env & Erinnerungsdateien anlegen ───────────────
-bootstrap_firstrun() {
-    # .env aus .env.example erstellen falls nicht vorhanden
-    if [ ! -f "$SCRIPT_DIR/.env" ]; then
-        if [ -f "$SCRIPT_DIR/.env.example" ]; then
-            cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
-            warn ".env nicht gefunden – wurde aus .env.example erstellt."
-            warn "Bitte trage deine echten Zugangsdaten in .env ein!"
-        else
-            fail ".env und .env.example fehlen – bitte manuell anlegen."
-        fi
-    fi
-
-    # data/-Verzeichnis sicherstellen
-    mkdir -p "$SCRIPT_DIR/data"
-
-    # Leere Erinnerungsdateien anlegen falls nicht vorhanden
-    if [ ! -f "$SCRIPT_DIR/data/soma_memory.json" ]; then
-        echo "[]" > "$SCRIPT_DIR/data/soma_memory.json"
-        ok "data/soma_memory.json angelegt (leer)"
-    fi
-    if [ ! -f "$SCRIPT_DIR/data/consciousness_state.json" ]; then
-        cat > "$SCRIPT_DIR/data/consciousness_state.json" <<'EOF'
-{
-  "mood": "neutral",
-  "body_valence": 0.5,
-  "body_arousal": 0.5,
-  "current_thought": "",
-  "diary_insight": "",
-  "attention_focus": "",
-  "uptime_feeling": "Ich bin gerade erst aufgewacht",
-  "update_count": 0,
-  "saved_at": 0,
-  "saved_at_human": "never"
-}
-EOF
-        ok "data/consciousness_state.json angelegt (leer)"
-    fi
-}
-bootstrap_firstrun
-
-# ── Load Environment ─────────────────────────────────────────────────────
-if [ -f "$SCRIPT_DIR/.env" ]; then
-    set -a
-    source "$SCRIPT_DIR/.env"
-    set +a
-fi
-
-# ── Modelle aus .env oder Defaults ───────────────────────────────────────
-OLLAMA_HEAVY="${OLLAMA_HEAVY_MODEL:-qwen2.5-coder:14b}"
-OLLAMA_LIGHT="${OLLAMA_LIGHT_MODEL:-phi3:mini}"
-OLLAMA_EMBED="nomic-embed-text"
-
-# ── Ports ────────────────────────────────────────────────────────────────
-BRAIN_PORT="${BRAIN_CORE_PORT:-8100}"
-DJANGO_PORT_NUM="${DJANGO_PORT:-8200}"
-
-# ============================================================================
-# Helper Functions
-# ============================================================================
-
+# ── Helper Functions ─────────────────────────────────────────────────────
 kill_port() {
-    # Killt alle Prozesse auf einem Port (für Zombie-Cleanup)
     local port="$1"
     local pids
     pids=$(lsof -t -i:"$port" 2>/dev/null || true)
@@ -166,7 +63,6 @@ kill_port() {
 }
 
 rotate_log() {
-    # Kürzt Log-Dateien auf die letzten 5000 Zeilen
     local logfile="$1"
     local max_lines="${2:-5000}"
     if [ -f "$logfile" ]; then
@@ -180,7 +76,6 @@ rotate_log() {
 }
 
 wait_for_url() {
-    # Wartet bis URL erreichbar oder Timeout (gibt 0=ok, 1=timeout zurück)
     local url="$1"
     local timeout="${2:-30}"
     for i in $(seq 1 "$timeout"); do
@@ -190,6 +85,67 @@ wait_for_url() {
         sleep 1
     done
     return 1
+}
+
+# ── Distro-Erkennung ────────────────────────────────────────────────────
+detect_distro() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        DISTRO_ID="${ID:-unknown}"
+        DISTRO_LIKE="${ID_LIKE:-$DISTRO_ID}"
+    else
+        DISTRO_ID="unknown"
+        DISTRO_LIKE="unknown"
+    fi
+
+    # Paketmanager bestimmen
+    if command -v apt-get &>/dev/null; then
+        PKG_MANAGER="apt"
+    elif command -v pacman &>/dev/null; then
+        PKG_MANAGER="pacman"
+    elif command -v dnf &>/dev/null; then
+        PKG_MANAGER="dnf"
+    elif command -v zypper &>/dev/null; then
+        PKG_MANAGER="zypper"
+    else
+        PKG_MANAGER="unknown"
+    fi
+}
+
+# ── Paket-Installation abstrahiert ──────────────────────────────────────
+install_packages() {
+    local description="$1"
+    shift
+    echo -e "  ${Y}…${NC} $description"
+    case "$PKG_MANAGER" in
+        apt)
+            sudo apt-get install -y -qq "$@" 2>&1 | tail -2
+            ;;
+        pacman)
+            sudo pacman -S --noconfirm --needed "$@" 2>&1 | tail -2
+            ;;
+        dnf)
+            sudo dnf install -y -q "$@" 2>&1 | tail -2
+            ;;
+        zypper)
+            sudo zypper install -y -n "$@" 2>&1 | tail -2
+            ;;
+        *)
+            fail "Unbekannter Paketmanager – bitte manuell installieren: $*"
+            return 1
+            ;;
+    esac
+}
+
+# ── Pruefen ob Paket installiert ist ────────────────────────────────────
+is_pkg_installed() {
+    case "$PKG_MANAGER" in
+        apt)    dpkg -s "$1" &>/dev/null ;;
+        pacman) pacman -Qi "$1" &>/dev/null ;;
+        dnf)    rpm -q "$1" &>/dev/null ;;
+        zypper) rpm -q "$1" &>/dev/null ;;
+        *)      return 1 ;;
+    esac
 }
 
 # ============================================================================
@@ -207,11 +163,18 @@ banner() {
 }
 
 # ============================================================================
-# STATUS – Systemstatus prüfen
+# STATUS
 # ============================================================================
 show_status() {
+    # .env laden falls vorhanden (fuer Port-Variablen)
+    if [ -f "$SCRIPT_DIR/.env" ]; then
+        set -a; source "$SCRIPT_DIR/.env"; set +a
+    fi
+    local BRAIN_PORT="${BRAIN_CORE_PORT:-8100}"
+    local DJANGO_PORT_NUM="${DJANGO_PORT:-8200}"
+
     echo -e "\n${C}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${B}  📊 SOMA-AI Systemstatus${NC}"
+    echo -e "${B}  SOMA-AI Systemstatus${NC}"
     echo -e "${C}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
     # Docker Container
@@ -254,18 +217,12 @@ m=d.get('metrics',{})
 print(f\"CPU {m.get('cpu_percent',0):.0f}% | RAM {m.get('ram_percent',0):.0f}% | {m.get('load_level','?')}\")" 2>/dev/null || echo "ok")
         ok "Online (Port $BRAIN_PORT) – $METRICS"
 
-        # Voice Status
         VOICE=$(curl -sf "http://localhost:$BRAIN_PORT/api/v1/voice" | "$PYTHON" -c "
-import sys,json
-d=json.load(sys.stdin)
-print(f\"🎤 {d.get('status','?')} | Transkriptionen: {d.get('transcriptions',0)}\")" 2>/dev/null || echo "")
+import sys,json; d=json.load(sys.stdin); print(f\"Mic: {d.get('status','?')} | STT: {d.get('transcriptions',0)}\")" 2>/dev/null || echo "")
         [ -n "$VOICE" ] && ok "$VOICE"
 
-        # Ego Status
         EGO=$(curl -sf "http://localhost:$BRAIN_PORT/api/v1/ego/snapshot" | "$PYTHON" -c "
-import sys,json
-d=json.load(sys.stdin)
-print(f\"🧠 Ego: {d.get('status','?')} | Consciousness: {d.get('consciousness',{}).get('mood','?')}\")" 2>/dev/null || echo "")
+import sys,json; d=json.load(sys.stdin); print(f\"Ego: {d.get('status','?')} | Mood: {d.get('consciousness',{}).get('mood','?')}\")" 2>/dev/null || echo "")
         [ -n "$EGO" ] && ok "$EGO"
     else
         fail "Nicht erreichbar (http://localhost:$BRAIN_PORT)"
@@ -281,32 +238,29 @@ print(f\"🧠 Ego: {d.get('status','?')} | Consciousness: {d.get('consciousness'
         fail "Nicht erreichbar (http://localhost:$DJANGO_PORT_NUM)"
     fi
 
-    # Audio Hardware
+    # Audio
     echo -e "\n  ${B}Audio Hardware:${NC}"
-    if arecord -l 2>/dev/null | grep -qi "scarlett\|focusrite\|usb"; then
-        DEVICE=$(arecord -l 2>/dev/null | grep -i "scarlett\|focusrite\|usb" | head -1)
+    if arecord -l 2>/dev/null | grep -q "card"; then
+        DEVICE=$(arecord -l 2>/dev/null | grep -i "scarlett\|focusrite\|usb\|card" | head -1)
         ok "Erkannt: $DEVICE"
-    elif arecord -l 2>/dev/null | grep -q "card"; then
-        ok "Audio-Device verfügbar"
     else
         warn "Kein Audio-Device gefunden"
     fi
 
-    # Memory System
-    echo -e "\n  ${B}Memory System (3-Layer):${NC}"
+    # Memory
+    echo -e "\n  ${B}Memory System:${NC}"
     if curl -sf "http://localhost:$BRAIN_PORT/api/v1/memory/stats" >/dev/null 2>&1; then
         MEM=$(curl -sf "http://localhost:$BRAIN_PORT/api/v1/memory/stats" | "$PYTHON" -c "
-import sys,json
-d=json.load(sys.stdin)
-print(f\"L1: {d.get('working_memory_turns',0)} Turns | L2: {d.get('episodic_episodes',0)} Episoden | L3: {d.get('semantic_facts',0)} Fakten\")" 2>/dev/null || echo "aktiv")
-        ok "Online – $MEM"
+import sys,json; d=json.load(sys.stdin)
+print(f\"L1: {d.get('working_memory_turns',0)} | L2: {d.get('episodic_episodes',0)} | L3: {d.get('semantic_facts',0)}\")" 2>/dev/null || echo "aktiv")
+        ok "$MEM"
     elif [ -f "$SCRIPT_DIR/data/soma_memory.db" ]; then
         ok "SQLite-DB vorhanden (Brain Core offline)"
     else
-        warn "Noch keine Erinnerungen (startet mit Brain Core)"
+        warn "Noch keine Erinnerungen"
     fi
 
-    # Evolution Lab
+    # Plugins
     echo -e "\n  ${B}Evolution Lab:${NC}"
     PLUGINS=$(ls -1 "$SCRIPT_DIR/evolution_lab/generated_plugins/"*.py 2>/dev/null | wc -l || echo "0")
     ok "$PLUGINS Plugins installiert"
@@ -316,13 +270,13 @@ print(f\"L1: {d.get('working_memory_turns',0)} Turns | L2: {d.get('episodic_epis
 }
 
 # ============================================================================
-# LOGS – Live Logs anzeigen
+# LOGS
 # ============================================================================
 show_logs() {
     echo -e "\n${C}━━━ SOMA-AI Live Logs (Ctrl+C zum Beenden) ━━━${NC}\n"
     tail -f "$LOGDIR/brain_core.log" "$LOGDIR/django.log" 2>/dev/null || \
         tail -f "$LOGDIR/brain_core.log" 2>/dev/null || \
-        echo "Keine Logs gefunden. Erst ./start_soma.sh ausführen."
+        echo "Keine Logs gefunden. Erst ./start_soma.sh ausfuehren."
     exit 0
 }
 
@@ -334,7 +288,7 @@ case "${1:-start}" in
     --logs|-l|logs)      show_logs ;;
     --help|-h)
         echo "Usage: $0 [--status|--logs|--help]"
-        echo "  (keine Argumente) = System starten"
+        echo "  (keine Argumente) = System installieren & starten"
         echo "  --status, -s      = Systemstatus anzeigen"
         echo "  --logs, -l        = Live Logs anzeigen"
         exit 0
@@ -353,38 +307,621 @@ esac
 banner
 
 echo -e "${C}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${B}  🚀 SOMA-AI Boot-Sequenz${NC}"
+echo -e "${B}  SOMA-AI Boot-Sequenz${NC}"
 echo -e "${C}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
 BOOT_START=$(date +%s)
 
-# ── 0. Autorisierung + Cleanup ───────────────────────────────────────────
-hdr "0/7 Autorisierung & Cleanup"
+# ── 0. Autorisierung ────────────────────────────────────────────────────
+hdr "Phase 0/10: Autorisierung"
 
-# sudo-Rechte einmalig cachen
 if sudo -n true 2>/dev/null; then
     ok "sudo bereits autorisiert"
 else
-    echo -e "  ${B}🔑 Einmalige Passwort-Eingabe für diese Session:${NC}"
+    echo -e "  ${B}Einmalige Passwort-Eingabe fuer diese Session:${NC}"
     sudo -v
     if [ $? -eq 0 ]; then
-        ok "sudo-Rechte gecacht ✓"
+        ok "sudo-Rechte gecacht"
     else
-        fail "sudo fehlgeschlagen – einige Services starten evtl. nicht"
+        fail "sudo fehlgeschlagen – Installation nicht moeglich"
+        exit 1
     fi
 fi
 
-# Keep-alive: sudo-Timestamp frisch halten bis Skript endet
+# Keep-alive: sudo-Timestamp frisch halten
 (while true; do sudo -n true 2>/dev/null; sleep 50; done) &
 SUDO_KEEPALIVE_PID=$!
 trap "kill $SUDO_KEEPALIVE_PID 2>/dev/null" EXIT
 
-# Log-Rotation: alte Logs kürzen
+# Distro erkennen
+detect_distro
+ok "Distro: ${C}${DISTRO_ID}${NC} (Paketmanager: ${C}${PKG_MANAGER}${NC})"
+
+# ============================================================================
+# Phase 1: System-Pakete (nur beim ersten Start oder wenn Marker fehlt)
+# ============================================================================
+hdr "Phase 1/10: System-Pakete"
+
+install_system_packages() {
+    echo -e "  ${B}Installiere System-Abhaengigkeiten...${NC}"
+
+    # Paketliste je nach Distro
+    case "$PKG_MANAGER" in
+        apt)
+            sudo apt-get update -qq
+
+            # ── Kritisch (ohne diese startet nichts) ─────────────────────
+            local CRITICAL_PKGS=(
+                python3 python3-venv python3-pip python3-dev
+                build-essential pkg-config
+                curl wget git lsof
+                alsa-utils
+                libsndfile1-dev
+                espeak-ng
+                ffmpeg
+                libffi-dev libssl-dev
+                libpq-dev
+            )
+
+            # ── Wichtig (fuer volle Funktionalitaet) ─────────────────────
+            local IMPORTANT_PKGS=(
+                bluez
+                avahi-daemon libavahi-compat-libdnssd-dev
+                lm-sensors
+                portaudio19-dev
+            )
+
+            # ── Optional (Desktop-Steuerung, Clipboard etc.) ─────────────
+            local OPTIONAL_PKGS=(
+                wmctrl xdotool xclip wl-clipboard
+                libnotify-bin brightnessctl xdg-utils
+            )
+
+            echo -e "  ${Y}…${NC} Kritische Pakete..."
+            sudo apt-get install -y -qq "${CRITICAL_PKGS[@]}" 2>&1 | grep -v "is already" | tail -3
+            ok "Kritische Pakete installiert"
+
+            echo -e "  ${Y}…${NC} Wichtige Pakete..."
+            sudo apt-get install -y -qq "${IMPORTANT_PKGS[@]}" 2>&1 | grep -v "is already" | tail -3
+            ok "Wichtige Pakete installiert"
+
+            echo -e "  ${Y}…${NC} Optionale Pakete (Desktop-Steuerung)..."
+            sudo apt-get install -y -qq "${OPTIONAL_PKGS[@]}" 2>&1 || warn "Einige optionale Pakete nicht verfuegbar (ok)"
+            ok "Optionale Pakete verarbeitet"
+            ;;
+
+        pacman)
+            sudo pacman -Sy --noconfirm 2>&1 | tail -2
+
+            # Pacman: Pakete einzeln installieren um Konflikte graceful zu handeln
+            # (z.B. ffmpeg4.4 vs libvpx Konflikte auf CachyOS)
+            local CRITICAL_PKGS=(
+                python python-pip
+                base-devel pkg-config
+                curl wget git lsof
+                alsa-utils
+                libsndfile
+                espeak-ng
+                libffi openssl
+                postgresql-libs
+            )
+            local IMPORTANT_PKGS=(
+                ffmpeg
+                bluez bluez-utils
+                avahi nss-mdns
+                lm_sensors
+                portaudio
+                docker docker-compose docker-buildx
+            )
+            local OPTIONAL_PKGS=(
+                wmctrl xdotool xclip wl-clipboard
+                libnotify brightnessctl xdg-utils
+                python-virtualenv
+            )
+
+            echo -e "  ${Y}…${NC} Kritische Pakete..."
+            for pkg in "${CRITICAL_PKGS[@]}"; do
+                if ! pacman -Qi "$pkg" &>/dev/null; then
+                    sudo pacman -S --noconfirm --needed "$pkg" 2>&1 | tail -1 || warn "$pkg konnte nicht installiert werden"
+                fi
+            done
+            ok "Kritische Pakete verarbeitet"
+
+            echo -e "  ${Y}…${NC} Wichtige Pakete..."
+            for pkg in "${IMPORTANT_PKGS[@]}"; do
+                if ! pacman -Qi "$pkg" &>/dev/null; then
+                    sudo pacman -S --noconfirm --needed "$pkg" 2>&1 | tail -1 || warn "$pkg uebersprungen (Konflikt?)"
+                fi
+            done
+            ok "Wichtige Pakete verarbeitet"
+
+            echo -e "  ${Y}…${NC} Optionale Pakete..."
+            for pkg in "${OPTIONAL_PKGS[@]}"; do
+                sudo pacman -S --noconfirm --needed "$pkg" &>/dev/null || true
+            done
+            ok "Optionale Pakete verarbeitet"
+            ;;
+
+        dnf)
+            local PKGS=(
+                python3 python3-pip python3-devel python3-virtualenv
+                gcc gcc-c++ make pkg-config
+                curl wget git lsof
+                alsa-utils alsa-lib-devel
+                libsndfile-devel
+                espeak-ng
+                ffmpeg-free
+                libffi-devel openssl-devel
+                libpq-devel
+                bluez
+                avahi avahi-compat-libdns_sd-devel
+                lm_sensors
+                portaudio-devel
+                wmctrl xdotool xclip
+                libnotify brightnessctl xdg-utils
+            )
+
+            sudo dnf install -y -q "${PKGS[@]}" 2>&1 | tail -5
+            ok "Pakete installiert"
+            ;;
+
+        *)
+            fail "Paketmanager '$PKG_MANAGER' wird nicht unterstuetzt."
+            fail "Bitte manuell installieren:"
+            echo "  python3, python3-venv, python3-dev, build-essential, curl, wget, git,"
+            echo "  lsof, alsa-utils, libsndfile, espeak-ng, ffmpeg, libffi, openssl,"
+            echo "  libpq-dev, bluez, avahi, lm-sensors, portaudio"
+            echo ""
+            read -r -p "Weiter trotzdem? (j/N) " ans
+            [ "$ans" != "j" ] && [ "$ans" != "J" ] && exit 1
+            ;;
+    esac
+}
+
+# System-Pakete nur installieren wenn Marker fehlt oder --force
+if [ ! -f "$FIRST_RUN_MARKER" ]; then
+    echo -e "  ${Y}Erster Start erkannt – volle System-Installation${NC}"
+    install_system_packages
+else
+    ok "System-Pakete bereits installiert (Marker vorhanden)"
+    # Trotzdem minimale Pruefung
+    MISSING=""
+    for cmd in python3 curl git docker ffmpeg espeak-ng arecord lsof; do
+        if ! command -v "$cmd" &>/dev/null; then
+            MISSING="$MISSING $cmd"
+        fi
+    done
+    if [ -n "$MISSING" ]; then
+        warn "Fehlende Befehle:${R}$MISSING${NC} – starte Nachinstallation"
+        install_system_packages
+    fi
+fi
+
+# ============================================================================
+# Phase 2: Docker installieren
+# ============================================================================
+hdr "Phase 2/10: Docker Engine"
+
+if ! command -v docker &>/dev/null; then
+    echo -e "  ${Y}Docker nicht gefunden – automatische Installation${NC}"
+
+    case "$PKG_MANAGER" in
+        apt)
+            echo -e "  ${Y}…${NC} Installiere Docker via apt..."
+            sudo apt-get install -y -qq ca-certificates curl gnupg lsb-release
+
+            # Docker GPG Key
+            sudo install -m 0755 -d /etc/apt/keyrings
+            if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
+                # Fuer Derivate (Mint, Pop) auf Ubuntu/Debian zurueckfallen
+                local DOCKER_DISTRO="$DISTRO_ID"
+                if [ "$DISTRO_ID" = "linuxmint" ] || [ "$DISTRO_ID" = "pop" ]; then
+                    DOCKER_DISTRO="ubuntu"
+                fi
+                curl -fsSL "https://download.docker.com/linux/${DOCKER_DISTRO}/gpg" \
+                    | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null
+                sudo chmod a+r /etc/apt/keyrings/docker.gpg
+            fi
+
+            # Docker Repo
+            local CODENAME
+            CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME" 2>/dev/null || lsb_release -cs)
+            # Mint/Pop: upstream Ubuntu codename verwenden
+            if [ "$DISTRO_ID" = "linuxmint" ]; then
+                CODENAME=$(grep UBUNTU_CODENAME /etc/os-release 2>/dev/null | cut -d= -f2 || echo "$CODENAME")
+            fi
+            local DOCKER_DISTRO="$DISTRO_ID"
+            if [ "$DISTRO_ID" = "linuxmint" ] || [ "$DISTRO_ID" = "pop" ]; then
+                DOCKER_DISTRO="ubuntu"
+            fi
+
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/${DOCKER_DISTRO} ${CODENAME} stable" \
+                | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin
+            ;;
+        pacman)
+            sudo pacman -S --noconfirm docker docker-compose
+            ;;
+        dnf)
+            sudo dnf install -y -q docker docker-compose-plugin
+            ;;
+        *)
+            fail "Docker bitte manuell installieren: https://docs.docker.com/engine/install/"
+            ;;
+    esac
+
+    # User zur docker-Gruppe hinzufuegen
+    if command -v docker &>/dev/null; then
+        sudo usermod -aG docker "$USER" 2>/dev/null || true
+        ok "Docker installiert (User '$USER' zur docker-Gruppe hinzugefuegt)"
+        warn "Falls Docker-Befehle ohne sudo scheitern: einmal aus- und einloggen"
+    else
+        fail "Docker-Installation fehlgeschlagen!"
+    fi
+fi
+
+# Docker Daemon starten
+if ! docker info &>/dev/null 2>&1; then
+    echo -e "  ${Y}…${NC} Docker Daemon starten..."
+
+    if grep -qi "microsoft\|wsl" /proc/version 2>/dev/null; then
+        # WSL: kein systemd → dockerd direkt
+        if ! pgrep -x dockerd &>/dev/null; then
+            sudo dockerd > /tmp/dockerd.log 2>&1 &
+            sleep 3
+        fi
+    elif command -v systemctl &>/dev/null; then
+        # Systemd: Socket UND Service enablen + starten
+        # docker.socket ist der bevorzugte Weg (on-demand Aktivierung)
+        sudo systemctl enable docker.socket 2>/dev/null || true
+        sudo systemctl start docker.socket 2>/dev/null || true
+        sudo systemctl enable docker.service 2>/dev/null || true
+        sudo systemctl start docker.service 2>/dev/null || true
+        sleep 2
+
+        # Warte bis Docker API antwortet (max 10s)
+        for i in $(seq 1 10); do
+            if docker info &>/dev/null 2>&1 || sudo docker info &>/dev/null 2>&1; then
+                break
+            fi
+            sleep 1
+        done
+    else
+        sudo service docker start 2>/dev/null || true
+        sleep 2
+    fi
+
+    if docker info &>/dev/null 2>&1; then
+        ok "Docker Daemon gestartet"
+    else
+        # Fallback: mit sudo erreichbar?
+        if sudo docker info &>/dev/null 2>&1; then
+            warn "Docker laeuft, aber dein User hat noch keine Rechte"
+            warn "Fuer diese Session nutze ich sudo fuer Docker-Befehle"
+            # docker-Wrapper fuer dieses Skript
+            _real_docker=$(command -v docker)
+            docker() { sudo "$_real_docker" "$@"; }
+            export -f docker
+            ok "Docker via sudo erreichbar"
+        else
+            fail "Docker Daemon konnte nicht gestartet werden!"
+            fail "Versuche manuell:"
+            fail "  sudo systemctl enable --now docker.socket"
+            fail "  sudo systemctl start docker.service"
+            warn "Fahre ohne Docker fort (Postgres/Redis/Mosquitto nicht verfuegbar)"
+        fi
+    fi
+else
+    ok "Docker Daemon laeuft"
+fi
+
+# ============================================================================
+# Phase 3: Python Virtual Environment + Dependencies
+# ============================================================================
+hdr "Phase 3/10: Python-Umgebung"
+
+# Python-Version pruefen
+SYS_PYTHON=$(command -v python3 2>/dev/null || command -v python 2>/dev/null)
+if [ -z "$SYS_PYTHON" ]; then
+    fail "Python 3 nicht gefunden!"
+    fail "Installation: sudo apt install python3 python3-venv python3-pip"
+    exit 1
+fi
+
+PY_VER=$("$SYS_PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
+PY_MAJOR=$("$SYS_PYTHON" -c "import sys; print(sys.version_info.major)" 2>/dev/null)
+PY_MINOR=$("$SYS_PYTHON" -c "import sys; print(sys.version_info.minor)" 2>/dev/null)
+
+if [ "$PY_MAJOR" -lt 3 ] || { [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 10 ]; }; then
+    fail "Python $PY_VER ist zu alt! SOMA benoetigt mindestens Python 3.10"
+    fail "Installiere Python 3.11+: sudo apt install python3.11 python3.11-venv"
+    exit 1
+fi
+ok "System-Python $PY_VER ($SYS_PYTHON)"
+
+# venv pruefen: existiert, hat pip, richtige Python-Version?
+VENV_REBUILD=0
+
+if [ ! -f "$VENV/bin/python" ]; then
+    VENV_REBUILD=1
+    echo -e "  ${Y}…${NC} Kein venv gefunden"
+elif [ ! -f "$VENV/bin/pip" ] && [ ! -f "$VENV/bin/pip3" ]; then
+    VENV_REBUILD=1
+    warn "venv existiert aber pip fehlt (evtl. uv-basiert oder beschaedigt)"
+else
+    # Pruefen ob venv-Python noch existiert und zur System-Version passt
+    VENV_PY_VER=$("$VENV/bin/python" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "broken")
+    if [ "$VENV_PY_VER" = "broken" ]; then
+        VENV_REBUILD=1
+        warn "venv-Python ist nicht mehr ausfuehrbar"
+    elif [ "$VENV_PY_VER" != "$PY_VER" ]; then
+        warn "venv nutzt Python $VENV_PY_VER, System hat $PY_VER"
+        # Nur rebuilden wenn System neuer ist
+        VENV_REBUILD=1
+    fi
+fi
+
+if [ $VENV_REBUILD -eq 1 ]; then
+    echo -e "  ${Y}…${NC} Erstelle virtuelle Umgebung (.venv) mit Python $PY_VER..."
+    # Altes venv komplett entfernen (sauberer Neuanfang)
+    if [ -d "$VENV" ]; then
+        rm -rf "$VENV"
+        ok "Altes venv entfernt"
+    fi
+    "$SYS_PYTHON" -m venv "$VENV" || {
+        fail "venv-Erstellung fehlgeschlagen!"
+        case "$PKG_MANAGER" in
+            apt) fail "Installiere: sudo apt install python3-venv python3-dev" ;;
+            pacman) fail "Installiere: sudo pacman -S python python-pip" ;;
+            dnf) fail "Installiere: sudo dnf install python3-devel python3-virtualenv" ;;
+        esac
+        exit 1
+    }
+    ok ".venv erstellt (Python $PY_VER)"
+
+    # Sicherstellen dass pip vorhanden ist
+    if [ ! -f "$VENV/bin/pip" ] && [ ! -f "$VENV/bin/pip3" ]; then
+        echo -e "  ${Y}…${NC} pip via ensurepip bootstrappen..."
+        "$VENV/bin/python" -m ensurepip --upgrade 2>&1 | tail -3 || {
+            fail "pip konnte nicht installiert werden!"
+            exit 1
+        }
+    fi
+
+    # Marker entfernen damit requirements neu installiert werden
+    rm -f "$VENV/.soma_installed"
+else
+    ok "venv intakt (Python $VENV_PY_VER)"
+fi
+
+# pip upgraden
+if [ -f "$PIP" ]; then
+    "$PIP" install --upgrade pip --quiet 2>/dev/null
+    ok "pip aktuell"
+elif [ -f "$VENV/bin/pip3" ]; then
+    PIP="$VENV/bin/pip3"
+    "$PIP" install --upgrade pip --quiet 2>/dev/null
+    ok "pip aktuell (via pip3)"
+else
+    fail "pip nicht im venv gefunden!"
+    exit 1
+fi
+
+# Dependencies installieren (mit Marker um unnoetige Reinstalls zu vermeiden)
+REQ_FILE="$SCRIPT_DIR/requirements.txt"
+MARKER="$VENV/.soma_installed"
+if [ ! -f "$MARKER" ] || [ "$REQ_FILE" -nt "$MARKER" ]; then
+    echo -e "  ${Y}…${NC} Installiere Python-Abhaengigkeiten (requirements.txt)..."
+    if "$PIP" install -r "$REQ_FILE" 2>&1 | tail -20; then
+        touch "$MARKER"
+        ok "Alle Python-Abhaengigkeiten installiert"
+    else
+        warn "Einige Pakete hatten Probleme – pruefen:"
+        warn "  $PIP install -r $REQ_FILE"
+    fi
+else
+    ok "Python-Abhaengigkeiten aktuell (requirements.txt unveraendert)"
+fi
+
+# Schnell-Check der kritischen Imports
+echo -e "  Pruefe kritische Python-Module..."
+IMPORT_ERRORS=""
+for mod in fastapi uvicorn redis pydantic django psutil structlog httpx aiomqtt numpy; do
+    if ! "$PYTHON" -c "import $mod" 2>/dev/null; then
+        IMPORT_ERRORS="$IMPORT_ERRORS $mod"
+    fi
+done
+if [ -n "$IMPORT_ERRORS" ]; then
+    warn "Fehlende Module:${R}$IMPORT_ERRORS${NC}"
+    warn "Versuche Nachinstallation..."
+    "$PIP" install -r "$REQ_FILE" --quiet 2>&1
+else
+    ok "Alle kritischen Python-Module verfuegbar"
+fi
+
+# ============================================================================
+# Phase 4: .env Konfiguration
+# ============================================================================
+hdr "Phase 4/10: Konfiguration (.env)"
+
+ENV_CREATED_NOW=0
+
+if [ ! -f "$SCRIPT_DIR/.env" ]; then
+    if [ -f "$SCRIPT_DIR/.env.example" ]; then
+        cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
+        ENV_CREATED_NOW=1
+        warn ".env wurde aus .env.example erstellt"
+    else
+        # .env.example existiert auch nicht – Minimale .env erzeugen
+        cat > "$SCRIPT_DIR/.env" <<'ENVEOF'
+# ============================================================================
+# SOMA-AI – Automatisch generierte .env (BITTE ANPASSEN!)
+# ============================================================================
+POSTGRES_DB=soma_db
+POSTGRES_USER=soma
+POSTGRES_PASSWORD=CHANGE_ME_strong_password
+REDIS_HOST=localhost
+REDIS_PORT=6379
+MQTT_HOST=localhost
+MQTT_PORT=1883
+OLLAMA_HOST=http://localhost
+OLLAMA_PORT=11434
+OLLAMA_HEAVY_MODEL=qwen3:8b
+OLLAMA_LIGHT_MODEL=qwen3:1.7b
+BRAIN_CORE_HOST=0.0.0.0
+BRAIN_CORE_PORT=8100
+DJANGO_SECRET_KEY=CHANGE_ME_use_python_secrets_token_hex_50
+DJANGO_DEBUG=True
+DJANGO_PORT=8200
+GITHUB_TOKEN=
+HA_URL=http://homeassistant.local:8123
+HA_TOKEN=
+ENVEOF
+        ENV_CREATED_NOW=1
+        warn ".env wurde mit Defaults generiert"
+    fi
+fi
+
+# .env laden
+set -a
+source "$SCRIPT_DIR/.env"
+set +a
+
+# Pruefen ob Defaults noch drin sind
+ENV_NEEDS_EDIT=0
+if grep -q "CHANGE_ME" "$SCRIPT_DIR/.env" 2>/dev/null; then
+    ENV_NEEDS_EDIT=1
+fi
+
+if [ $ENV_CREATED_NOW -eq 1 ] || [ $ENV_NEEDS_EDIT -eq 1 ]; then
+    echo ""
+    echo -e "  ${R}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "  ${R}║${NC}  ${B}WICHTIG: .env-Datei muss noch angepasst werden!${NC}            ${R}║${NC}"
+    echo -e "  ${R}╠══════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "  ${R}║${NC}                                                              ${R}║${NC}"
+    echo -e "  ${R}║${NC}  Mindestens diese Werte aendern:                             ${R}║${NC}"
+    echo -e "  ${R}║${NC}    ${Y}POSTGRES_PASSWORD${NC} = sicheres Passwort                    ${R}║${NC}"
+    echo -e "  ${R}║${NC}    ${Y}DJANGO_SECRET_KEY${NC} = python3 -c 'import secrets;          ${R}║${NC}"
+    echo -e "  ${R}║${NC}                        print(secrets.token_hex(50))'          ${R}║${NC}"
+    echo -e "  ${R}║${NC}                                                              ${R}║${NC}"
+    echo -e "  ${R}║${NC}  Optional aber empfohlen:                                    ${R}║${NC}"
+    echo -e "  ${R}║${NC}    ${Y}GITHUB_TOKEN${NC}      = fuer Plugin-Generierung               ${R}║${NC}"
+    echo -e "  ${R}║${NC}    ${Y}HA_TOKEN${NC}           = fuer Home Assistant Integration       ${R}║${NC}"
+    echo -e "  ${R}║${NC}                                                              ${R}║${NC}"
+    echo -e "  ${R}║${NC}  Datei: ${C}$SCRIPT_DIR/.env${NC}                ${R}║${NC}"
+    echo -e "  ${R}║${NC}  Nach dem Bearbeiten: ${C}./start_soma.sh${NC} erneut starten     ${R}║${NC}"
+    echo -e "  ${R}║${NC}                                                              ${R}║${NC}"
+    echo -e "  ${R}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+
+    if [ $ENV_CREATED_NOW -eq 1 ]; then
+        echo -e "  ${Y}SOMA startet jetzt mit Default-Werten (funktioniert lokal).${NC}"
+        echo -e "  ${Y}Fuer Production: .env bearbeiten und neu starten.${NC}"
+        echo ""
+        read -r -p "  Weiter mit Defaults? (J/n) " ans
+        if [ "$ans" = "n" ] || [ "$ans" = "N" ]; then
+            echo -e "\n  Bearbeite .env und starte dann erneut: ${C}./start_soma.sh${NC}\n"
+            exit 0
+        fi
+    fi
+fi
+
+# Wenn POSTGRES_PASSWORD noch auf CHANGE_ME steht: Auto-generieren fuer lokalen Betrieb
+if grep -q "^POSTGRES_PASSWORD=CHANGE_ME" "$SCRIPT_DIR/.env" 2>/dev/null; then
+    AUTO_PG_PASS=$("$SYS_PYTHON" -c "import secrets; print(secrets.token_hex(16))" 2>/dev/null || echo "soma_auto_$(date +%s)")
+    sed -i "s/^POSTGRES_PASSWORD=CHANGE_ME.*/POSTGRES_PASSWORD=$AUTO_PG_PASS/" "$SCRIPT_DIR/.env"
+    ok "POSTGRES_PASSWORD auto-generiert (lokal sicher)"
+    # Neu laden
+    set -a; source "$SCRIPT_DIR/.env"; set +a
+fi
+
+if grep -q "^DJANGO_SECRET_KEY=CHANGE_ME" "$SCRIPT_DIR/.env" 2>/dev/null; then
+    AUTO_DJ_KEY=$("$SYS_PYTHON" -c "import secrets; print(secrets.token_hex(50))" 2>/dev/null || echo "soma-auto-key-$(date +%s)")
+    sed -i "s/^DJANGO_SECRET_KEY=CHANGE_ME.*/DJANGO_SECRET_KEY=$AUTO_DJ_KEY/" "$SCRIPT_DIR/.env"
+    ok "DJANGO_SECRET_KEY auto-generiert"
+    set -a; source "$SCRIPT_DIR/.env"; set +a
+fi
+
+# ── Modelle aus .env oder Defaults ───────────────────────────────────────
+OLLAMA_HEAVY="${OLLAMA_HEAVY_MODEL:-qwen3:8b}"
+OLLAMA_LIGHT="${OLLAMA_LIGHT_MODEL:-qwen3:1.7b}"
+OLLAMA_EMBED="nomic-embed-text"
+
+# ── Ports ────────────────────────────────────────────────────────────────
+BRAIN_PORT="${BRAIN_CORE_PORT:-8100}"
+DJANGO_PORT_NUM="${DJANGO_PORT:-8200}"
+
+# ============================================================================
+# Phase 5: Mosquitto-Config & data-Verzeichnisse
+# ============================================================================
+hdr "Phase 5/10: Verzeichnisse & Configs"
+
+# Datenverzeichnisse anlegen
+mkdir -p "$SCRIPT_DIR/data/phone_recordings" "$SCRIPT_DIR/data/phone_sounds"
+mkdir -p "$SCRIPT_DIR/mosquitto/config"
+mkdir -p "$SCRIPT_DIR/evolution_lab/generated_plugins"
+mkdir -p "$SCRIPT_DIR/evolution_lab/sandbox_env"
+
+# Mosquitto-Config erstellen falls nicht vorhanden
+MOSQUITTO_CONF="$SCRIPT_DIR/mosquitto/config/mosquitto.conf"
+if [ ! -f "$MOSQUITTO_CONF" ]; then
+    cat > "$MOSQUITTO_CONF" <<'MQTTEOF'
+# SOMA-AI Mosquitto Configuration
+listener 1883
+protocol mqtt
+
+listener 9001
+protocol websockets
+
+allow_anonymous true
+persistence true
+persistence_location /mosquitto/data/
+log_dest stdout
+MQTTEOF
+    ok "mosquitto.conf erstellt"
+else
+    ok "mosquitto.conf vorhanden"
+fi
+
+# Leere Erinnerungsdateien anlegen
+if [ ! -f "$SCRIPT_DIR/data/soma_memory.json" ]; then
+    echo "[]" > "$SCRIPT_DIR/data/soma_memory.json"
+    ok "soma_memory.json angelegt"
+fi
+
+if [ ! -f "$SCRIPT_DIR/data/consciousness_state.json" ]; then
+    cat > "$SCRIPT_DIR/data/consciousness_state.json" <<'CSEOF'
+{
+  "mood": "neutral",
+  "body_valence": 0.5,
+  "body_arousal": 0.5,
+  "current_thought": "",
+  "diary_insight": "",
+  "attention_focus": "",
+  "uptime_feeling": "Ich bin gerade erst aufgewacht",
+  "update_count": 0,
+  "saved_at": 0,
+  "saved_at_human": "never"
+}
+CSEOF
+    ok "consciousness_state.json angelegt"
+fi
+
+ok "Alle Verzeichnisse & Configs bereit"
+
+# ============================================================================
+# Phase 6: Cleanup & Docker-Container starten
+# ============================================================================
+hdr "Phase 6/10: Cleanup & Infrastruktur"
+
+# Log-Rotation
 rotate_log "$LOGDIR/brain_core.log" 5000
 rotate_log "$LOGDIR/django.log" 5000
-ok "Logs rotiert"
 
-# Stale PID-Files aufräumen (Prozess tot, PID-Datei noch da)
+# Stale PID-Files aufraeumen
 for pidfile in "$PIDDIR"/*.pid; do
     [ -f "$pidfile" ] || continue
     PID=$(cat "$pidfile" 2>/dev/null)
@@ -392,210 +929,123 @@ for pidfile in "$PIDDIR"/*.pid; do
         rm -f "$pidfile"
     fi
 done
-ok "Stale PIDs aufgeräumt"
 
-# Zombie-Prozesse auf unseren Ports killen (falls vorheriger Crash)
+# Zombie-Prozesse auf unseren Ports pruefen
 if lsof -t -i:"$BRAIN_PORT" >/dev/null 2>&1; then
-    # Prüfe ob der Prozess tatsächlich funktioniert (nicht nur Port belegt)
     if ! curl -sf --max-time 2 "http://localhost:$BRAIN_PORT/api/v1/health" >/dev/null 2>&1; then
-        warn "Zombie-Prozess auf Port $BRAIN_PORT gefunden – wird beendet"
+        warn "Zombie auf Port $BRAIN_PORT – wird beendet"
         kill_port "$BRAIN_PORT"
     else
-        echo -e "\n  ${Y}SOMA-AI läuft bereits und ist gesund!${NC}"
+        echo -e "\n  ${G}SOMA-AI laeuft bereits und ist gesund!${NC}"
         echo -e "  Status: ${C}./start_soma.sh --status${NC}"
-        echo -e "  Stoppen: ${C}./stop_all.sh${NC}"
-        echo ""
+        echo -e "  Stoppen: ${C}./stop_all.sh${NC}\n"
         exit 0
     fi
 fi
 
 if lsof -t -i:"$DJANGO_PORT_NUM" >/dev/null 2>&1; then
     if ! curl -sf --max-time 2 "http://localhost:$DJANGO_PORT_NUM/" >/dev/null 2>&1; then
-        warn "Zombie-Prozess auf Port $DJANGO_PORT_NUM gefunden – wird beendet"
+        warn "Zombie auf Port $DJANGO_PORT_NUM – wird beendet"
         kill_port "$DJANGO_PORT_NUM"
     fi
 fi
 
-# ── 1. Docker Daemon ────────────────────────────────────────────────────
-hdr "1/7 Docker Daemon"
+ok "Cleanup abgeschlossen"
 
-# ── Docker installieren falls nicht vorhanden ─────────────────────────
-if ! command -v docker &>/dev/null; then
-    warn "Docker nicht gefunden – automatische Installation…"
-
-    # Erkennen ob WSL
-    IS_WSL=false
-    if grep -qi "microsoft\|wsl" /proc/version 2>/dev/null; then
-        IS_WSL=true
-        warn "WSL-Umgebung erkannt"
+# ── Docker-Container starten ────────────────────────────────────────────
+# Pruefen ob Docker ueberhaupt verfuegbar ist
+DOCKER_AVAILABLE=0
+if docker info &>/dev/null 2>&1; then
+    DOCKER_AVAILABLE=1
+elif sudo docker info &>/dev/null 2>&1; then
+    DOCKER_AVAILABLE=1
+    # docker via sudo wrappen falls noch nicht geschehen
+    if ! docker info &>/dev/null 2>&1; then
+        _real_docker=$(command -v docker)
+        docker() { sudo "$_real_docker" "$@"; }
+        export -f docker
     fi
-
-    # Distro erkennen
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        DISTRO_ID="${ID:-unknown}"
-    else
-        DISTRO_ID="unknown"
-    fi
-
-    case "$DISTRO_ID" in
-        ubuntu|debian|linuxmint|pop)
-            echo -e "  ${Y}…${NC} Installiere Docker via apt (${DISTRO_ID})…"
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq ca-certificates curl gnupg lsb-release
-            sudo install -m 0755 -d /etc/apt/keyrings
-            curl -fsSL https://download.docker.com/linux/${DISTRO_ID}/gpg \
-                | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null
-            sudo chmod a+r /etc/apt/keyrings/docker.gpg
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-https://download.docker.com/linux/${DISTRO_ID} $(lsb_release -cs) stable" \
-                | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin
-            sudo usermod -aG docker "$USER"
-            ok "Docker installiert"
-            ;;
-        arch|manjaro)
-            echo -e "  ${Y}…${NC} Installiere Docker via pacman…"
-            sudo pacman -Sy --noconfirm docker docker-compose
-            sudo usermod -aG docker "$USER"
-            ok "Docker installiert"
-            ;;
-        fedora|rhel|centos)
-            echo -e "  ${Y}…${NC} Installiere Docker via dnf…"
-            sudo dnf install -y -q docker docker-compose
-            sudo usermod -aG docker "$USER"
-            ok "Docker installiert"
-            ;;
-        *)
-            fail "Unbekannte Distro '${DISTRO_ID}' – Docker bitte manuell installieren:"
-            fail "  https://docs.docker.com/engine/install/"
-            exit 1
-            ;;
-    esac
 fi
 
-# ── Docker Daemon starten ─────────────────────────────────────────────
-if ! docker info &>/dev/null 2>&1; then
-    echo -e "  ${Y}…${NC} Docker Daemon starten…"
+if [ $DOCKER_AVAILABLE -eq 1 ]; then
+    echo -e "\n  ${B}Docker-Container starten...${NC}"
 
-    # WSL: kein systemd → dockerd direkt im Hintergrund
-    if grep -qi "microsoft\|wsl" /proc/version 2>/dev/null; then
-        if ! pgrep -x dockerd &>/dev/null; then
-            sudo dockerd > /tmp/dockerd.log 2>&1 &
-            sleep 3
-        fi
-    else
-        # Native Linux: systemctl oder service
-        if command -v systemctl &>/dev/null && systemctl is-system-running &>/dev/null 2>&1; then
-            sudo systemctl start docker
+    DOCKER_SERVICES="postgres redis mosquitto"
+
+    # Asterisk nur wenn Image + SIP-Credentials vorhanden
+    if docker image inspect soma-asterisk &>/dev/null 2>&1; then
+        if [ -n "${VODAFONE_SIP_HOST:-}" ] && [ "${VODAFONE_SIP_USER:-}" != "CHANGE_ME_sip_username" ]; then
+            DOCKER_SERVICES="$DOCKER_SERVICES asterisk"
+            ok "Asterisk Phone Gateway wird mitgestartet"
         else
-            sudo service docker start 2>/dev/null || true
+            warn "Asterisk-Image vorhanden, aber SIP-Credentials fehlen"
         fi
-        sleep 2
     fi
 
-    if docker info &>/dev/null 2>&1; then
-        ok "Docker Daemon gestartet"
-    else
-        fail "Docker Daemon konnte nicht gestartet werden!"
-        if grep -qi "microsoft\|wsl" /proc/version 2>/dev/null; then
-            fail "WSL: Starte manuell mit: sudo dockerd &"
-            fail "Oder aktiviere systemd in WSL: /etc/wsl.conf → [boot] systemd=true"
-        else
-            fail "Manuell starten: sudo systemctl start docker"
+    docker compose -f "$SCRIPT_DIR/docker-compose.yml" up -d $DOCKER_SERVICES 2>&1 | grep -v "^$" | head -15
+
+    # Warte auf Health-Checks
+    echo -e "  Warte auf Services..."
+    READY=0
+    for i in $(seq 1 45); do
+        PG_OK=$(docker inspect -f '{{.State.Health.Status}}' soma-postgres 2>/dev/null || echo "none")
+        REDIS_OK=$(docker inspect -f '{{.State.Health.Status}}' soma-redis 2>/dev/null || echo "none")
+        if [ "$PG_OK" = "healthy" ] && [ "$REDIS_OK" = "healthy" ]; then
+            READY=1
+            break
         fi
-        exit 1
+        sleep 1
+    done
+
+    if [ $READY -eq 1 ]; then
+        ok "PostgreSQL: healthy"
+        ok "Redis: healthy"
+        MQTT_STATUS=$(docker inspect -f '{{.State.Status}}' soma-mosquitto 2>/dev/null || echo "none")
+        [ "$MQTT_STATUS" = "running" ] && ok "Mosquitto: running" || warn "Mosquitto: $MQTT_STATUS"
+    else
+        warn "Services brauchen noch einen Moment (PG=$PG_OK, Redis=$REDIS_OK)"
     fi
 else
-    ok "Docker Daemon läuft"
+    warn "Docker nicht verfuegbar – Container uebersprungen"
+    warn "Starte Docker manuell: sudo systemctl enable --now docker.socket"
+    warn "Dann: ./start_soma.sh erneut ausfuehren"
 fi
 
-# ── 2. Infrastruktur-Container ──────────────────────────────────────────
-hdr "2/7 Infrastruktur (PostgreSQL, Redis, MQTT)"
-
-# Basis-Services — OHNE Ollama (läuft als System-Service für GPU-Passthrough)
-DOCKER_SERVICES="postgres redis mosquitto"
-
-# Asterisk nur starten wenn Image existiert UND SIP-Credentials gesetzt
-if docker image inspect soma-asterisk &>/dev/null 2>&1; then
-    if [ -n "${VODAFONE_SIP_HOST:-}" ] && [ -n "${VODAFONE_SIP_USER:-}" ]; then
-        DOCKER_SERVICES="$DOCKER_SERVICES asterisk"
-        ok "Asterisk Phone Gateway wird mitgestartet"
-    else
-        warn "Asterisk-Image vorhanden, aber SIP-Credentials fehlen in .env"
-        warn "  Setze VODAFONE_SIP_HOST, VODAFONE_SIP_USER, VODAFONE_SIP_PASS"
-    fi
-else
-    warn "Asterisk-Image nicht gebaut – Phone Gateway übersprungen"
-    warn "  Später nachholen: docker compose build asterisk"
-fi
-
-# Docker Compose: nur die explizit genannten Services starten
-docker compose -f "$SCRIPT_DIR/docker-compose.yml" up -d $DOCKER_SERVICES 2>&1 | grep -v "^$" | head -15
-
-# Warte auf Health-Checks
-echo -e "  Warte auf Services..."
-READY=0
-for i in $(seq 1 45); do
-    PG_OK=$(docker inspect -f '{{.State.Health.Status}}' soma-postgres 2>/dev/null || echo "none")
-    REDIS_OK=$(docker inspect -f '{{.State.Health.Status}}' soma-redis 2>/dev/null || echo "none")
-
-    if [ "$PG_OK" = "healthy" ] && [ "$REDIS_OK" = "healthy" ]; then
-        READY=1
-        break
-    fi
-    sleep 1
-done
-
-if [ $READY -eq 1 ]; then
-    ok "PostgreSQL: healthy"
-    ok "Redis: healthy"
-    # Mosquitto hat keinen Health-Endpoint, prüfe Container-Status
-    MQTT_STATUS=$(docker inspect -f '{{.State.Status}}' soma-mosquitto 2>/dev/null || echo "none")
-    if [ "$MQTT_STATUS" = "running" ]; then
-        ok "Mosquitto: running"
-    else
-        warn "Mosquitto: $MQTT_STATUS"
-    fi
-else
-    warn "Services brauchen noch einen Moment (PG=$PG_OK, Redis=$REDIS_OK)"
-    warn "Weiter im Boot-Prozess..."
-fi
-
-# Asterisk Status (falls gestartet)
-if echo "$DOCKER_SERVICES" | grep -q "asterisk"; then
-    AST_STATUS=$(docker inspect -f '{{.State.Status}}' soma-asterisk 2>/dev/null || echo "none")
-    if [ "$AST_STATUS" = "running" ]; then
-        ok "Asterisk: running 📞"
-    else
-        warn "Asterisk: $AST_STATUS (startet evtl. noch)"
-    fi
-fi
-
-# ── 3. Ollama (System-Service) ──────────────────────────────────────────
-hdr "3/7 Ollama (LLM Runtime)"
-
-# HINWEIS: Ollama läuft bevorzugt als System-Service (nicht Docker) für
-# direkten GPU-Zugriff. Der ollama Service in docker-compose.yml ist ein
-# Fallback für Systeme ohne native Ollama-Installation.
+# ============================================================================
+# Phase 7: Ollama installieren & Modelle laden
+# ============================================================================
+hdr "Phase 7/10: Ollama (LLM Runtime)"
 
 OLLAMA_STARTED=0
 
+# Ollama installieren falls nicht vorhanden
+if ! command -v ollama &>/dev/null; then
+    echo -e "  ${Y}Ollama nicht gefunden – automatische Installation${NC}"
+    echo -e "  ${Y}…${NC} Lade Ollama Installer..."
+
+    if curl -fsSL https://ollama.com/install.sh | sh 2>&1 | tail -5; then
+        ok "Ollama installiert"
+    else
+        warn "Ollama auto-install fehlgeschlagen"
+        warn "Manuell: https://ollama.com/download"
+    fi
+fi
+
+# Ollama starten
 if curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
-    ok "Ollama läuft bereits"
+    ok "Ollama laeuft bereits"
     OLLAMA_STARTED=1
 else
-    # Versuch 1: Systemd-Service (bevorzugt – direkter GPU-Zugriff)
+    # Versuch 1: Systemd-Service
     if command -v ollama &>/dev/null; then
-        if systemctl is-active --quiet ollama 2>/dev/null; then
-            ok "Ollama Service aktiv (wartet auf API...)"
+        if command -v systemctl &>/dev/null; then
+            sudo systemctl start ollama 2>/dev/null || true
+            sudo systemctl enable ollama 2>/dev/null || true
         else
-            echo -e "  Starte Ollama System-Service..."
-            sudo systemctl start ollama 2>/dev/null
+            # Ohne systemd: direkt starten
+            nohup ollama serve > "$LOGDIR/ollama.log" 2>&1 &
         fi
 
-        # Warte auf Ollama API
         for i in $(seq 1 20); do
             if curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
                 OLLAMA_STARTED=1
@@ -603,19 +1053,13 @@ else
             fi
             sleep 1
         done
-
-        if [ $OLLAMA_STARTED -eq 1 ]; then
-            ok "Ollama gestartet (System-Service)"
-        else
-            warn "Ollama Service reagiert noch nicht..."
-        fi
+        [ $OLLAMA_STARTED -eq 1 ] && ok "Ollama gestartet (System-Service)"
     fi
 
-    # Versuch 2: Docker-Fallback (nur wenn System-Ollama nicht verfügbar)
-    if [ $OLLAMA_STARTED -eq 0 ]; then
-        warn "System-Ollama nicht verfügbar – starte Docker-Container"
+    # Versuch 2: Docker-Fallback (nur wenn Docker verfuegbar)
+    if [ $OLLAMA_STARTED -eq 0 ] && [ $DOCKER_AVAILABLE -eq 1 ]; then
+        warn "System-Ollama nicht verfuegbar – starte Docker-Container"
         docker compose -f "$SCRIPT_DIR/docker-compose.yml" up -d ollama 2>&1 | head -5
-
         for i in $(seq 1 30); do
             if curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
                 OLLAMA_STARTED=1
@@ -623,43 +1067,31 @@ else
             fi
             sleep 1
         done
+        [ $OLLAMA_STARTED -eq 1 ] && ok "Ollama gestartet (Docker)"
+    fi
 
-        if [ $OLLAMA_STARTED -eq 1 ]; then
-            ok "Ollama gestartet (Docker-Container)"
-        else
-            fail "Ollama konnte nicht gestartet werden!"
-            fail "Brain Core benötigt Ollama für LLM-Inference."
-            fail "  System: sudo pacman -S ollama && sudo systemctl enable --now ollama"
-            fail "  Docker: docker compose up -d ollama"
-        fi
+    if [ $OLLAMA_STARTED -eq 0 ]; then
+        fail "Ollama konnte nicht gestartet werden!"
+        fail "  System: curl -fsSL https://ollama.com/install.sh | sh"
+        fail "  Docker: docker compose up -d ollama"
     fi
 fi
 
-# Modelle anzeigen
+# Modelle pruefen und herunterladen
 if [ $OLLAMA_STARTED -eq 1 ]; then
     MODELS=$(curl -sf http://localhost:11434/api/tags | "$PYTHON" -c "
 import sys,json
 d=json.load(sys.stdin)
-names=[m['name'] for m in d.get('models',[])]
-print(', '.join(names) if names else 'keine')" 2>/dev/null || echo "?")
-    ok "Verfügbare Modelle: ${C}$MODELS${NC}"
-fi
+print(', '.join(m['name'] for m in d.get('models',[])))" 2>/dev/null || echo "?")
+    ok "Verfuegbare Modelle: ${C}$MODELS${NC}"
 
-# ── 4. Ollama Modelle verifizieren ──────────────────────────────────────
-hdr "4/7 Ollama Modelle verifizieren"
-
-if [ $OLLAMA_STARTED -eq 1 ]; then
-    # Liste der benötigten Modelle (Heavy, Light, Embedding)
     REQUIRED_MODELS=("$OLLAMA_HEAVY" "$OLLAMA_LIGHT" "$OLLAMA_EMBED")
-
     for model in "${REQUIRED_MODELS[@]}"; do
-        # Prüfe ob Modell vorhanden (via API)
         HAS_MODEL=$(curl -sf http://localhost:11434/api/tags | "$PYTHON" -c "
 import sys,json
 d=json.load(sys.stdin)
 names=[m['name'] for m in d.get('models',[])]
 target='$model'
-# Exakter Match oder Basis-Name Match (z.B. 'phi3:mini' matched 'phi3:mini')
 found = target in names or any(n.startswith(target.split(':')[0]+':') for n in names)
 print('yes' if found else 'no')" 2>/dev/null || echo "no")
 
@@ -668,26 +1100,14 @@ print('yes' if found else 'no')" 2>/dev/null || echo "no")
         else
             warn "Modell fehlt: ${Y}$model${NC} – wird heruntergeladen..."
             echo -e "  ${C}(Dies kann beim ersten Start einige Minuten dauern)${NC}"
-            ollama pull "$model" 2>&1 | tail -3
-            if [ $? -eq 0 ]; then
-                ok "Modell geladen: ${C}$model${NC}"
-            else
-                fail "Modell konnte nicht geladen werden: $model"
-                fail "  Manuell: ollama pull $model"
-            fi
+            ollama pull "$model" 2>&1 | tail -5
+            [ $? -eq 0 ] && ok "Modell geladen: ${C}$model${NC}" || fail "Download fehlgeschlagen: $model"
         fi
     done
-else
-    warn "Ollama nicht erreichbar – Modell-Check übersprungen"
-fi
 
-# ── 4b. KV-Cache Warmup (Vision #17) ────────────────────────────────────
-# Ollama cached den System-Prompt als KV-Prefix. Beim ersten Request muss der
-# komplette Prompt-Eval durchlaufen → langsam. Ein Warmup-Call VOR dem
-# eigentlichen Start macht den ersten echten Request deutlich schneller.
-if [ $OLLAMA_STARTED -eq 1 ]; then
+    # KV-Cache Warmup
     echo -e "  ${C}KV-Cache Warmup: Persona-Prefix vorladen...${NC}"
-    WARMUP_RESPONSE=$(curl -sf --max-time 30 http://localhost:11434/api/chat -d "{
+    WARMUP_RESPONSE=$(curl -sf --max-time 60 http://localhost:11434/api/chat -d "{
         \"model\": \"$OLLAMA_HEAVY\",
         \"messages\": [{
             \"role\": \"system\",
@@ -701,45 +1121,36 @@ if [ $OLLAMA_STARTED -eq 1 ]; then
     }" 2>/dev/null)
 
     if echo "$WARMUP_RESPONSE" | grep -q "content"; then
-        ok "KV-Cache Warmup erfolgreich — Persona-Prefix gecached ⚡"
+        ok "KV-Cache Warmup erfolgreich"
     else
         warn "KV-Cache Warmup fehlgeschlagen (nicht kritisch)"
     fi
-fi
-
-# ── 5. Python Environment prüfen ────────────────────────────────────────
-hdr "5/7 Python Environment"
-
-if [ -x "$PYTHON" ]; then
-    PY_VER=$("$PYTHON" --version 2>&1)
-    ok "venv erkannt: $PY_VER"
 else
-    fail "Python venv nicht gefunden: $PYTHON"
-    fail "Erst ausführen: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
-    exit 1
+    warn "Ollama nicht erreichbar – Modell-Check uebersprungen"
 fi
 
-# ── 6a. Django SSOT ─────────────────────────────────────────────────────
-hdr "6/7 Django SSOT (Port $DJANGO_PORT_NUM)"
+# ============================================================================
+# Phase 8: Django SSOT
+# ============================================================================
+hdr "Phase 8/10: Django SSOT (Port $DJANGO_PORT_NUM)"
 
-# Datenbank-Strategie: PostgreSQL wenn verfügbar, sonst SQLite-Fallback
+# Datenbank-Strategie
 PG_HEALTH=$(docker inspect -f '{{.State.Health.Status}}' soma-postgres 2>/dev/null || echo "none")
 if [ "$PG_HEALTH" = "healthy" ]; then
     export USE_SQLITE=false
-    ok "PostgreSQL healthy → Django nutzt PostgreSQL"
+    ok "PostgreSQL healthy – Django nutzt PostgreSQL"
 else
     export USE_SQLITE=true
-    warn "PostgreSQL nicht verfügbar → Django nutzt SQLite-Fallback"
+    warn "PostgreSQL nicht verfuegbar – Django nutzt SQLite-Fallback"
 fi
 
-# Django Migrationen ausführen (Schema aktuell halten)
-echo -e "  Migrationen prüfen..."
+# Migrationen
+echo -e "  Migrationen pruefen..."
 cd "$SCRIPT_DIR"
 MIGRATE_OUTPUT=$("$PYTHON" brain_memory_ui/manage.py migrate --run-syncdb --noinput 2>&1)
 MIGRATE_RC=$?
 
 if [ $MIGRATE_RC -eq 0 ]; then
-    # Prüfe ob tatsächlich Migrationen liefen
     if echo "$MIGRATE_OUTPUT" | grep -q "Applying"; then
         APPLIED=$(echo "$MIGRATE_OUTPUT" | grep -c "Applying")
         ok "Migrationen angewandt: $APPLIED neue"
@@ -748,44 +1159,38 @@ if [ $MIGRATE_RC -eq 0 ]; then
     fi
 else
     warn "Migrationen fehlerhaft (RC=$MIGRATE_RC)"
-    echo "$MIGRATE_OUTPUT" | tail -5 | while IFS= read -r line; do
+    echo "$MIGRATE_OUTPUT" | tail -3 | while IFS= read -r line; do
         echo -e "    ${Y}$line${NC}"
     done
-    warn "Django startet trotzdem (evtl. mit altem Schema)"
 fi
 
-# Django starten (wenn nicht bereits aktiv)
+# Django starten
 if curl -sf "http://localhost:$DJANGO_PORT_NUM/" >/dev/null 2>&1; then
-    ok "Django läuft bereits"
+    ok "Django laeuft bereits"
 else
     nohup "$PYTHON" brain_memory_ui/manage.py runserver "0.0.0.0:$DJANGO_PORT_NUM" \
         > "$LOGDIR/django.log" 2>&1 &
     DJANGO_PID=$!
     echo "$DJANGO_PID" > "$PIDDIR/django.pid"
 
-    # Warte auf Django (max 10s)
     if wait_for_url "http://localhost:$DJANGO_PORT_NUM/" 10; then
         ok "Django gestartet (PID $DJANGO_PID)"
     else
         warn "Django startet noch... (Log: .logs/django.log)"
-        # Zeige letzte Fehler falls vorhanden
         if [ -f "$LOGDIR/django.log" ]; then
             ERRORS=$(grep -i "error\|exception\|traceback" "$LOGDIR/django.log" 2>/dev/null | tail -3)
-            if [ -n "$ERRORS" ]; then
-                echo -e "    ${R}Letzte Fehler:${NC}"
-                echo "$ERRORS" | while IFS= read -r line; do
-                    echo -e "    ${R}$line${NC}"
-                done
-            fi
+            [ -n "$ERRORS" ] && echo "$ERRORS" | while IFS= read -r line; do echo -e "    ${R}$line${NC}"; done
         fi
     fi
 fi
 
-# ── 6b. Brain Core ──────────────────────────────────────────────────────
-hdr "7/7 Brain Core (Port $BRAIN_PORT)"
+# ============================================================================
+# Phase 9: Brain Core
+# ============================================================================
+hdr "Phase 9/10: Brain Core (Port $BRAIN_PORT)"
 
 if curl -sf "http://localhost:$BRAIN_PORT/api/v1/health" >/dev/null 2>&1; then
-    ok "Brain Core läuft bereits"
+    ok "Brain Core laeuft bereits"
 else
     cd "$SCRIPT_DIR"
     nohup "$PYTHON" -m brain_core.main \
@@ -795,15 +1200,14 @@ else
 
     echo -e "  Warte auf Brain Core (Ego, Voice, Memory, Discovery)..."
     BRAIN_OK=0
-    for i in $(seq 1 45); do
+    for i in $(seq 1 60); do
         if curl -sf "http://localhost:$BRAIN_PORT/api/v1/health" >/dev/null 2>&1; then
             BRAIN_OK=1
             break
         fi
 
-        # Prüfe ob Prozess noch lebt
         if ! kill -0 "$BRAIN_PID" 2>/dev/null; then
-            fail "Brain Core ist abgestürzt!"
+            fail "Brain Core ist abgestuerzt!"
             echo -e "    ${R}Letzte Log-Zeilen:${NC}"
             tail -15 "$LOGDIR/brain_core.log" 2>/dev/null | while IFS= read -r line; do
                 echo -e "    ${R}  $line${NC}"
@@ -811,31 +1215,35 @@ else
             break
         fi
 
-        # Fortschrittsanzeige alle 5s
-        if [ $((i % 5)) -eq 0 ]; then
-            LAST_BOOT=$(grep "boot_phase" "$LOGDIR/brain_core.log" 2>/dev/null | tail -1 | sed -n 's/.*service=\([^ ]*\).*/\1/p' || echo "...")
-            echo -e "    ${C}⏳ ${i}s – Letzter Boot-Schritt: $LAST_BOOT${NC}"
+        if [ $((i % 10)) -eq 0 ]; then
+            LAST_LOG=$(tail -1 "$LOGDIR/brain_core.log" 2>/dev/null | head -c 80 || echo "...")
+            echo -e "    ${C}${i}s – $LAST_LOG${NC}"
         fi
         sleep 1
     done
 
     if [ $BRAIN_OK -eq 1 ]; then
-        ok "Brain Core gestartet (PID $BRAIN_PID) 🧠"
+        ok "Brain Core gestartet (PID $BRAIN_PID)"
     elif kill -0 "$BRAIN_PID" 2>/dev/null; then
-        warn "Brain Core braucht noch etwas (45s Timeout erreicht, Prozess läuft weiter)"
-        warn "  Log prüfen: tail -f .logs/brain_core.log"
+        warn "Brain Core braucht noch etwas (60s Timeout, Prozess laeuft weiter)"
+        warn "  Log: tail -f .logs/brain_core.log"
     fi
 fi
 
 # ============================================================================
-# Zusammenfassung
+# Phase 10: First-Run Marker setzen & Zusammenfassung
 # ============================================================================
+hdr "Phase 10/10: Zusammenfassung"
+
+# Marker setzen
+touch "$FIRST_RUN_MARKER"
+
 sleep 2
 
 BOOT_END=$(date +%s)
 BOOT_DURATION=$((BOOT_END - BOOT_START))
 
-# Final Status Check
+# Final Status
 BRAIN_LIVE=$(curl -sf "http://localhost:$BRAIN_PORT/api/v1/health" >/dev/null 2>&1 && echo "1" || echo "0")
 DJANGO_LIVE=$(curl -sf "http://localhost:$DJANGO_PORT_NUM/" >/dev/null 2>&1 && echo "1" || echo "0")
 OLLAMA_LIVE=$(curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && echo "1" || echo "0")
@@ -844,18 +1252,15 @@ REDIS_LIVE=$(docker inspect -f '{{.State.Health.Status}}' soma-redis 2>/dev/null
 
 echo ""
 if [ "$BRAIN_LIVE" = "1" ]; then
-    # Sammle Live-Daten für die Zusammenfassung
     VOICE_STATUS=$(curl -sf "http://localhost:$BRAIN_PORT/api/v1/voice" | "$PYTHON" -c "
 import sys,json; d=json.load(sys.stdin); print(d.get('status','?'))" 2>/dev/null || echo "?")
-
     EGO_STATUS=$(curl -sf "http://localhost:$BRAIN_PORT/api/v1/ego/snapshot" | "$PYTHON" -c "
 import sys,json; d=json.load(sys.stdin); print(d.get('status','?'))" 2>/dev/null || echo "?")
-
     PLUGIN_COUNT=$(curl -sf "http://localhost:$BRAIN_PORT/api/v1/evolution/plugins" | "$PYTHON" -c "
 import sys,json; d=json.load(sys.stdin); print(len(d.get('plugins',[])))" 2>/dev/null || echo "?")
 
     echo -e "${G}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${G}║${NC}  ${B}🧠 SOMA-AI ist online!${NC}                  (${BOOT_DURATION}s Boot-Zeit)  ${G}║${NC}"
+    echo -e "${G}║${NC}  ${B}SOMA-AI ist online!${NC}                     (${BOOT_DURATION}s Boot-Zeit)  ${G}║${NC}"
     echo -e "${G}╠══════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${G}║${NC}                                                              ${G}║${NC}"
     echo -e "${G}║${NC}  ${B}Subsysteme:${NC}                                                 ${G}║${NC}"
@@ -880,9 +1285,8 @@ import sys,json; d=json.load(sys.stdin); print(len(d.get('plugins',[])))" 2>/dev
     echo -e "${G}║${NC}    Dashboard:   ${C}http://localhost:$DJANGO_PORT_NUM/dashboard/${NC}        ${G}║${NC}"
     echo -e "${G}║${NC}    API Docs:    ${C}http://localhost:$BRAIN_PORT/docs${NC}                ${G}║${NC}"
     echo -e "${G}║${NC}    Health:      ${C}http://localhost:$BRAIN_PORT/api/v1/health${NC}       ${G}║${NC}"
-    echo -e "${G}║${NC}    Ego:         ${C}http://localhost:$BRAIN_PORT/api/v1/ego/snapshot${NC}  ${G}║${NC}"
     echo -e "${G}║${NC}                                                              ${G}║${NC}"
-    echo -e "${G}║${NC}  ${Y}Soma hört jetzt dauerhaft zu! 🎤${NC}                          ${G}║${NC}"
+    echo -e "${G}║${NC}  ${Y}Soma hoert jetzt dauerhaft zu!${NC}                              ${G}║${NC}"
     echo -e "${G}║${NC}  ${Y}Sage \"Soma, ...\" um zu sprechen.${NC}                          ${G}║${NC}"
     echo -e "${G}║${NC}                                                              ${G}║${NC}"
     echo -e "${G}╠══════════════════════════════════════════════════════════════╣${NC}"
@@ -891,7 +1295,14 @@ import sys,json; d=json.load(sys.stdin); print(len(d.get('plugins',[])))" 2>/dev
     echo -e "${G}║${NC}  Stop:    ${C}./stop_all.sh${NC}                                    ${G}║${NC}"
     echo -e "${G}╚══════════════════════════════════════════════════════════════╝${NC}"
 
-    # Auto-open dashboard (set AUTO_OPEN_BROWSER=0 to disable)
+    # .env-Erinnerung falls noch Defaults drin sind
+    if [ $ENV_NEEDS_EDIT -eq 1 ]; then
+        echo ""
+        echo -e "  ${Y}Erinnerung: .env enthaelt noch CHANGE_ME-Werte.${NC}"
+        echo -e "  ${Y}Bearbeite ${C}$SCRIPT_DIR/.env${Y} und starte neu.${NC}"
+    fi
+
+    # Auto-open Dashboard
     DASH_URL="http://localhost:$DJANGO_PORT_NUM/dashboard/"
     if [ "${AUTO_OPEN_BROWSER:-1}" != "0" ]; then
         if command -v xdg-open >/dev/null 2>&1; then
@@ -902,7 +1313,7 @@ import sys,json; d=json.load(sys.stdin); print(len(d.get('plugins',[])))" 2>/dev
     fi
 else
     echo -e "${Y}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${Y}║${NC}  ${B}⏳ SOMA-AI startet noch...${NC}              (${BOOT_DURATION}s bisher)    ${Y}║${NC}"
+    echo -e "${Y}║${NC}  ${B}SOMA-AI startet noch...${NC}              (${BOOT_DURATION}s bisher)        ${Y}║${NC}"
     echo -e "${Y}╠══════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${Y}║${NC}                                                              ${Y}║${NC}"
     [ "$PG_LIVE" = "1" ] \
@@ -919,18 +1330,15 @@ else
         && echo -e "${Y}║${NC}    Django:            ${G}●${NC} online                               ${Y}║${NC}" \
         || echo -e "${Y}║${NC}    Django:            ${R}●${NC} offline                              ${Y}║${NC}"
     echo -e "${Y}║${NC}                                                              ${Y}║${NC}"
-    echo -e "${Y}║${NC}  Log prüfen: ${C}tail -f .logs/brain_core.log${NC}                   ${Y}║${NC}"
-    echo -e "${Y}║${NC}  Status:     ${C}./start_soma.sh --status${NC}                       ${Y}║${NC}"
+    echo -e "${Y}║${NC}  Log pruefen: ${C}tail -f .logs/brain_core.log${NC}                  ${Y}║${NC}"
+    echo -e "${Y}║${NC}  Status:      ${C}./start_soma.sh --status${NC}                      ${Y}║${NC}"
     echo -e "${Y}╚══════════════════════════════════════════════════════════════╝${NC}"
 
-    # Zeige letzte Fehler-Zeilen
     if [ -f "$LOGDIR/brain_core.log" ]; then
         LAST_ERR=$(grep -i "error\|failed\|exception\|critical" "$LOGDIR/brain_core.log" 2>/dev/null | tail -5)
         if [ -n "$LAST_ERR" ]; then
-            echo -e "\n  ${R}Letzte Fehler im Brain Core Log:${NC}"
-            echo "$LAST_ERR" | while IFS= read -r line; do
-                echo -e "    ${R}$line${NC}"
-            done
+            echo -e "\n  ${R}Letzte Fehler:${NC}"
+            echo "$LAST_ERR" | while IFS= read -r line; do echo -e "    ${R}$line${NC}"; done
         fi
     fi
 fi
@@ -948,35 +1356,32 @@ if [ "$BRAIN_LIVE" = "1" ] && [ "$DJANGO_LIVE" = "1" ]; then
     echo -e "${C}║${NC}  ${B}s${NC}  Show status                                             ${C}║${NC}"
     echo -e "${C}║${NC}  ${B}l${NC}  Show live logs                                          ${C}║${NC}"
     echo -e "${C}╚══════════════════════════════════════════════════════════════╝${NC}"
-    
+
     while true; do
         read -r -p "$(echo -e "${B}Command:${NC} ")" -n 1 cmd
         echo ""
-        
         case "$cmd" in
             r|R)
-                echo -e "\n${Y}♻️  Restarting SOMA...${NC}\n"
+                echo -e "\n${Y}Restarting SOMA...${NC}\n"
                 bash "$SCRIPT_DIR/stop_all.sh"
                 sleep 2
                 exec bash "$SCRIPT_DIR/start_soma.sh"
                 ;;
             q|Q)
-                echo -e "\n${Y}🛑 Stopping all services...${NC}\n"
+                echo -e "\n${Y}Stopping all services...${NC}\n"
                 bash "$SCRIPT_DIR/stop_all.sh"
                 exit 0
                 ;;
             s|S)
-                echo -e "\n${C}── System Status ──${NC}\n"
                 bash "$SCRIPT_DIR/start_soma.sh" --status
                 echo ""
                 ;;
             l|L)
-                echo -e "\n${C}── Live Logs (Ctrl+C to exit) ──${NC}\n"
                 bash "$SCRIPT_DIR/start_soma.sh" --logs
                 echo ""
                 ;;
             *)
-                echo -e "${R}Invalid command. Use: r (restart), q (quit), s (status), l (logs)${NC}"
+                echo -e "${R}Ungueltig. Nutze: r (restart), q (quit), s (status), l (logs)${NC}"
                 ;;
         esac
     done
