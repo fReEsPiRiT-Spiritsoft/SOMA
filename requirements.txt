@@ -65,3 +65,5 @@ websockets>=12.0               # WebSocket-Client fuer Echtzeit-Streams
 # ── Hilfsbibliotheken ────────────────────────────────────────────────────
 rich>=14.0                     # Schoene Terminal-Ausgaben
 requests>=2.32                 # Sync HTTP (Setup-Checks)
+
+# Sync HTTP (Setup-Checks)

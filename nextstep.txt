@@ -957,5 +957,3 @@
 #
 #  SYNTAX-CHECK: Alle 5 Dateien ✅ (Pylance, keine Fehler)
 
-
-Hallo Test
