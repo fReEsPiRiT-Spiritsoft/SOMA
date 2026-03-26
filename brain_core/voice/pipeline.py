@@ -767,9 +767,34 @@ class VoicePipeline:
             engine_used = "heavy"
             was_deferred = False
 
-            # Bridge-Timeout: Wenn erster Token >1.5s → Bridge sprechen
-            # (Pure Oracle Streaming = ~200ms first token, 1.5s = großzügiger Puffer)
+            # Bridge-Timeout: Paralleler Timer statt In-Loop-Check.
+            # Problem vorher: Der Bridge-Check saß INNERHALB der async-for-Schleife,
+            # aber die blockiert bis zum ersten yield aus route_stream() (= erster Token
+            # von Ollama). Wenn Ollama 10s braucht, feuerte die Bridge erst NACH 10s.
+            # Lösung: asyncio.Event + eigenständiger Timer-Task.
             stream_start = time.time()
+            bridge_event = asyncio.Event()  # Wird gesetzt wenn erster Token da
+
+            async def _bridge_timer():
+                """Spricht Bridge nach 1.5s, falls erster Token noch nicht da."""
+                nonlocal bridge_spoken
+                try:
+                    await asyncio.wait_for(bridge_event.wait(), timeout=1.5)
+                except asyncio.TimeoutError:
+                    # Erster Token kam nicht in 1.5s → Bridge sprechen
+                    if not bridge_spoken and not bridge_event.is_set():
+                        bridge = get_bridge_response(
+                            intent="default", emotion=emotion_str,
+                        )
+                        if bridge:
+                            bridge_spoken = True
+                            await self._emit("tts", bridge, "BRIDGE")
+                            await self.tts.speak(
+                                bridge,
+                                SpeechEmotion(speed=1.1, pitch=1.0, volume=0.8),
+                            )
+
+            bridge_task = asyncio.create_task(_bridge_timer())
 
             try:
                 async for chunk in self._logic_router.route_stream(request):
@@ -801,20 +826,9 @@ class VoicePipeline:
                         sentence_buffer += remaining
                         break
 
-                    # Bridge-Fallback: Wenn erster Token zu lange dauert
+                    # Bridge-Timer stoppen: Erster Token ist da
                     if not first_token_received:
-                        elapsed = time.time() - stream_start
-                        if elapsed > 1.5 and not bridge_spoken:
-                            bridge = get_bridge_response(
-                                intent="default", emotion=emotion_str,
-                            )
-                            if bridge:
-                                bridge_spoken = True
-                                await self._emit("tts", bridge, "BRIDGE")
-                                await self.tts.speak(
-                                    bridge,
-                                    SpeechEmotion(speed=1.1, pitch=1.0, volume=0.8),
-                                )
+                        bridge_event.set()  # Signalisiert dem Timer: Token angekommen
 
                     first_token_received = True
 
@@ -855,6 +869,15 @@ class VoicePipeline:
                         SpeechEmotion(speed=1.0, pitch=0.95, volume=0.9),
                     )
                     return
+            finally:
+                # Bridge-Timer aufräumen (falls noch läuft)
+                bridge_event.set()
+                if not bridge_task.done():
+                    bridge_task.cancel()
+                    try:
+                        await bridge_task
+                    except asyncio.CancelledError:
+                        pass
 
             if was_deferred:
                 return
