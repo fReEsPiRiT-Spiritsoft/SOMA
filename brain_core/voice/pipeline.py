@@ -1880,6 +1880,84 @@ class VoicePipeline:
     # ══════════════════════════════════════════════════════════════════
 
     @staticmethod
+    def _clean_search_query(query: str) -> str:
+        """Entfernt Füllwörter, Höflichkeitsfloskeln und Satzzeichen aus einer Suchquery."""
+        import re
+        q = query.strip()
+        # Filler am Anfang entfernen
+        q = re.sub(
+            r'^(?:den|die|das|dem|der|des|einen?|einem|einer|eines|'
+            r'aktuellsten?|aktuellen?|neuesten?|neueste|'
+            r'informationen\s+(?:der|über|zu|von)\s+|'
+            r'informationen\s+)'
+            , '', q, flags=re.IGNORECASE,
+        ).strip()
+        # Filler am Ende entfernen (iterativ)
+        for _ in range(3):
+            q = re.sub(
+                r'[\s,.]+(?:bitte|mal|danke|für\s+mich|im\s+internet|online|'
+                r'soma|danke\s+soma|vielen\s+dank|dankeschön|'
+                r'wenn\s+(?:du|es)\s+.{0,20}|'
+                r'falls\s+(?:du|es)\s+.{0,20})\s*[.!?]*\s*$',
+                '', q, flags=re.IGNORECASE,
+            ).strip()
+        # Trailing Satzzeichen
+        q = re.sub(r'[.!?,;:]+$', '', q).strip()
+        return q
+
+    @staticmethod
+    def _is_garbage_query(query: str) -> bool:
+        """Prüft ob eine Query nur aus Stoppwörtern/Füllern besteht."""
+        import re
+        words = re.findall(r'\w+', query.lower())
+        stop = {
+            'bitte', 'mal', 'danke', 'soma', 'im', 'internet', 'online',
+            'web', 'netz', 'mir', 'mich', 'du', 'dich', 'dir', 'und', 'oder',
+            'der', 'die', 'das', 'den', 'dem', 'des', 'ein', 'eine', 'einen',
+            'einem', 'einer', 'auch', 'noch', 'halt', 'eben', 'doch', 'ja',
+            'nein', 'wenn', 'dann', 'aber', 'für', 'von', 'zu', 'auf', 'an',
+            'in', 'ist', 'es', 'er', 'sie', 'wir', 'ihr', 'ich', 'kannst',
+            'bist', 'hast', 'hab', 'habe',
+        }
+        meaningful = [w for w in words if w not in stop and len(w) > 1]
+        return len(meaningful) == 0
+
+    @staticmethod
+    def _extract_topic_from_prompt(prompt: str) -> str:
+        """
+        Fallback: Wenn Such-Intent erkannt aber Query ist Müll,
+        extrahiere das Thema aus dem Gesamttext.
+        Sucht nach Eigennamen, Fachbegriffen und Schlüsselwörtern.
+        """
+        import re
+
+        # 1. Eigennamen: Wörter die mit Großbuchstaben anfangen (nicht am Satzanfang)
+        #    z.B. "Artemis II Mission", "Bitcoin", "Tesla"
+        proper_nouns = re.findall(
+            r'(?<=[a-zäöüß,.!?]\s)([A-ZÄÖÜ][a-zäöüßA-ZÄÖÜ0-9]+(?:\s+(?:[A-ZÄÖÜ][a-zäöüßA-Z0-9]*|[IVX]+|[0-9]+))*)',
+            prompt,
+        )
+        if proper_nouns:
+            # Längsten Eigennamen nehmen (oft der spezifischste)
+            best = max(proper_nouns, key=len)
+            return best.strip()
+
+        # 2. Text nach "über/von/zu [TOPIC]" durchsuchen
+        topic_match = re.search(
+            r'(?:über|von|zu|der|die|das)\s+([A-ZÄÖÜ][a-zäöüßA-Z0-9\s-]{2,40})',
+            prompt,
+        )
+        if topic_match:
+            return topic_match.group(1).strip()
+
+        # 3. Alles zwischen Anführungszeichen
+        quoted = re.findall(r'[„"\'"](.+?)["\'""]', prompt)
+        if quoted:
+            return max(quoted, key=len).strip()
+
+        return ""
+
+    @staticmethod
     def _extract_search_intent(prompt: str) -> str:
         """
         Erkennt ob der User eine Web-Suche will und extrahiert die Query.
@@ -1893,19 +1971,20 @@ class VoicePipeline:
         p = prompt.lower().strip()
         
         # ── Explizite Such-Keywords ──────────────────────────────────
+        # Patterns sind FLEXIBEL: erlauben Filler-Wörter zwischen Keyword und Query
         search_patterns = [
-            # "suche nach ...", "such mal nach ...", "suche im internet nach ..."
-            r'(?:suche?|such)\s+(?:mal\s+)?(?:im\s+internet\s+)?(?:auf\s+\w+\s+)?(?:nach|für|über)\s+(.+)',
-            # "suche auf Google nach ..."
-            r'(?:suche?|such)\s+(?:mal\s+)?(?:auf|bei|mit|über)\s+\w+\s+(?:nach|für|über|zu)?\s*(.+)',
-            # "recherchiere ...", "recherchier mal ..."
-            r'recherchier(?:e|st)?\s+(?:mal\s+)?(?:nach|über|zu)?\s*(.+)',
+            # "such/suche [beliebige Filler] nach ..." — zentrales Pattern
+            r'(?:suche?|such)\b.{0,80}?\b(?:nach|für|über)\s+(.+)',
+            # "suche auf/bei SITE [filler] nach ..."
+            r'(?:suche?|such)\b.{0,40}?\b(?:auf|bei|mit|über)\s+\w+\b.{0,40}?\b(?:nach|für|über|zu)\s+(.+)',
+            # "recherchiere [filler] nach/über/zu TOPIC"
+            r'recherchier(?:e|st)?\b.{0,40}?\b(?:nach|über|zu)\s+(.+)',
             # "google mal ...", "google nach ..."
             r'google?\s+(?:mal\s+)?(?:nach)?\s*(.+)',
             # "finde heraus ...", "find raus ..."
             r'find(?:e)?\s+(?:mal\s+)?(?:heraus|raus)\s+(.+)',
-            # "schau mal nach ...", "schau im internet nach ..."
-            r'schau\s+(?:mal\s+)?(?:im\s+internet\s+)?nach\s+(.+)',
+            # "schau [filler] nach ..."
+            r'schau\b.{0,30}?\bnach\s+(.+)',
             # "was kostet ...", "was kosten ..."
             r'was\s+kostet?n?\s+(.+)',
             # "wie teuer ist/sind ..."
@@ -1919,20 +1998,37 @@ class VoicePipeline:
             # "was gibt es neues zu / über ..."
             r'was\s+gibt\s+es\s+neues?\s+(?:zu|über|von|bei)\s+(.+)',
             # "öffne browser und suche nach ..."
-            r'(?:öffne?|starte?)\s+(?:den\s+)?browser\s+(?:und\s+)?(?:suche?|such)\s+(?:nach|auf\s+\w+\s+nach)\s+(.+)',
+            r'(?:öffne?|starte?)\s+(?:den\s+)?browser\s+(?:und\s+)?(?:suche?|such)\b.{0,30}?\bnach\s+(.+)',
             # "suche ... preise/preis"
             r'(?:suche?|such|finde?)\s+(?:mal\s+)?(?:die\s+|den\s+|das\s+)?(?:aktuellen?\s+)?(.+?(?:preise?n?|kosten|kurs(?:e|en)?|ergebnisse?))\s*$',
         ]
+        
+        from brain_core.voice.pipeline import VoicePipeline
         
         for pattern in search_patterns:
             match = re.search(pattern, p)
             if match:
                 query = match.group(1).strip()
-                # Mindestens 2 Zeichen
                 if len(query) >= 2:
-                    # Reinige die Query von Füllwörtern am Ende
-                    query = re.sub(r'\s+(?:bitte|mal|für\s+mich|im\s+internet)\s*$', '', query)
-                    return query
+                    query = VoicePipeline._clean_search_query(query)
+                    if len(query) >= 2 and not VoicePipeline._is_garbage_query(query):
+                        # Truncate überlange Queries (erster Satz reicht)
+                        first_sentence = re.split(r'[.!?]\s', query)[0]
+                        if len(first_sentence) > 120:
+                            first_sentence = first_sentence[:120]
+                        return VoicePipeline._clean_search_query(first_sentence)
+
+        # ── Fallback: Such-Intent OHNE brauchbare Query erkannt ──────
+        # z.B. "recherchiere bitte im Internet" (Topic ist woanders im Prompt)
+        internet_intent = re.search(
+            r'(?:recherchier|such\b.{0,20}?\binternet|im\s+internet\s+(?:such|schau|nach)|'
+            r'online\s+(?:such|nach|recherch)|im\s+netz\s+(?:such|schau|nach))',
+            p,
+        )
+        if internet_intent:
+            topic = VoicePipeline._extract_topic_from_prompt(prompt)
+            if topic and len(topic) >= 3:
+                return VoicePipeline._clean_search_query(topic)
         
         return ""
 
@@ -1958,7 +2054,7 @@ class VoicePipeline:
         if not results:
             await self.tts.speak(
                 f"Leider konnte ich nichts zu '{query}' finden.",
-                self._select_speech_emotion(emotion_str),
+                self._select_speech_emotion(emotion_reading),
             )
             return
 
@@ -2000,7 +2096,7 @@ class VoicePipeline:
             answer = "\n".join(f"{r.title}: {r.body}" for r in results[:3])
 
         await self._emit("llm", f"🔍 Suchantwort: \"{answer[:120]}...\"", "SEARCH")
-        await self.tts.speak(answer, self._select_speech_emotion(emotion_str))
+        await self.tts.speak(answer, self._select_speech_emotion(emotion_reading))
 
         # ── Memory: Auch Direkt-Suchen ins Gedächtnis speichern ──────
         try:
@@ -2421,10 +2517,26 @@ class VoicePipeline:
                 else:
                     chain_hint = "KEIN weiterer [ACTION:shell] Tag — antworte JETZT mit den vorhandenen Daten."
 
+                # XDG-Pfad-Hinweis für Shell-Fehler (Desktop≠Schreibtisch etc.)
+                xdg_hint = ""
+                if proc.returncode != 0:
+                    try:
+                        from brain_core.system_profile import get_profile
+                        xdg = get_profile().xdg_dirs
+                        if xdg:
+                            xdg_hint = (
+                                "\nWICHTIG — Echte Verzeichnispfade auf diesem System:\n"
+                                + "\n".join(f"  {k}: {v}" for k, v in xdg.items())
+                                + "\nBenutze IMMER diese echten Pfade, NICHT englische Namen wie 'Desktop'!\n"
+                            )
+                    except Exception:
+                        pass
+
                 reask_prompt = (
                     f"Der Nutzer hat gefragt: \"{user_question}\"\n"
                     f"Du hast den Befehl '{command}' ausgeführt.\n"
-                    f"Ergebnis:\n{result_text[:3000]}\n\n"
+                    f"Ergebnis:\n{result_text[:3000]}\n"
+                    f"{xdg_hint}\n"
                     f"Beantworte die Frage des Nutzers kurz und klar (2-3 Sätze). "
                     f"{chain_hint}"
                 )
@@ -4047,15 +4159,25 @@ class VoicePipeline:
         "Hey Soma mach das Licht an"  → "mach das Licht an"
         "Soma wie wird das Wetter?"   → "wie wird das Wetter?"
         "Mach mal Soma die Musik an"  → "Mach mal die Musik an"
+        "Sommer, mach das Licht an"   → "mach das Licht an"
+        "Wie wird es im Sommer?"      → "Wie wird es im Sommer?"
         """
         import re
 
-        # Soma-Varianten entfernen (case-insensitive)
-        # Auch Whisper-Fehler wie "Sommer", "Summer" etc.
+        # Eindeutige Soma-Varianten ÜBERALL entfernen (kein reales dt. Wort)
         cleaned = re.sub(
-            r'\b(?:hey\s+)?(?:soma|sooma|sohma|somma|zoma|sommer|zommer|summer|summa)(?:\s*[,!.?])?\s*',
+            r'\b(?:hey\s+)?(?:soma|sooma|sohma|somma|zoma|somar|soomar|somah|sommar|suma|zooma|söma|söhma)(?:\s*[,!.?])?\s*',
             ' ',
             text,
+            flags=re.IGNORECASE,
+        )
+
+        # "Sommer"/"Summer" NUR am Satzanfang entfernen (Wake Word),
+        # NICHT mitten im Satz ("im Sommer" bleibt erhalten)
+        cleaned = re.sub(
+            r'^(?:hey\s+|hallo\s+|hej\s+)?(?:sommer|zommer|summer|summa)(?:\s*[,!.?])?\s*',
+            ' ',
+            cleaned,
             flags=re.IGNORECASE,
         )
 

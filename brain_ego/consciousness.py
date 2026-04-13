@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -92,6 +93,7 @@ class ConsciousnessState:
 
     # ── Innerer Zustand ──────────────────────────────────────────────
     current_thought: str = ""        # Was denke ich gerade? (Monolog)
+    recent_monologue: deque = field(default_factory=lambda: deque(maxlen=5))
     mood: str = "neutral"            # Meine Gesamtstimmung
     attention_focus: str = "idle"    # Worauf bin ich fokussiert?
     uptime_feeling: str = ""         # Wie lange bin ich schon wach?
@@ -142,9 +144,23 @@ class ConsciousnessState:
         if self.diary_insight:
             sections.append(f"MEINE LETZTE ERKENNTNIS:\n{self.diary_insight}")
 
-        # ── 5. Innerer Gedanke ──────────────────────────────────────
-        if self.current_thought:
-            sections.append(f"WAS ICH GERADE DENKE:\n{self.current_thought}")
+        # ── 5. Innerer Monolog (aktuelle + letzte Gedanken) ────────
+        if self.current_thought or self.recent_monologue:
+            mono_parts = []
+            if self.current_thought:
+                mono_parts.append(f"Aktueller Gedanke: {self.current_thought}")
+            if self.recent_monologue:
+                history = list(self.recent_monologue)
+                # Aktuellen Gedanken nicht doppelt zeigen
+                history = [t for t in history if t != self.current_thought]
+                if history:
+                    mono_parts.append("Vorherige Gedanken (neueste zuerst):")
+                    for t in reversed(history[-3:]):
+                        mono_parts.append(f"  - {t}")
+            sections.append(
+                "MEIN INNERER MONOLOG (meine eigenen Gedanken):\n"
+                + "\n".join(mono_parts)
+            )
 
         # ── 6. Stimmung ─────────────────────────────────────────────
         if self.mood != "neutral":
@@ -307,6 +323,7 @@ class Consciousness:
             "body_valence": state.body_valence,
             "body_arousal": state.body_arousal,
             "current_thought": state.current_thought,
+            "recent_monologue": list(state.recent_monologue),
             "diary_insight": state.diary_insight,
             "attention_focus": state.attention_focus,
             "uptime_feeling": state.uptime_feeling,
@@ -339,6 +356,11 @@ class Consciousness:
 
             state.mood = data.get("mood", "neutral")
             state.current_thought = data.get("current_thought", "")
+            saved_mono = data.get("recent_monologue", [])
+            if saved_mono:
+                state.recent_monologue.clear()
+                for t in saved_mono[-5:]:
+                    state.recent_monologue.append(t)
             state.diary_insight = data.get("diary_insight", "")
             state.attention_focus = data.get("attention_focus", "idle")
 
@@ -485,6 +507,7 @@ class Consciousness:
         # ── 3. Innerer Gedanke (wenn vom Monolog) ───────────────────
         if self._pending_thought is not None:
             state.current_thought = self._pending_thought
+            state.recent_monologue.append(self._pending_thought)
             self._pending_thought = None
 
         # ── 4. Diary-Erkenntnis ─────────────────────────────────────

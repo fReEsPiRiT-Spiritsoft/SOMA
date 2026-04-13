@@ -38,7 +38,7 @@ class SomaConfig(BaseSettings):
     # ── Ollama ───────────────────────────────────────────────────────────
     ollama_host: str = "http://localhost"
     ollama_port: int = 11434
-    ollama_heavy_model: str = "qwen3:8b"         # Oracle: 8B Q4 ≈ 4.7GB VRAM
+    ollama_heavy_model: str = "gemma4:e4b"        # Oracle: Gemma4 E4B ≈ 9.6GB VRAM (128K ctx, Vision, Thinking)
     ollama_light_model: str = "qwen3:1.7b"       # Draft: 1.7B Q4 ≈ 1.2GB VRAM
     ollama_num_parallel: int = 2
     ollama_max_loaded_models: int = 3              # Oracle + Draft + Whisper Headroom
@@ -47,7 +47,7 @@ class SomaConfig(BaseSettings):
     # Ollama cached den System-Prompt (Persona) als KV-Prefix automatisch
     # wenn das Modell geladen bleibt. 30m statt 5m = deutlich schnellerer TTFT.
     ollama_heavy_keep_alive: str = "30m"          # Oracle: 30min idle → unload
-    ollama_light_keep_alive: str = "-1"            # Draft: PERMANENT im VRAM (nur ~1.2GB)
+    ollama_light_keep_alive: str = "-1s"           # Draft: PERMANENT im VRAM (nur ~1.2GB)
 
     # ── Speculative Decoding ─────────────────────────────────────────────
     speculative_enabled: bool = True               # Application-Level Spec. Decoding
@@ -67,7 +67,7 @@ class SomaConfig(BaseSettings):
     health_ram_warn_percent: float = 85.0      # War 75%, zu niedrig mit Ollama
     health_ram_critical_percent: float = 92.0   # War 85%
     health_vram_warn_percent: float = 75.0
-    health_vram_critical_percent: float = 85.0
+    health_vram_critical_percent: float = 97.0
     health_cpu_warn_percent: float = 80.0
     health_temp_warn_celsius: float = 75.0
     # ── VRAM Management ─────────────────────────────────────────────
@@ -75,7 +75,8 @@ class SomaConfig(BaseSettings):
     # Phase B: 120s statt 10s — Modell bleibt warm für schnelle Streaming-Responses
     vram_unload_idle_secs: float = 120.0
     # Heavy-Engine aktiv lassen bis VRAM diese Auslastung überschreitet
-    heavy_engine_max_vram_pct: float = 90.0
+    # Gemma4 E4B nutzt ~95% VRAM auf RTX 3060 (12GB) → 98% damit Modell geladen bleibt
+    heavy_engine_max_vram_pct: float = 98.0
     # ── Home Assistant ───────────────────────────────────────────────────
     ha_url: str = "http://homeassistant.local:8123"
     ha_token: str = ""

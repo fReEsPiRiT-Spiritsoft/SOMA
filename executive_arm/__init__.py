@@ -57,6 +57,12 @@ from executive_arm.app_control import (     # noqa: F401
     AppControl,
     get_app_control,
 )
+from executive_arm.file_edit_handlers import ( # noqa: F401
+    execute_file_edit,
+    execute_file_insert,
+    execute_file_delete_lines,
+    register_file_edit_handlers,
+)
 
 __all__ = [
     "PolicyEngine", "ActionType", "RiskLevel", "ActionRequest", "ActionResult",
@@ -68,4 +74,6 @@ __all__ = [
     "FileOperations", "get_file_operations",
     "SystemControl", "get_system_control",
     "AppControl", "get_app_control",
+    "execute_file_edit", "execute_file_insert", "execute_file_delete_lines",
+    "register_file_edit_handlers",
 ]

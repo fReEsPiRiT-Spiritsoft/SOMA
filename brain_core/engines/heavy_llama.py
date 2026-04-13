@@ -57,6 +57,7 @@ class HeavyLlamaEngine(BaseEngine):
         self._model_loaded: bool = False
         self._idle_unload_task: Optional[asyncio.Task] = None
         self._is_generating: bool = False
+        self._user_generating: bool = False  # True NUR bei User-Requests (nicht Monolog)
 
     async def initialize(self) -> None:
         self._client = httpx.AsyncClient(
@@ -120,6 +121,11 @@ class HeavyLlamaEngine(BaseEngine):
         Monolog & Ambient pausieren solange um VRAM/Compute freizuhalten."""
         return self._is_generating
 
+    @property
+    def is_user_generating(self) -> bool:
+        """True NUR bei User-Requests. Monolog-Nutzung blockiert keine User."""
+        return self._user_generating
+
     def notify_vram_pressure(self) -> None:
         """Vom LogicRouter/HealthMonitor aufgerufen wenn VRAM > 90%.
         Entlädt sofort — asynchron via create_task."""
@@ -171,11 +177,6 @@ class HeavyLlamaEngine(BaseEngine):
         if options_override:
             ollama_options.update(options_override)
 
-        # ── Qwen3 Thinking-Mode Steuerung ─────────────────────────────
-        # Thinking ist mächtig aber langsam (~5x). Nur bei komplexen Fragen aktivieren.
-        # Einfache Befehle (Licht, Suche, Erinnerung) → kein Thinking → 6x schneller.
-        use_thinking = self._should_use_thinking(prompt)
-
         # Ollama API Call
         async def _call() -> str:
             payload = {
@@ -185,19 +186,23 @@ class HeavyLlamaEngine(BaseEngine):
                 "keep_alive": settings.ollama_heavy_keep_alive,
                 "options": ollama_options,
             }
-            # Qwen3: think=false deaktiviert den internen Reasoning-Modus
-            if not use_thinking:
-                payload["think"] = False
+            # Hinweis: Gemma4 Thinking wird über System-Prompt (<|think|>) gesteuert,
+            # nicht über den 'think' API-Parameter (dieser ist Qwen3-spezifisch).
             resp = await self._client.post("/api/chat", json=payload)
             resp.raise_for_status()
             data = resp.json()
             return data["message"]["content"]
 
         self._is_generating = True
+        is_user = session_id is not None
+        if is_user:
+            self._user_generating = True
         try:
             response = await self._cb.call(self._retry.execute, _call)
         finally:
             self._is_generating = False
+            if is_user:
+                self._user_generating = False
 
         # Session updaten
         if session_id:
@@ -210,7 +215,6 @@ class HeavyLlamaEngine(BaseEngine):
             model=self._model,
             prompt_len=len(prompt),
             response_len=len(response),
-            thinking=use_thinking,
         )
 
         return response
@@ -255,8 +259,6 @@ class HeavyLlamaEngine(BaseEngine):
         if options_override:
             ollama_options.update(options_override)
 
-        use_thinking = self._should_use_thinking(prompt)
-
         payload = {
             "model": self._model,
             "messages": messages,
@@ -264,11 +266,12 @@ class HeavyLlamaEngine(BaseEngine):
             "keep_alive": settings.ollama_heavy_keep_alive,
             "options": ollama_options,
         }
-        if not use_thinking:
-            payload["think"] = False
 
         full_response = ""
         self._is_generating = True
+        is_user = session_id is not None
+        if is_user:
+            self._user_generating = True
         try:
             async with self._client.stream(
                 "POST", "/api/chat", json=payload, timeout=120.0
@@ -290,6 +293,8 @@ class HeavyLlamaEngine(BaseEngine):
                         yield token
         finally:
             self._is_generating = False
+            if is_user:
+                self._user_generating = False
             self._last_request_time = time.monotonic()
 
         # Session updaten mit vollständiger Antwort
@@ -303,7 +308,6 @@ class HeavyLlamaEngine(BaseEngine):
             model=self._model,
             prompt_len=len(prompt),
             response_len=len(full_response),
-            thinking=use_thinking,
         )
 
     @staticmethod

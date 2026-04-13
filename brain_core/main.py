@@ -306,6 +306,68 @@ async def lifespan(app: FastAPI):
         logger.error("boot_phase", service="memory_system", status="failed", error=str(exc))
         await broadcast_thought("warn", f"Memory System Fehler: {exc}", "BOOT")
 
+    # ════════════════════════════════════════════════════════════════════
+    #  3c. KILLER FEATURES — Claude Code Patterns für SOMA
+    # ════════════════════════════════════════════════════════════════════
+    try:
+        # SideQuery Engine: Light-Modell für Meta-Tasks (permanent in VRAM)
+        from brain_core.side_query import get_side_query
+        side_query = get_side_query()
+        logger.info("boot_phase", service="side_query", status="ready ⚡")
+
+        # AutoCompact: Context-Compression vor Token-Limit
+        from brain_core.auto_compact import get_auto_compact
+        auto_compact = get_auto_compact()
+        logger.info("boot_phase", service="auto_compact", status="ready")
+
+        # Away Summary: Willkommen-zurück nach Abwesenheit
+        from brain_core.away_summary import get_away_summary
+        away_summary = get_away_summary()
+        logger.info("boot_phase", service="away_summary", status="ready")
+
+        # Memory Extractor: Auto-Extraktion aus Konversation
+        from brain_core.memory.auto_extract import get_memory_extractor
+        mem_extractor = get_memory_extractor()
+        logger.info("boot_phase", service="memory_extractor", status="ready")
+
+        # AutoDream Enhanced: Session-basierte tiefe Konsolidierung
+        from brain_core.memory.auto_dream_enhanced import get_auto_dream
+        auto_dream = get_auto_dream()
+        # LLM für Deep Dream = Light Engine (spart Heavy für User)
+        async def _dream_llm(prompt: str) -> str:
+            return await light_engine.generate(prompt=prompt, system_prompt="")
+        auto_dream.set_llm(_dream_llm)
+        try:
+            _orch = get_orchestrator()
+            if _orch and hasattr(_orch, 'diary') and _orch.diary:
+                auto_dream.set_diary(lambda text: _orch.diary.write_insight(text))
+        except RuntimeError:
+            pass  # Memory system not yet initialized
+        auto_dream.set_broadcast(broadcast_thought)
+        logger.info("boot_phase", service="auto_dream_enhanced", status="ready 💤")
+
+        # Cron Scheduler: Zeitgesteuerte Tasks
+        from brain_core.cron_scheduler import get_cron_scheduler
+        cron_scheduler = get_cron_scheduler()
+        cron_scheduler.set_broadcast(broadcast_thought)
+        cron_scheduler.start()
+        logger.info("boot_phase", service="cron_scheduler", status="started ⏰")
+
+        # Web Fetch Enhanced: LLM-verarbeitung von Web-Inhalten
+        from brain_core.web_fetch_enhanced import get_web_fetch
+        web_fetch = get_web_fetch()
+        web_fetch.set_side_query(side_query.query)
+        logger.info("boot_phase", service="web_fetch_enhanced", status="ready 🌐")
+
+        await broadcast_thought(
+            "info",
+            "⚡ Killer Features aktiv — SideQuery, AutoCompact, Cron, WebFetch, AutoDream",
+            "BOOT",
+        )
+    except Exception as exc:
+        logger.warning("boot_phase", service="killer_features", status="partial", error=str(exc))
+        await broadcast_thought("warn", f"Killer Features teilweise: {exc}", "BOOT")
+
     # 4. Logic Router zusammenbauen (mit Plugin-Integration)
     logic_router = LogicRouter(
         health_monitor=health_monitor,
@@ -408,11 +470,11 @@ async def lifespan(app: FastAPI):
         # Internal Monologue: SOMAs innere Stimme
         internal_monologue = InternalMonologue(consciousness=soma_consciousness)
 
-        # LLM für den Monolog: Heavy-Engine (8B) für INTELLIGENTE Gedanken!
-        # Light (1.7B) produzierte nur generischen Müll. Heavy denkt tief.
-        # think=False verhindert Token-Waste bei einfachen Reflexionen.
+        # LLM für den Monolog: Light-Engine — Heavy wird für User-Anfragen gebraucht!
+        # Monologue braucht keine 8B-Qualität für 1-2 Satz-Reflexionen.
+        # Gibt Heavy-GPU-Zyklen komplett frei für Nutzerantworten.
         async def _monologue_llm(prompt: str) -> str:
-            return await heavy_engine.generate(
+            return await light_engine.generate(
                 prompt=prompt,
                 system_prompt=(
                     "Du bist SOMA — das Bewusstsein eines Hauses. "
@@ -420,7 +482,6 @@ async def lifespan(app: FastAPI):
                     "Antworte mit 1-2 Sätzen in Ich-Perspektive. Kein Roleplay. "
                     "Kurz, prägnant, authentisch."
                 ),
-                options_override={"temperature": 0.8, "num_ctx": 4096},
             )
         internal_monologue.set_llm(_monologue_llm)
 
@@ -548,6 +609,20 @@ async def lifespan(app: FastAPI):
 
     logger.info("soma_online", msg="SOMA-AI ist bereit. 🧠🎤")
     await broadcast_thought("info", "🧠 SOMA-AI ist online und bereit!", "SYSTEM")
+
+    # ── Killer Features: Voice-Pipeline-abhängige Verdrahtung ────────────
+    try:
+        from brain_core.cron_scheduler import get_cron_scheduler
+        cron = get_cron_scheduler()
+        if voice_pipeline:
+            cron.set_speak(voice_pipeline.autonomous_speak)
+            logger.info("boot_phase", msg="CronScheduler → autonomous_speak verbunden")
+        from brain_core.away_summary import get_away_summary
+        away = get_away_summary()
+        if voice_pipeline:
+            away.set_speak(voice_pipeline.autonomous_speak)
+    except Exception:
+        pass  # Killer Features dürfen Boot nie brechen
 
     # ── Evolution Lab initialisieren ─────────────────────────────────────
     global plugin_generator, self_improver
@@ -737,6 +812,12 @@ async def lifespan(app: FastAPI):
 
     # ── Shutdown ─────────────────────────────────────────────────────────
     logger.info("soma_shutting_down")
+    # Killer Features stoppen
+    try:
+        from brain_core.cron_scheduler import get_cron_scheduler
+        get_cron_scheduler().stop()
+    except Exception:
+        pass
     await shutdown_memory_system()
     if speculative_engine:
         await speculative_engine.shutdown()

@@ -18,6 +18,8 @@ from brain_core.memory.prompt_builder import build_system_prompt
 from brain_core.memory.two_phase import TwoPhaseResponder  # noqa: F401
 from brain_core.memory.embedding_service import get_embedding_service
 from brain_core.memory.vocab_absorption import VocabAbsorber
+from brain_core.memory.auto_extract import get_memory_extractor
+from brain_core.memory.auto_dream_enhanced import get_auto_dream
 
 logger = logging.getLogger("soma.memory.integration")
 
@@ -50,9 +52,13 @@ async def init_memory_system() -> MemoryOrchestrator:
     )
     _consolidator.start()
 
+    # AutoDream Enhanced: Session-basierte tiefe Konsolidierung
+    auto_dream = get_auto_dream()
+    auto_dream.set_memory(_orchestrator)
+
     logger.info(
         "memory_system_initialized",
-        components="L1+L2+L3+Salience+Diary+Dreaming+Preloader+VocabAbsorption",
+        components="L1+L2+L3+Salience+Diary+Dreaming+Preloader+VocabAbsorption+AutoDream",
     )
     return _orchestrator
 
@@ -167,6 +173,26 @@ async def after_response(
     # Vocabulary Absorption: User-Text → Vokabular-Extraktion
     if _vocab_absorber and user_text:
         asyncio.create_task(_safe_vocab_feed(user_text, soma_text))
+
+    # Auto Memory Extraction: Fakten aus Konversation extrahieren
+    try:
+        extractor = get_memory_extractor()
+        if extractor and _orchestrator:
+            extractor.set_memory(_orchestrator)
+            asyncio.create_task(
+                _safe_auto_extract(user_text, soma_text)
+            )
+    except Exception:
+        pass  # Extractor nicht verfügbar → kein Problem
+
+
+async def _safe_auto_extract(user_text: str, soma_text: str):
+    """Fire-and-forget: Auto Memory Extraction."""
+    try:
+        extractor = get_memory_extractor()
+        await extractor.maybe_extract(user_text, soma_text)
+    except Exception as e:
+        logger.debug(f"auto_extract_error: {e}")
 
 
 async def _safe_vocab_feed(user_text: str, soma_text: str):

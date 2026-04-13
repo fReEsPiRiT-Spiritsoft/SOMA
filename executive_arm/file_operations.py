@@ -251,9 +251,25 @@ class FileOperations:
         self, text: str, path: str = ".",
         file_pattern: str = "", max_results: int = 20
     ) -> str:
-        """Search file contents (grep)."""
+        """Search file contents — uses ripgrep (fast) with grep fallback."""
         resolved = _expand(path)
 
+        # ── Try ripgrep first (from grep_tool.py) ────────────────────────
+        try:
+            from executive_arm.grep_tool import grep_search, format_grep_result
+            result = await grep_search(
+                pattern=text,
+                path=str(resolved),
+                case_insensitive=True,
+                head_limit=max_results,
+                file_type=file_pattern.replace("*.", "") if file_pattern else None,
+            )
+            if result.num_files > 0:
+                return format_grep_result(result)
+        except Exception:
+            pass  # ripgrep not available → fallback
+
+        # ── Fallback: basic grep ─────────────────────────────────────────
         include = f"--include='{file_pattern}'" if file_pattern else ""
         rc, out, err = await _run_shell(
             f"grep -rni {include} '{text}' '{resolved}' 2>/dev/null "
@@ -415,6 +431,235 @@ class FileOperations:
         resolved = _expand(path)
         rc, out, err = await _run_shell(f"du -sh '{resolved}' 2>/dev/null")
         return out if out else f"Konnte Speicherverbrauch nicht ermitteln: {err}"
+
+    # ── SEARCH & REPLACE (Claude Code Pattern) ────────────────────────
+
+    async def search_and_replace(
+        self,
+        path: str,
+        old_text: str,
+        new_text: str,
+        expected_count: int = 1,
+        dry_run: bool = False,
+    ) -> str:
+        """
+        Replace exact text in a file — Claude Code's "Unified File Editor" Pattern.
+        
+        Vorteile gegenüber write_file():
+          - Präzise: Nur der gesuchte Block wird ersetzt
+          - Sicher: Prüft ob old_text GENAU 1x vorkommt (konfigurierbar)
+          - Verifizierbar: dry_run zeigt was passieren würde
+          - Kontext-bewusst: Braucht keine Zeilennummern
+
+        Args:
+            path: Dateipfad
+            old_text: Exakter Text der ersetzt werden soll (inkl. Whitespace!)
+            new_text: Neuer Text
+            expected_count: Wie oft muss old_text vorkommen? (default: 1)
+            dry_run: Wenn True, nur simulieren ohne zu schreiben
+
+        Returns:
+            Erfolgs- oder Fehlermeldung
+        
+        Beispiel LLM-Nutzung:
+            [ACTION:file_edit path="main.py" old_text="def foo():" new_text="def bar():"]
+        """
+        resolved = _expand(path)
+
+        # Safety-Check
+        reason = _is_protected(resolved, write_mode=True)
+        if reason:
+            return f"Bearbeitung blockiert: {reason}"
+
+        if not os.path.exists(resolved):
+            return f"Datei nicht gefunden: {path}"
+
+        if os.path.isdir(resolved):
+            return "Das ist ein Verzeichnis, keine Datei."
+
+        # Lese Datei
+        try:
+            with open(resolved, "r", errors="replace") as f:
+                content = f.read()
+        except PermissionError:
+            if not self.sudo_enabled:
+                return f"Keine Leseberechtigung: {path} (Sudo deaktiviert)"
+            # Fallback to sudo read
+            rc, content, err = await _run_shell(f"sudo cat '{resolved}'")
+            if rc != 0:
+                return f"Lesefehler auch mit sudo: {err}"
+        except Exception as e:
+            return f"Lesefehler: {e}"
+
+        # Zähle Vorkommen
+        count = content.count(old_text)
+
+        if count == 0:
+            # Hilfreiche Fehlermeldung
+            # Prüfe ob es ein ähnliches Match gibt (ignoriere Whitespace)
+            normalized_old = " ".join(old_text.split())
+            normalized_content = " ".join(content.split())
+            if normalized_old in normalized_content:
+                return (
+                    f"Text nicht gefunden (aber ähnlicher Text existiert).\n"
+                    f"Prüfe Whitespace/Einrückung! Der old_text muss EXAKT matchen.\n"
+                    f"Tipp: Nutze [ACTION:file action='read' path='{path}'] um die Datei zu sehen."
+                )
+            return (
+                f"Text nicht gefunden in {path}.\n"
+                f"Stelle sicher, dass old_text EXAKT so in der Datei steht."
+            )
+
+        if count != expected_count:
+            return (
+                f"Fehler: Text kommt {count}x vor, erwartet: {expected_count}x.\n"
+                f"Füge mehr Kontext zu old_text hinzu (3-5 Zeilen vorher/nachher) "
+                f"damit der Match eindeutig wird."
+            )
+
+        # Dry-Run: Nur zeigen was passieren würde
+        if dry_run:
+            new_content = content.replace(old_text, new_text, 1)
+            # Zeige Diff-ähnliche Vorschau
+            preview_old = old_text[:200] + "..." if len(old_text) > 200 else old_text
+            preview_new = new_text[:200] + "..." if len(new_text) > 200 else new_text
+            return (
+                f"DRY-RUN: Würde in {path} ersetzen:\n"
+                f"──────── ALT ────────\n{preview_old}\n"
+                f"──────── NEU ────────\n{preview_new}\n"
+                f"──────────────────────"
+            )
+
+        # Tatsächliche Ersetzung
+        new_content = content.replace(old_text, new_text, expected_count)
+
+        # Schreibe zurück
+        try:
+            with open(resolved, "w") as f:
+                f.write(new_content)
+            
+            # Berechne Stats
+            lines_changed = abs(new_text.count("\n") - old_text.count("\n"))
+            char_diff = len(new_text) - len(old_text)
+            
+            return (
+                f"✓ Erfolgreich ersetzt in {path}\n"
+                f"  {count} Vorkommen ersetzt, {'+' if char_diff >= 0 else ''}{char_diff} Zeichen"
+            )
+
+        except PermissionError:
+            if self.sudo_enabled:
+                # Schreibe via Temp-File + sudo mv
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".tmp") as tmp:
+                    tmp.write(new_content)
+                    tmp_path = tmp.name
+                
+                rc, _, err = await _run_shell(
+                    f"sudo cp '{tmp_path}' '{resolved}' && rm '{tmp_path}'"
+                )
+                if rc == 0:
+                    return f"✓ Mit sudo ersetzt in {path}"
+                os.unlink(tmp_path)
+                return f"Schreibfehler mit sudo: {err}"
+            
+            return f"Keine Schreibberechtigung: {path} (Sudo deaktiviert)"
+
+        except Exception as e:
+            return f"Schreibfehler: {e}"
+
+    async def insert_at_line(
+        self,
+        path: str,
+        line_number: int,
+        text: str,
+        after: bool = True,
+    ) -> str:
+        """
+        Insert text at a specific line number.
+        
+        Args:
+            path: Dateipfad
+            line_number: Zeilennummer (1-basiert)
+            text: Text zum Einfügen
+            after: True = nach der Zeile, False = vor der Zeile
+        """
+        resolved = _expand(path)
+
+        reason = _is_protected(resolved, write_mode=True)
+        if reason:
+            return f"Bearbeitung blockiert: {reason}"
+
+        if not os.path.exists(resolved):
+            return f"Datei nicht gefunden: {path}"
+
+        try:
+            with open(resolved, "r", errors="replace") as f:
+                lines = f.readlines()
+        except Exception as e:
+            return f"Lesefehler: {e}"
+
+        if line_number < 1 or line_number > len(lines) + 1:
+            return f"Ungültige Zeilennummer: {line_number} (Datei hat {len(lines)} Zeilen)"
+
+        # Stelle sicher dass text mit Newline endet
+        if not text.endswith("\n"):
+            text += "\n"
+
+        # Einfügen
+        insert_idx = line_number if after else line_number - 1
+        lines.insert(insert_idx, text)
+
+        try:
+            with open(resolved, "w") as f:
+                f.writelines(lines)
+            return f"✓ Text eingefügt in {path} nach Zeile {line_number}"
+        except Exception as e:
+            return f"Schreibfehler: {e}"
+
+    async def delete_lines(
+        self,
+        path: str,
+        start_line: int,
+        end_line: int,
+    ) -> str:
+        """
+        Delete a range of lines from a file.
+        
+        Args:
+            path: Dateipfad
+            start_line: Erste zu löschende Zeile (1-basiert, inklusiv)
+            end_line: Letzte zu löschende Zeile (1-basiert, inklusiv)
+        """
+        resolved = _expand(path)
+
+        reason = _is_protected(resolved, write_mode=True)
+        if reason:
+            return f"Bearbeitung blockiert: {reason}"
+
+        if not os.path.exists(resolved):
+            return f"Datei nicht gefunden: {path}"
+
+        try:
+            with open(resolved, "r", errors="replace") as f:
+                lines = f.readlines()
+        except Exception as e:
+            return f"Lesefehler: {e}"
+
+        total = len(lines)
+        if start_line < 1 or end_line > total or start_line > end_line:
+            return f"Ungültiger Bereich: {start_line}-{end_line} (Datei hat {total} Zeilen)"
+
+        # Lösche Zeilen (0-basiert)
+        del lines[start_line - 1 : end_line]
+        deleted_count = end_line - start_line + 1
+
+        try:
+            with open(resolved, "w") as f:
+                f.writelines(lines)
+            return f"✓ {deleted_count} Zeilen gelöscht aus {path} (Zeilen {start_line}-{end_line})"
+        except Exception as e:
+            return f"Schreibfehler: {e}"
 
 
 # ═══════════════════════════════════════════════════════════════════

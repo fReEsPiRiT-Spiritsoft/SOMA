@@ -769,7 +769,7 @@ MQTT_HOST=localhost
 MQTT_PORT=1883
 OLLAMA_HOST=http://localhost
 OLLAMA_PORT=11434
-OLLAMA_HEAVY_MODEL=qwen3:8b
+OLLAMA_HEAVY_MODEL=gemma4:e4b
 OLLAMA_LIGHT_MODEL=qwen3:1.7b
 BRAIN_CORE_HOST=0.0.0.0
 BRAIN_CORE_PORT=8100
@@ -846,7 +846,7 @@ if grep -q "^DJANGO_SECRET_KEY=CHANGE_ME" "$SCRIPT_DIR/.env" 2>/dev/null; then
 fi
 
 # ── Modelle aus .env oder Defaults ───────────────────────────────────────
-OLLAMA_HEAVY="${OLLAMA_HEAVY_MODEL:-qwen3:8b}"
+OLLAMA_HEAVY="${OLLAMA_HEAVY_MODEL:-gemma4:e4b}"
 OLLAMA_LIGHT="${OLLAMA_LIGHT_MODEL:-qwen3:1.7b}"
 OLLAMA_EMBED="nomic-embed-text"
 
@@ -1039,6 +1039,28 @@ else
     # Versuch 1: Systemd-Service
     if command -v ollama &>/dev/null; then
         if command -v systemctl &>/dev/null; then
+            # Service-Datei Pfad-Fix: sicherstellen dass ExecStart auf aktuelles Binary zeigt
+            OLLAMA_BIN=$(command -v ollama)
+            if [ -f /etc/systemd/system/ollama.service ]; then
+                CURRENT_EXEC=$(grep "^ExecStart=" /etc/systemd/system/ollama.service | head -1 | cut -d= -f2 | awk '{print $1}')
+                if [ -n "$CURRENT_EXEC" ] && [ "$CURRENT_EXEC" != "$OLLAMA_BIN" ] && [ ! -f "$CURRENT_EXEC" ]; then
+                    warn "Ollama Service-Pfad veraltet ($CURRENT_EXEC → $OLLAMA_BIN)"
+                    sudo sed -i "s|ExecStart=.*ollama serve|ExecStart=$OLLAMA_BIN serve|" /etc/systemd/system/ollama.service
+                    sudo systemctl daemon-reload
+                    ok "Service-Pfad korrigiert"
+                fi
+            fi
+
+            # Port-Konflikte bereinigen bevor wir starten
+            if lsof -t -i:11434 >/dev/null 2>&1; then
+                warn "Port 11434 belegt – bereinige..."
+                sudo systemctl stop ollama 2>/dev/null || true
+                sudo killall ollama 2>/dev/null || true
+                sleep 1
+                sudo fuser -k 11434/tcp 2>/dev/null || true
+                sleep 1
+            fi
+
             sudo systemctl start ollama 2>/dev/null || true
             sudo systemctl enable ollama 2>/dev/null || true
         else
@@ -1046,7 +1068,7 @@ else
             nohup ollama serve > "$LOGDIR/ollama.log" 2>&1 &
         fi
 
-        for i in $(seq 1 20); do
+        for i in $(seq 1 30); do
             if curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
                 OLLAMA_STARTED=1
                 break

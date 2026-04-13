@@ -63,16 +63,21 @@ DECAY_HALFLIFE_DAYS = 60       # Halbwertszeit: unbenutzte Terme verblassen
 _STOPWORDS: frozenset[str] = frozenset(
     "der die das ein eine einer einem eines den dem "
     "und oder aber denn wenn weil dass ob als wie "
-    "ich du er sie es wir ihr man sich mich dich "
+    "ich du er sie es wir ihr man sich mich dich ihm ihn ihnen "
     "nicht kein keine keinen keiner keinem "
-    "ist sind war waren wird werden hat haben hatte hatten "
+    "ist sind war waren wird werden hat haben hatte hatten bin bist "
+    "kannst kann muss musst soll sollst willst will darf darfst "
+    "habe hast habe hätte hätten würde würdest wäre wären "
     "auf in an aus bei mit nach von vor zu um fuer ueber unter "
     "ja nein doch schon noch auch nur sehr viel "
     "so da hier dort dann jetzt gerade eben mal "
     "was wer wo wann warum wie welche welcher welches "
     "mein dein sein ihr unser euer "
     "dieser diese dieses jener jene jenes "
-    "ok okay aha hmm hm mhm alles klar gut ".split()
+    "ok okay aha hmm hm mhm alles klar gut "
+    "bitte danke schön vielen herzlichen "
+    "mir dir uns euch ihnen ihm "
+    "den dem des zur zum ".split()
 )
 
 # Deutsche Basis-Frequenzen (Top-500 approximiert)
@@ -181,8 +186,14 @@ class VocabExtractor:
         for n in range(2, max_n + 1):
             for i in range(len(tokens_raw) - n + 1):
                 gram = " ".join(tokens_raw[i : i + n])
-                # Mindestens ein nicht-Stoppwort enthalten
-                if any(t not in _STOPWORDS and len(t) > 1 for t in tokens_raw[i : i + n]):
+                # N-Gram muss mindestens ZWEI bedeutungsvolle Woerter enthalten
+                # (laenger als 3 Zeichen UND kein Stoppwort)
+                # → verhindert "ich bin", "kannst du", "bitte mach" etc.
+                content_words = [
+                    t for t in tokens_raw[i : i + n]
+                    if t not in _STOPWORDS and len(t) > 3
+                ]
+                if len(content_words) >= 2:
                     ngrams.append(gram)
 
         return ngrams
@@ -522,6 +533,13 @@ class VocabAbsorber:
             score = self._scorer.score(gram, freq, self._total_terms)
             if score > 0:
                 scored_terms.append((gram, freq, score, user_text[:200]))
+
+        # Nur Terme mit genuegend hohem Idiolect-Score speichern
+        scored_terms = [
+            (gram, freq, score, ctx)
+            for gram, freq, score, ctx in scored_terms
+            if score >= IDIOLECT_THRESHOLD
+        ]
 
         if scored_terms:
             loop = asyncio.get_event_loop()

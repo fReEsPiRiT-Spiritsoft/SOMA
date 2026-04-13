@@ -117,16 +117,25 @@ class HealthMonitor:
 
     @staticmethod
     def _calculate_load_level(m: SystemMetrics) -> SystemLoadLevel:
-        """Bestimme Load-Level basierend auf RAM + VRAM."""
+        """Bestimme Load-Level basierend auf RAM + VRAM (getrennte Schwellwerte)."""
         ram = m.ram_percent
         vram = m.gpu.vram_percent if m.gpu else 0.0
-        peak = max(ram, vram)
 
-        if peak >= settings.health_ram_critical_percent:
+        # RAM und VRAM getrennt bewerten — große Modelle nutzen >90% VRAM normal
+        ram_critical = ram >= settings.health_ram_critical_percent
+        vram_critical = vram >= settings.health_vram_critical_percent
+
+        if ram_critical or vram_critical:
             return SystemLoadLevel.CRITICAL
-        elif peak >= settings.health_ram_warn_percent:
+
+        ram_warn = ram >= settings.health_ram_warn_percent
+        vram_warn = vram >= settings.health_vram_warn_percent
+
+        if ram_warn or vram_warn:
             return SystemLoadLevel.HIGH
-        elif peak >= 60:
+
+        peak = max(ram, vram)
+        if peak >= 60:
             return SystemLoadLevel.ELEVATED
         elif peak >= 30:
             return SystemLoadLevel.NORMAL

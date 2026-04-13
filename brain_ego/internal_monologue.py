@@ -289,6 +289,9 @@ class InternalMonologue:
         # Kurz warten damit alles initialisiert ist
         await asyncio.sleep(15)
 
+        _last_thought_time = 0.0  # Monotonic timestamp des letzten Gedankens
+        _MIN_THOUGHT_COOLDOWN = 60.0  # Mindestens 60s zwischen Gedanken
+
         while self._running:
             try:
                 state = self._consciousness.state
@@ -315,6 +318,15 @@ class InternalMonologue:
                 if self._arousal_event:
                     self._arousal_event.clear()
 
+                # ── Mindest-Cooldown: Verhindert Rapid-Fire durch
+                #    ständige Arousal-Events von VAD/Emotion ──────────
+                import time as _time
+                elapsed = _time.monotonic() - _last_thought_time
+                if elapsed < _MIN_THOUGHT_COOLDOWN:
+                    remaining = _MIN_THOUGHT_COOLDOWN - elapsed
+                    logger.debug("monologue_cooldown", remaining=f"{remaining:.0f}s")
+                    await asyncio.sleep(remaining)
+
                 if not self._llm_fn:
                     continue  # Kein LLM → kein Denken
 
@@ -340,6 +352,7 @@ class InternalMonologue:
 
                 self._thought_count += 1
                 self._last_thought = thought
+                _last_thought_time = _time.monotonic()
 
                 # ── In Consciousness einspeisen ──────────────────────
                 self._consciousness.notify_thought(thought)

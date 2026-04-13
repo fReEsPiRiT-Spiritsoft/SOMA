@@ -98,6 +98,9 @@ class SystemProfile:
     # Available tools per category
     available_tools: dict[str, list[str]] = field(default_factory=dict)
 
+    # XDG User Directories (locale-dependent: Desktop→Schreibtisch etc.)
+    xdg_dirs: dict[str, str] = field(default_factory=dict)
+
     # ── Helpers ──────────────────────────────────────────────────
 
     def has_tool(self, name: str) -> bool:
@@ -123,6 +126,16 @@ class SystemProfile:
             f"• User: {self.username} | Home: {self.home_dir}",
             f"• Hostname: {self.hostname}",
         ]
+
+        # XDG User Directories (kritisch für Shell-Befehle!)
+        if self.xdg_dirs:
+            xdg_parts = [f"{k}={v}" for k, v in self.xdg_dirs.items()]
+            lines.append(f"• Verzeichnisse: {', '.join(xdg_parts)}")
+            lines.append(
+                "WICHTIG: Auf diesem System heißt der Desktop-Ordner "
+                f"'{self.xdg_dirs.get('DESKTOP', 'Desktop')}', "
+                "NICHT 'Desktop'! Benutze IMMER die echten Pfade oben."
+            )
 
         # Key tool availability (compact)
         highlights = []
@@ -169,6 +182,7 @@ class SystemProfile:
             "username": self.username,
             "home_dir": self.home_dir,
             "available_tools": self.available_tools,
+            "xdg_dirs": self.xdg_dirs,
         }
 
 
@@ -369,6 +383,9 @@ async def detect_system() -> SystemProfile:
     profile.username = os.environ.get("USER", os.environ.get("LOGNAME", ""))
     profile.home_dir = str(Path.home())
 
+    # ── XDG User Directories ──
+    profile.xdg_dirs = await _detect_xdg_dirs()
+
     # ── Tools ──
     profile.available_tools = _detect_tools()
 
@@ -383,6 +400,71 @@ async def detect_system() -> SystemProfile:
     )
 
     return profile
+
+
+async def _detect_xdg_dirs() -> dict[str, str]:
+    """
+    Detect XDG user directories (locale-dependent!).
+    On German systems: Desktop→Schreibtisch, Documents→Dokumente, etc.
+    Uses xdg-user-dir or parses ~/.config/user-dirs.dirs.
+    """
+    dirs: dict[str, str] = {}
+    xdg_keys = [
+        "DESKTOP", "DOCUMENTS", "DOWNLOAD", "MUSIC",
+        "PICTURES", "VIDEOS", "TEMPLATES", "PUBLICSHARE",
+    ]
+
+    # Method 1: xdg-user-dir command (most reliable)
+    if shutil.which("xdg-user-dir"):
+        for key in xdg_keys:
+            path = await _run_cmd(f"xdg-user-dir {key}", timeout=2.0)
+            if path and path != str(Path.home()):
+                dirs[key] = path
+        if dirs:
+            return dirs
+
+    # Method 2: Parse ~/.config/user-dirs.dirs
+    user_dirs_file = Path.home() / ".config" / "user-dirs.dirs"
+    if user_dirs_file.exists():
+        try:
+            import re
+            text = user_dirs_file.read_text()
+            for key in xdg_keys:
+                match = re.search(
+                    rf'^XDG_{key}_DIR="(.+?)"',
+                    text,
+                    re.MULTILINE,
+                )
+                if match:
+                    val = match.group(1).replace("$HOME", str(Path.home()))
+                    if val != str(Path.home()):
+                        dirs[key] = val
+        except Exception:
+            pass
+
+    # Method 3: Fallback — check common German paths
+    if not dirs:
+        home = Path.home()
+        german_map = {
+            "DESKTOP": "Schreibtisch",
+            "DOCUMENTS": "Dokumente",
+            "DOWNLOAD": "Downloads",
+            "MUSIC": "Musik",
+            "PICTURES": "Bilder",
+            "VIDEOS": "Videos",
+        }
+        for key, name in german_map.items():
+            p = home / name
+            if p.is_dir():
+                dirs[key] = str(p)
+
+    return dirs
+
+
+def get_xdg_path(key: str) -> str:
+    """Get a specific XDG path. Returns empty string if unknown."""
+    profile = get_profile()
+    return profile.xdg_dirs.get(key.upper(), "")
 
 
 # ═══════════════════════════════════════════════════════════════════

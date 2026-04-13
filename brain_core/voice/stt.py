@@ -272,17 +272,25 @@ class STTEngine:
         Berücksichtigt typische Whisper-Fehler und deutsche Aussprache.
         ABER: Keine zu breiten Matches die bei TV/Radio triggern!
         """
+        import re
         t = text.lower()
         # Exakte Matches und typische Whisper-Transkriptionsfehler
-        # NICHT enthalten: "sommer", "summer", "summa" (zu viele False Positives!)
         # NICHT enthalten: "So, mal" (triggert bei "So, mal schauen wir...")
         soma_variants = [
             "soma", "sooma", "so ma", "sohma", "somma", "zoma",
             "somar", "soomar", "somah", "sommar",
             "suma", "zooma", "söma", "söhma",
-            "hey soma", "hej soma", "hallo soma", "Sommer",
+            "hey soma", "hej soma", "hallo soma",
         ]
-        return any(variant in t for variant in soma_variants)
+        if any(variant in t for variant in soma_variants):
+            return True
+
+        # "Sommer"/"Summer" nur am Satzanfang oder nach Anrede → Wake Word
+        # "im Sommer", "letzten Sommer" → echtes Wort, KEIN Wake Word
+        if re.match(r'^(?:hey|hallo|hej|hi|na)?\s*(?:sommer|summer)\b', t):
+            return True
+
+        return False
 
     async def shutdown(self):
         """Model entladen."""

@@ -215,6 +215,30 @@ class LogicRouter:
             room=request.room_id,
         )
 
+        # ── KILLER FEATURE HOOKS (non-blocking) ─────────────────────────
+        # Away Summary: Wenn User nach Abwesenheit zurückkehrt
+        away_prefix = ""
+        try:
+            from brain_core.away_summary import get_away_summary
+            away = get_away_summary()
+            away_text = await away.get_welcome_back_text()
+            if away_text:
+                away_prefix = away_text
+                await _broadcast_thought("info", f"Willkommen zurück: {away_text[:60]}", "AWAY")
+            away.touch()  # Timer reset
+        except Exception:
+            pass
+
+        # Auto-Compact: Context-Compression wenn nötig
+        try:
+            from brain_core.auto_compact import get_auto_compact
+            ac = get_auto_compact()
+            from brain_core.memory.integration import get_orchestrator
+            orch = get_orchestrator()
+            await ac.compact_if_needed(orch.working)
+        except Exception:
+            pass
+
         # ── NANO PRE-CHECK (<5ms) ────────────────────────────────────────
         # VISION-ARCHITEKTUR: Nano feuert Action-Tag SOFORT (Schicht 1),
         # Heavy generiert die menschliche Antwort (Schicht 3).
@@ -245,11 +269,13 @@ class LogicRouter:
 
         # ── Heavy Engine verfügbar? ──────────────────────────────────────
         heavy_engine = self._engines.get("heavy")
-        heavy_busy = heavy_engine is not None and getattr(heavy_engine, "is_generating", False)
+        # Nur wenn ein anderer USER-Request läuft → deferred.
+        # Monolog-/Background-Tasks blockieren nicht (Ollama NUM_PARALLEL=2).
+        heavy_busy = heavy_engine is not None and getattr(heavy_engine, "is_user_generating", False)
 
         # ── DEFER-BEDINGUNGEN ────────────────────────────────────────────
-        # 1. Heavy Engine gerade beschäftigt → Queue + kreative Wartenachricht
-        # 2. System CRITICAL (>92% RAM/VRAM) → Queue + Wartenachricht
+        # 1. Heavy Engine gerade mit USER-Request beschäftigt → Queue
+        # 2. System CRITICAL (>98% VRAM) → Queue + Wartenachricht
         if heavy_busy:
             await _broadcast_thought(
                 "warning",
@@ -281,7 +307,30 @@ class LogicRouter:
         if plugin_context.strip():
             await _broadcast_thought("info", f"Plugin-Kontext hinzugefügt ({len(plugin_context)} Zeichen)", "PLUGINS")
 
-        system_prompt = self._build_system_prompt(request) + plugin_context
+        # ── Intent-basierter Prompt-Optimizer ─────────────────────────────
+        # Analysiert den User-Prompt und baut nur die nötigen Sektionen ein.
+        # Spart 50-75% Tokens → proportional schnellere Prompt-Eval.
+        try:
+            from brain_core.prompt_optimizer import classify_intent, build_optimized_prompt
+            intent = classify_intent(request.prompt)
+            system_prompt = build_optimized_prompt(
+                intent=intent,
+                request_metadata=request.metadata,
+                is_child=request.is_child,
+                room_id=request.room_id,
+            )
+            # Dynamic context dazu (Bewusstsein, Emotionen, Memory)
+            dynamic = self._build_dynamic_context(request)
+            if dynamic:
+                system_prompt += "\n\n" + dynamic
+            if plugin_context.strip():
+                system_prompt += "\n\n" + plugin_context
+            
+            logger.info("prompt_optimized", intent=intent.value,
+                        prompt_chars=len(system_prompt))
+        except Exception as opt_err:
+            logger.warning("prompt_optimizer_fallback", error=str(opt_err))
+            system_prompt = self._build_system_prompt(request) + plugin_context
 
         # Wenn Nano schon den Action-Tag gefeuert hat:
         # Heavy soll NUR die menschliche Bestätigung generieren, KEINE Tags!
@@ -330,6 +379,10 @@ class LogicRouter:
                 response_text = re.sub(r'\[ACTION:[^\]]*\]', '', response_text).strip()
                 response_text = f"{nano_action_prefix}\n{response_text}"
                 engine_name = "nano+heavy"
+
+            # Away Summary voranstellen wenn User nach Abwesenheit zurückkehrt
+            if away_prefix:
+                response_text = f"{away_prefix} {response_text}"
 
             return SomaResponse(
                 request_id=request.request_id,
@@ -455,19 +508,40 @@ class LogicRouter:
         if plugin_context.strip():
             await _broadcast_thought("info", f"Plugin-Kontext: {len(plugin_context)} Zeichen", "PLUGINS")
 
+        # ── Intent-basierter Prompt-Optimizer (Stream) ────────────────────
+        try:
+            from brain_core.prompt_optimizer import classify_intent, build_optimized_prompt
+            intent = classify_intent(request.prompt)
+            optimized_prompt = build_optimized_prompt(
+                intent=intent,
+                request_metadata=request.metadata,
+                is_child=request.is_child,
+                room_id=request.room_id,
+            )
+            dynamic = self._build_dynamic_context(request)
+            if dynamic:
+                optimized_prompt += "\n\n" + dynamic
+            if plugin_context.strip():
+                optimized_prompt += "\n\n" + plugin_context
+            logger.info("stream_prompt_optimized", intent=intent.value,
+                        prompt_chars=len(optimized_prompt))
+        except Exception as opt_err:
+            logger.warning("stream_prompt_optimizer_fallback", error=str(opt_err))
+            optimized_prompt = self._build_system_prompt(request)
+            if plugin_context.strip():
+                optimized_prompt += plugin_context
+
         # ── KV-Cache Split Prompt (Phase E AKTIVIERT) ────────────────────
         # Statischer Prompt → KV-Cache Hit, dynamischer → separat.
-        # Spart ~200-500ms pro Turn (Ollama überspringt Re-Processing).
         if hasattr(engine, 'get_or_create_session') and request.session_id:
             session = engine.get_or_create_session(
                 request.session_id,
-                system_prompt=self._build_system_prompt(request),
+                system_prompt=optimized_prompt,
             )
             self._apply_split_prompt_to_session(request, session, plugin_context)
-            # Session hat jetzt Split-Prompt → to_messages() nutzt Cache-Format
-            system_prompt = None  # Engine nutzt Session-Prompt statt Extra-Arg
+            system_prompt = None
         else:
-            system_prompt = self._build_system_prompt(request) + plugin_context
+            system_prompt = optimized_prompt
 
         # Wenn Nano schon den Action-Tag gefeuert hat:
         # Heavy soll NUR die menschliche Bestätigung generieren, KEINE Tags!
@@ -1036,9 +1110,12 @@ class LogicRouter:
         Scannt die LLM-Antwort auf [ACTION:...] Tags die ein Re-Ask brauchen
         (search, browse, fetch_url, shell, screen_look).
 
+        Enhanced: Nutzt ActionExecutor für strukturierte Ausführung mit
+        Validierung, Retry und ActionResult.
+
         Flow:
           1. LLM generiert: "Schaue nach![ACTION:search query="bitcoin"]"
-          2. Wir extrahieren den Tag, führen die Suche aus
+          2. Wir extrahieren den Tag, führen die Suche aus via ActionExecutor
           3. Wir geben die Ergebnisse dem LLM in einem Re-Ask
           4. LLM formuliert finale Antwort MIT echten Daten
 
@@ -1091,8 +1168,8 @@ class LogicRouter:
             "ROUTER",
         )
 
-        # ── Aktion ausführen ─────────────────────────────────────────
-        action_result = await self._execute_reask_action(action_type, params)
+        # ── Enhanced Execution via ActionExecutor ────────────────────
+        action_result = await self._execute_reask_action_enhanced(action_type, params, request)
 
         if not action_result:
             return response_text  # Aktion fehlgeschlagen → Original
@@ -1130,9 +1207,69 @@ class LogicRouter:
             logger.error("reask_generation_failed", error=str(exc))
             return response_text  # Fallback: Original-Antwort
 
+    async def _execute_reask_action_enhanced(
+        self,
+        action_type: str,
+        params: dict,
+        request: SomaRequest,
+    ) -> Optional[str]:
+        """
+        Enhanced: Führe eine Re-Ask-Aktion via ActionExecutor aus.
+        
+        Bietet:
+          - Validierung vor Ausführung
+          - Strukturierte ActionResult Responses
+          - Automatisches Retry bei transienten Fehlern
+          - Einheitliche Fehlerbehandlung
+        """
+        try:
+            from brain_core.action_executor import get_executor, ExecutionContext
+            from brain_core.action_result import ActionResult
+            
+            executor = get_executor()
+            
+            # Context aus Request
+            context = ExecutionContext(
+                user_id=request.user_id,
+                room_id=request.room_id,
+                session_id=request.session_id,
+                is_child=request.is_child,
+            )
+            executor.set_context(context)
+            
+            # Execute via ActionExecutor
+            result = await executor.execute(action_type, params)
+            
+            if result.success:
+                # Nutze reask_content wenn vorhanden, sonst data
+                if result.reask_content:
+                    return result.reask_content
+                elif result.data:
+                    return str(result.data)[:4000]
+                elif result.tts_message:
+                    return result.tts_message
+            else:
+                logger.warning(
+                    "reask_action_failed",
+                    action=action_type,
+                    error=result.error_message,
+                )
+                return None
+                
+        except ImportError:
+            # Fallback to legacy execution
+            logger.debug("action_executor_not_available_falling_back")
+            return await self._execute_reask_action(action_type, params)
+        except Exception as exc:
+            logger.error("reask_action_enhanced_failed", action=action_type, error=str(exc))
+            # Fallback to legacy
+            return await self._execute_reask_action(action_type, params)
+
     async def _execute_reask_action(self, action_type: str, params: dict) -> Optional[str]:
         """
-        Führe eine Re-Ask-Aktion aus und gib das Ergebnis als Text zurück.
+        Legacy: Führe eine Re-Ask-Aktion aus und gib das Ergebnis als Text zurück.
+        
+        Wird als Fallback genutzt wenn ActionExecutor nicht verfügbar ist.
         """
         try:
             if action_type in ("search", "web_search"):

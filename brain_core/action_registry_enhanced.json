@@ -1,0 +1,686 @@
+{
+  "_meta": {
+    "version": "2.0",
+    "description": "SOMA-AI Action Tag Registry — Enhanced mit Claude Code Patterns",
+    "format": "[ACTION:type key=\"value\" key2=\"value2\"]",
+    "notes": "Extended mit: concurrency_safe, retry_policy, is_destructive, timeout_ms, search_hint"
+  },
+
+  "categories": {
+    "smart_home": {
+      "icon": "🏠",
+      "label": "SMART HOME",
+      "tags": {
+        "ha_call": {
+          "description": "Home Assistant Service Call (Licht, Heizung, Schalter, etc.)",
+          "params": {
+            "domain":         {"required": true,  "type": "string", "hint": "light, climate, switch, media_player, ..."},
+            "service":        {"required": true,  "type": "string", "hint": "turn_on, turn_off, toggle, set_temperature, ..."},
+            "entity_id":      {"required": true,  "type": "string", "hint": "light.wohnzimmer, climate.schlafzimmer, ..."},
+            "brightness_pct": {"required": false, "type": "number", "hint": "0-100"},
+            "temperature":    {"required": false, "type": "number", "hint": "Grad Celsius"},
+            "hvac_mode":      {"required": false, "type": "string", "hint": "heat, cool, auto, off"},
+            "volume_level":   {"required": false, "type": "number", "hint": "0.0-1.0"},
+            "color_temp":     {"required": false, "type": "number"},
+            "rgb_color":      {"required": false, "type": "string"}
+          },
+          "examples": [
+            "[ACTION:ha_call domain=\"light\" service=\"turn_on\" entity_id=\"light.wohnzimmer\"]",
+            "[ACTION:ha_call domain=\"light\" service=\"turn_on\" entity_id=\"light.wohnzimmer\" brightness_pct=\"80\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": true,
+          "needs_reask": false,
+          "concurrency_safe": true,
+          "is_read_only": false,
+          "is_destructive": false,
+          "timeout_ms": 5000,
+          "retry_policy": {"max_retries": 3, "backoff_ms": 500},
+          "search_hint": "licht lampe heizung schalter smart home"
+        },
+        "ha_tts": {
+          "description": "Hausdurchsage über HA-Lautsprecher (Piper TTS → HA media_player)",
+          "params": {
+            "text": {"required": true, "type": "string", "hint": "Die Nachricht die gesprochen wird"},
+            "room": {"required": false, "type": "string", "hint": "all, wohnzimmer, küche, ... (default: all)"}
+          },
+          "examples": [
+            "[ACTION:ha_tts text=\"Das Essen ist fertig!\" room=\"all\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": false,
+          "concurrency_safe": true,
+          "is_read_only": false,
+          "is_destructive": false,
+          "timeout_ms": 10000,
+          "search_hint": "ansage durchsage sprechen lautsprecher"
+        }
+      }
+    },
+
+    "memory": {
+      "icon": "🧠",
+      "label": "ERINNERUNGEN & MERKEN",
+      "tags": {
+        "reminder": {
+          "description": "Timer oder Erinnerung setzen",
+          "params": {
+            "minutes":  {"required": false, "type": "number", "hint": "Minuten bis Erinnerung"},
+            "seconds":  {"required": false, "type": "number"},
+            "hours":    {"required": false, "type": "number"},
+            "time":     {"required": false, "type": "string", "hint": "Uhrzeit z.B. 18:00"},
+            "topic":    {"required": true,  "type": "string", "hint": "Woran erinnern?"}
+          },
+          "examples": [
+            "[ACTION:reminder minutes=5 topic=\"Nudeln abgießen\"]",
+            "[ACTION:reminder time=\"18:00\" topic=\"Abendessen\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": true,
+          "needs_reask": false,
+          "concurrency_safe": true,
+          "is_read_only": false,
+          "is_destructive": false,
+          "timeout_ms": 1000,
+          "search_hint": "timer wecker erinnerung alarm"
+        },
+        "remember": {
+          "description": "Information ins Langzeitgedächtnis speichern",
+          "params": {
+            "category": {"required": true,  "type": "string", "hint": "user_info, preference, fact, ..."},
+            "content":  {"required": true,  "type": "string", "hint": "Was soll gemerkt werden?"}
+          },
+          "examples": [
+            "[ACTION:remember category=\"user_info\" content=\"Der Nutzer heißt Patrick\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": false,
+          "concurrency_safe": true,
+          "is_read_only": false,
+          "is_destructive": false,
+          "timeout_ms": 2000,
+          "search_hint": "merken speichern gedächtnis notiz"
+        }
+      }
+    },
+
+    "media": {
+      "icon": "🎵",
+      "label": "MEDIEN",
+      "tags": {
+        "youtube": {
+          "description": "Musik/Video abspielen (mpv/Browser auto-detect)",
+          "params": {
+            "query":  {"required": false, "type": "string", "hint": "Suchbegriff"},
+            "artist": {"required": false, "type": "string"},
+            "song":   {"required": false, "type": "string"}
+          },
+          "examples": [
+            "[ACTION:youtube query=\"aligatoah\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": false,
+          "concurrency_safe": false,
+          "is_read_only": false,
+          "is_destructive": false,
+          "timeout_ms": 15000,
+          "search_hint": "musik video abspielen youtube"
+        },
+        "media_next":   {
+          "description": "Nächstes Lied",
+          "params": {},
+          "examples": ["[ACTION:media_next]"],
+          "tts_confirm": true, "nano_capable": true, "needs_reask": false,
+          "concurrency_safe": true, "is_read_only": false, "is_destructive": false,
+          "timeout_ms": 2000, "search_hint": "skip weiter nächstes"
+        },
+        "media_prev":   {
+          "description": "Vorheriges Lied",
+          "params": {},
+          "examples": ["[ACTION:media_prev]"],
+          "tts_confirm": true, "nano_capable": true, "needs_reask": false,
+          "concurrency_safe": true, "is_read_only": false, "is_destructive": false,
+          "timeout_ms": 2000, "search_hint": "zurück vorheriges"
+        },
+        "media_pause":  {
+          "description": "Musik pausieren",
+          "params": {},
+          "examples": ["[ACTION:media_pause]"],
+          "tts_confirm": true, "nano_capable": true, "needs_reask": false,
+          "concurrency_safe": true, "is_read_only": false, "is_destructive": false,
+          "timeout_ms": 2000, "search_hint": "pause stopp anhalten"
+        },
+        "media_resume": {
+          "description": "Musik fortsetzen",
+          "params": {},
+          "examples": ["[ACTION:media_resume]"],
+          "tts_confirm": true, "nano_capable": true, "needs_reask": false,
+          "concurrency_safe": true, "is_read_only": false, "is_destructive": false,
+          "timeout_ms": 2000, "search_hint": "weiter play fortsetzen"
+        },
+        "media_toggle": {
+          "description": "Play/Pause Toggle",
+          "params": {},
+          "examples": ["[ACTION:media_toggle]"],
+          "tts_confirm": true, "nano_capable": true, "needs_reask": false,
+          "concurrency_safe": true, "is_read_only": false, "is_destructive": false,
+          "timeout_ms": 2000, "search_hint": "toggle wechseln"
+        },
+        "media_stop":   {
+          "description": "Alles stoppen",
+          "params": {},
+          "examples": ["[ACTION:media_stop]"],
+          "tts_confirm": true, "nano_capable": true, "needs_reask": false,
+          "concurrency_safe": true, "is_read_only": false, "is_destructive": false,
+          "timeout_ms": 2000, "search_hint": "stop beenden aus"
+        },
+        "now_playing":  {
+          "description": "Was läuft gerade?",
+          "params": {},
+          "examples": ["[ACTION:now_playing]"],
+          "tts_confirm": false, "nano_capable": false, "needs_reask": false,
+          "concurrency_safe": true, "is_read_only": true, "is_destructive": false,
+          "timeout_ms": 2000, "search_hint": "aktuell spielen gerade"
+        }
+      }
+    },
+
+    "web": {
+      "icon": "🌐",
+      "label": "WEB & RECHERCHE",
+      "tags": {
+        "search": {
+          "description": "Web-Suche (DuckDuckGo) — Ergebnisse werden dir zurückgegeben, fasse sie zusammen!",
+          "params": {
+            "query": {"required": true, "type": "string", "hint": "Suchbegriff"}
+          },
+          "examples": [
+            "[ACTION:search query=\"bitcoin kurs aktuell\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": true,
+          "concurrency_safe": true,
+          "is_read_only": true,
+          "is_destructive": false,
+          "timeout_ms": 30000,
+          "retry_policy": {"max_retries": 2, "backoff_ms": 1000},
+          "search_hint": "suche google recherche finden web"
+        },
+        "fetch_url": {
+          "description": "Webseite abrufen und Frage dazu beantworten",
+          "params": {
+            "url":      {"required": true,  "type": "string"},
+            "question": {"required": false, "type": "string", "hint": "Frage an den Seiteninhalt"}
+          },
+          "examples": [
+            "[ACTION:fetch_url url=\"https://example.com\" question=\"Was steht dort?\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": true,
+          "concurrency_safe": true,
+          "is_read_only": true,
+          "is_destructive": false,
+          "timeout_ms": 30000,
+          "retry_policy": {"max_retries": 2, "backoff_ms": 1000},
+          "search_hint": "url webseite abrufen lesen"
+        },
+        "browse": {
+          "description": "URL im echten Browser öffnen und Inhalt analysieren",
+          "params": {
+            "url":      {"required": true,  "type": "string"},
+            "question": {"required": false, "type": "string"}
+          },
+          "examples": [
+            "[ACTION:browse url=\"https://heise.de\" question=\"Top-News?\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": true,
+          "concurrency_safe": false,
+          "is_read_only": true,
+          "is_destructive": false,
+          "timeout_ms": 60000,
+          "search_hint": "browser öffnen seite analysieren"
+        },
+        "open_url": {
+          "description": "URL im Standard-Browser öffnen (kein Inhalt lesen)",
+          "params": {
+            "url": {"required": true, "type": "string"}
+          },
+          "examples": [
+            "[ACTION:open_url url=\"https://youtube.com\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": false,
+          "concurrency_safe": true,
+          "is_read_only": false,
+          "is_destructive": false,
+          "timeout_ms": 5000,
+          "search_hint": "öffnen link url browser"
+        }
+      }
+    },
+
+    "screen": {
+      "icon": "🖥️",
+      "label": "BILDSCHIRM",
+      "tags": {
+        "screen_look": {
+          "description": "Screenshots der Monitore machen und analysieren",
+          "params": {
+            "monitor": {"required": false, "type": "string", "hint": "1, 2, 3 oder leer für alle"}
+          },
+          "examples": [
+            "[ACTION:screen_look]"
+          ],
+          "tts_confirm": false,
+          "nano_capable": false,
+          "needs_reask": true,
+          "concurrency_safe": true,
+          "is_read_only": true,
+          "is_destructive": false,
+          "timeout_ms": 10000,
+          "search_hint": "screenshot bildschirm schauen sehen"
+        }
+      }
+    },
+
+    "shell": {
+      "icon": "⚙️",
+      "label": "SHELL",
+      "tags": {
+        "shell": {
+          "description": "Shell-Befehl ausführen (Ergebnis kommt zurück)",
+          "params": {
+            "command": {"required": true, "type": "string"}
+          },
+          "examples": [
+            "[ACTION:shell command=\"free -h\"]"
+          ],
+          "tts_confirm": false,
+          "nano_capable": false,
+          "needs_reask": true,
+          "concurrency_safe": false,
+          "is_read_only": false,
+          "is_destructive": true,
+          "timeout_ms": 30000,
+          "retry_policy": {"max_retries": 1, "backoff_ms": 0},
+          "search_hint": "terminal befehl kommando ausführen",
+          "do_rules": [
+            "Für spezialisierte Aufgaben die passenden Tags verwenden",
+            "Kurze, sichere Befehle bevorzugen"
+          ],
+          "dont_rules": [
+            "Niemals rm -rf ohne explizite Bestätigung",
+            "Keine endlosen Schleifen oder Forks",
+            "Kein sudo ohne Sudo-Modus"
+          ]
+        }
+      }
+    },
+
+    "audio_display": {
+      "icon": "🔊",
+      "label": "AUDIO & DISPLAY",
+      "tags": {
+        "volume": {
+          "description": "System-Lautstärke steuern",
+          "params": {
+            "level":  {"required": false, "type": "number", "hint": "0-100"},
+            "action": {"required": false, "type": "string", "hint": "get, mute, unmute"}
+          },
+          "examples": [
+            "[ACTION:volume level=\"50\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": true,
+          "needs_reask": false,
+          "concurrency_safe": true,
+          "is_read_only": false,
+          "is_destructive": false,
+          "timeout_ms": 2000,
+          "search_hint": "lautstärke volume leiser lauter mute"
+        },
+        "brightness": {
+          "description": "Monitor-Helligkeit",
+          "params": {
+            "level": {"required": true, "type": "number", "hint": "0-100"}
+          },
+          "examples": ["[ACTION:brightness level=\"70\"]"],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": false,
+          "concurrency_safe": true,
+          "is_read_only": false,
+          "is_destructive": false,
+          "timeout_ms": 2000,
+          "search_hint": "helligkeit bildschirm dunkler heller"
+        }
+      }
+    },
+
+    "files": {
+      "icon": "📁",
+      "label": "DATEIEN",
+      "tags": {
+        "file": {
+          "description": "Dateisystem-Operationen",
+          "params": {
+            "action":  {"required": true,  "type": "string", "hint": "read, write, list, search, grep, copy, move, delete, info, mkdir, open"},
+            "path":    {"required": true,  "type": "string"},
+            "content": {"required": false, "type": "string", "hint": "Für write"},
+            "pattern": {"required": false, "type": "string", "hint": "Für search/grep"},
+            "append":  {"required": false, "type": "string", "hint": "true/false für write"}
+          },
+          "examples": [
+            "[ACTION:file action=\"read\" path=\"~/Dokumente/notizen.txt\"]",
+            "[ACTION:file action=\"search\" pattern=\"BeamNG\" path=\"~\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": false,
+          "concurrency_safe": false,
+          "is_read_only": false,
+          "is_destructive": true,
+          "timeout_ms": 30000,
+          "search_hint": "datei lesen schreiben suchen ordner",
+          "do_rules": [
+            "Vor destruktiven Operationen (delete, move) Bestätigung einholen",
+            "Bei großen Dateien nur Ausschnitte lesen"
+          ],
+          "dont_rules": [
+            "Niemals Systemdateien überschreiben",
+            "Keine rekursiven Löschungen ohne Bestätigung"
+          ]
+        },
+        "file_edit": {
+          "description": "Präzises Bearbeiten: Search-and-Replace statt Datei überschreiben (Claude Code Pattern)",
+          "params": {
+            "path":           {"required": true,  "type": "string", "hint": "Dateipfad"},
+            "old_text":       {"required": true,  "type": "string", "hint": "Exakter Text zum Ersetzen (inkl. Whitespace!)"},
+            "new_text":       {"required": true,  "type": "string", "hint": "Neuer Text"},
+            "expected_count": {"required": false, "type": "number", "hint": "Wie oft muss old_text vorkommen? (default: 1)"},
+            "dry_run":        {"required": false, "type": "string", "hint": "true = nur simulieren"}
+          },
+          "examples": [
+            "[ACTION:file_edit path=\"main.py\" old_text=\"def foo():\" new_text=\"def bar():\"]",
+            "[ACTION:file_edit path=\"config.json\" old_text=\"\\\"debug\\\": false\" new_text=\"\\\"debug\\\": true\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": false,
+          "concurrency_safe": false,
+          "is_read_only": false,
+          "is_destructive": false,
+          "timeout_ms": 15000,
+          "search_hint": "ersetzen ändern bearbeiten edit replace refactor",
+          "do_rules": [
+            "Inkludiere 3-5 Zeilen Kontext in old_text für eindeutigen Match",
+            "Prüfe mit dry_run=true bevor du änderst",
+            "Lies die Datei vorher mit file action='read' um den exakten Text zu sehen"
+          ],
+          "dont_rules": [
+            "Niemals raten wie der Text aussieht — immer erst lesen!",
+            "Nicht für komplett neue Dateien nutzen — dafür file action='write'",
+            "Kein Whitespace ignorieren — old_text muss EXAKT matchen"
+          ]
+        },
+        "file_insert": {
+          "description": "Text an einer bestimmten Zeilennummer einfügen",
+          "params": {
+            "path":        {"required": true,  "type": "string"},
+            "line_number": {"required": true,  "type": "number", "hint": "Zeilennummer (1-basiert)"},
+            "text":        {"required": true,  "type": "string"},
+            "after":       {"required": false, "type": "string", "hint": "true = nach Zeile, false = vor Zeile"}
+          },
+          "examples": [
+            "[ACTION:file_insert path=\"main.py\" line_number=10 text=\"# Neuer Kommentar\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": false,
+          "concurrency_safe": false,
+          "is_read_only": false,
+          "is_destructive": false,
+          "timeout_ms": 10000,
+          "search_hint": "einfügen zeile insert line"
+        },
+        "file_delete_lines": {
+          "description": "Zeilen aus einer Datei löschen",
+          "params": {
+            "path":       {"required": true, "type": "string"},
+            "start_line": {"required": true, "type": "number", "hint": "Erste zu löschende Zeile"},
+            "end_line":   {"required": true, "type": "number", "hint": "Letzte zu löschende Zeile"}
+          },
+          "examples": [
+            "[ACTION:file_delete_lines path=\"main.py\" start_line=5 end_line=10]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": false,
+          "concurrency_safe": false,
+          "is_read_only": false,
+          "is_destructive": true,
+          "timeout_ms": 10000,
+          "search_hint": "löschen zeilen entfernen delete lines"
+        }
+      }
+    },
+
+    "apps": {
+      "icon": "🪟",
+      "label": "APPS & FENSTER",
+      "tags": {
+        "app": {
+          "description": "Anwendungen starten/stoppen/auflisten",
+          "params": {
+            "action": {"required": true,  "type": "string", "hint": "open, close, list"},
+            "name":   {"required": false, "type": "string", "hint": "App-Name"}
+          },
+          "examples": [
+            "[ACTION:app action=\"open\" name=\"firefox\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": false,
+          "concurrency_safe": false,
+          "is_read_only": false,
+          "is_destructive": false,
+          "timeout_ms": 10000,
+          "search_hint": "anwendung programm starten öffnen schließen"
+        },
+        "window": {
+          "description": "Fenster-Management",
+          "params": {
+            "action": {"required": true,  "type": "string", "hint": "focus, list, minimize, maximize, close"},
+            "name":   {"required": false, "type": "string"}
+          },
+          "examples": [
+            "[ACTION:window action=\"focus\" name=\"Firefox\"]"
+          ],
+          "tts_confirm": true,
+          "nano_capable": false,
+          "needs_reask": false,
+          "concurrency_safe": true,
+          "is_read_only": false,
+          "is_destructive": false,
+          "timeout_ms": 5000,
+          "search_hint": "fenster fokus minimieren maximieren"
+        }
+      }
+    },
+
+    "system": {
+      "icon": "🖥️",
+      "label": "SYSTEM",
+      "tags": {
+        "process": {
+          "description": "Prozess-Verwaltung",
+          "params": {
+            "action": {"required": true,  "type": "string", "hint": "list, kill"},
+            "target": {"required": false, "type": "string"},
+            "filter": {"required": false, "type": "string"},
+            "force":  {"required": false, "type": "string", "hint": "true/false"}
+          },
+          "examples": ["[ACTION:process action=\"list\" filter=\"python\"]"],
+          "tts_confirm": true, "nano_capable": false, "needs_reask": false,
+          "concurrency_safe": true, "is_read_only": false, "is_destructive": true,
+          "timeout_ms": 5000, "search_hint": "prozess task beenden killen"
+        },
+        "service": {
+          "description": "Systemd-Services steuern",
+          "params": {
+            "name":   {"required": true,  "type": "string"},
+            "action": {"required": true,  "type": "string", "hint": "status, start, stop, restart, list"}
+          },
+          "examples": ["[ACTION:service name=\"docker\" action=\"status\"]"],
+          "tts_confirm": true, "nano_capable": false, "needs_reask": false,
+          "concurrency_safe": true, "is_read_only": false, "is_destructive": false,
+          "timeout_ms": 10000, "search_hint": "dienst service systemd"
+        },
+        "package": {
+          "description": "Pakete installieren/entfernen",
+          "params": {
+            "action": {"required": true,  "type": "string", "hint": "search, install, remove, list"},
+            "name":   {"required": false, "type": "string"}
+          },
+          "examples": ["[ACTION:package action=\"install\" name=\"htop\"]"],
+          "tts_confirm": true, "nano_capable": false, "needs_reask": false,
+          "concurrency_safe": false, "is_read_only": false, "is_destructive": true,
+          "timeout_ms": 120000, "search_hint": "paket installieren apt"
+        },
+        "sysinfo": {
+          "description": "Systeminformationen abrufen",
+          "params": {},
+          "examples": ["[ACTION:sysinfo]"],
+          "tts_confirm": false, "nano_capable": false, "needs_reask": false,
+          "concurrency_safe": true, "is_read_only": true, "is_destructive": false,
+          "timeout_ms": 5000, "search_hint": "system info cpu ram"
+        },
+        "disk": {
+          "description": "Festplatten-Info",
+          "params": {},
+          "examples": ["[ACTION:disk]"],
+          "tts_confirm": false, "nano_capable": false, "needs_reask": false,
+          "concurrency_safe": true, "is_read_only": true, "is_destructive": false,
+          "timeout_ms": 5000, "search_hint": "festplatte speicher disk"
+        },
+        "power": {
+          "description": "System-Power (Neustart, Herunterfahren, Sperren)",
+          "params": {
+            "action": {"required": true, "type": "string", "hint": "lock, suspend, reboot, shutdown"}
+          },
+          "examples": ["[ACTION:power action=\"lock\"]"],
+          "tts_confirm": true, "nano_capable": false, "needs_reask": false,
+          "concurrency_safe": false, "is_read_only": false, "is_destructive": true,
+          "timeout_ms": 5000, "search_hint": "herunterfahren neustart sperren sleep"
+        }
+      }
+    },
+
+    "bluetooth": {
+      "icon": "📶",
+      "label": "BLUETOOTH",
+      "tags": {
+        "bluetooth": {
+          "description": "Bluetooth-Geräte verwalten (IMMER statt shell/bluetoothctl!)",
+          "params": {
+            "action": {"required": true,  "type": "string", "hint": "auto, scan, list, connect, disconnect, remove"},
+            "device": {"required": false, "type": "string", "hint": "Gerätename oder Nr."}
+          },
+          "examples": [
+            "[ACTION:bluetooth action=\"auto\" device=\"JBL\"]"
+          ],
+          "tts_confirm": true, "nano_capable": false, "needs_reask": false,
+          "concurrency_safe": false, "is_read_only": false, "is_destructive": false,
+          "timeout_ms": 30000, "search_hint": "bluetooth verbinden koppeln kopfhörer"
+        }
+      }
+    },
+
+    "misc": {
+      "icon": "🔧",
+      "label": "SONSTIGES",
+      "tags": {
+        "clipboard": {
+          "description": "Zwischenablage lesen/schreiben",
+          "params": {
+            "action":  {"required": true,  "type": "string", "hint": "get, set"},
+            "content": {"required": false, "type": "string"}
+          },
+          "examples": ["[ACTION:clipboard action=\"get\"]"],
+          "tts_confirm": true, "nano_capable": false, "needs_reask": false,
+          "concurrency_safe": true, "is_read_only": false, "is_destructive": false,
+          "timeout_ms": 2000, "search_hint": "zwischenablage kopieren clipboard"
+        },
+        "notify": {
+          "description": "Desktop-Benachrichtigung senden",
+          "params": {
+            "title":   {"required": true,  "type": "string"},
+            "message": {"required": true,  "type": "string"},
+            "urgency": {"required": false, "type": "string", "hint": "low, normal, critical"}
+          },
+          "examples": ["[ACTION:notify title=\"SOMA\" message=\"Timer abgelaufen!\" urgency=\"critical\"]"],
+          "tts_confirm": true, "nano_capable": false, "needs_reask": false,
+          "concurrency_safe": true, "is_read_only": false, "is_destructive": false,
+          "timeout_ms": 2000, "search_hint": "benachrichtigung notification popup"
+        },
+        "wallpaper": {
+          "description": "Hintergrundbild setzen",
+          "params": {"path": {"required": true, "type": "string"}},
+          "examples": ["[ACTION:wallpaper path=\"~/Bilder/bg.jpg\"]"],
+          "tts_confirm": true, "nano_capable": false, "needs_reask": false,
+          "concurrency_safe": true, "is_read_only": false, "is_destructive": false,
+          "timeout_ms": 5000, "search_hint": "hintergrund wallpaper desktop"
+        },
+        "network": {
+          "description": "Netzwerk-Info und WLAN-Steuerung",
+          "params": {
+            "action":   {"required": true,  "type": "string", "hint": "info, wifi, connect"},
+            "ssid":     {"required": false, "type": "string"},
+            "password": {"required": false, "type": "string"}
+          },
+          "examples": ["[ACTION:network action=\"info\"]"],
+          "tts_confirm": true, "nano_capable": false, "needs_reask": false,
+          "concurrency_safe": true, "is_read_only": false, "is_destructive": false,
+          "timeout_ms": 10000, "search_hint": "netzwerk wlan wifi internet"
+        },
+        "create_plugin": {
+          "description": "SOMA lernt neue Fähigkeit (Evolution Lab)",
+          "params": {
+            "name":        {"required": true, "type": "string"},
+            "description": {"required": true, "type": "string"}
+          },
+          "examples": ["[ACTION:create_plugin name=\"wetter_plugin\" description=\"Wetter abrufen\"]"],
+          "tts_confirm": true, "nano_capable": false, "needs_reask": false,
+          "concurrency_safe": false, "is_read_only": false, "is_destructive": false,
+          "timeout_ms": 60000, "search_hint": "plugin lernen fähigkeit erstellen"
+        }
+      }
+    }
+  },
+
+  "rules": [
+    "NIEMALS sagen du hättest etwas getan OHNE Action-Tag. Ohne Tag = nicht passiert.",
+    "NIEMALS *Aktionen in Sternchen*. Nutze echte ACTION-Tags.",
+    "Wenn Antwort NUR eine Frage ist → KEIN Tag. Erst handeln nach Bestätigung.",
+    "Spezialisierte Tags statt shell! Für URLs: open_url, für Apps: app, für Ordner: file action=\"open\".",
+    "TTS-REGEL: Schreibe IMMER eine kurze, natürliche Bestätigung (3-8 Wörter) VOR oder NACH dem Tag!",
+    "WEB-REGEL: Bei search/fetch_url/browse bekommst du die Ergebnisse ZURÜCK. Fasse sie dann zusammen!",
+    "BLUETOOTH: IMMER [ACTION:bluetooth] statt shell/bluetoothctl!",
+    "DESTRUKTIVE OPS: Bei is_destructive=true Bestätigung vor kritischen Aktionen"
+  ],
+
+  "global_settings": {
+    "max_concurrent_actions": 5,
+    "default_timeout_ms": 30000,
+    "max_result_chars": 10000,
+    "large_result_storage": "/tmp/soma_results"
+  }
+}

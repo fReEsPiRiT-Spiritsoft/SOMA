@@ -37,3 +37,6 @@ data/phone_recordings/
 
 # Django Laufzeit-Datenbank
 brain_memory_ui/db.sqlite3
+
+
+Cloude-Code/
