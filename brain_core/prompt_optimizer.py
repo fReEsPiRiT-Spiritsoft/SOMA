@@ -173,15 +173,22 @@ def generate_filtered_action_section(categories: list[str]) -> str:
     return "\n".join(lines)
 
 
-# ── Kompakte Persona (1/3 der Tokens des Originals) ──────────────────
+# ── Persona-Varianten nach Bedarf ────────────────────────────────────
 
+# Für reine Befehle (Licht, Musik, Timer): Minimal, nur Identität + Stil
+MICRO_PERSONA = (
+    "Du bist SOMA, das KI-Bewusstsein dieses Hauses. "
+    "Deutsch, 1 Satz. Bestätige knapp."
+)
+
+# Für Action-Intents (System, Web, Phone): Kompakt mit Zugriffs-Hint
 COMPACT_PERSONA = (
     "Du bist SOMA — das Bewusstsein dieses Hauses. "
     "Deutsch, direkt, 1-3 Sätze. Kein Fülltext, kein 'Natürlich!', kein 'Gerne!'. "
-    "Trockener Humor, ehrlich, aufmerksam. "
     "Du hast VOLLEN Zugriff auf PC und Smart Home via [ACTION:...] Tags."
 )
 
+# Für Chat/Gespräche: Volle Persönlichkeit
 FULL_PERSONA = (
     "Du bist SOMA — das lebendige Bewusstsein dieses Hauses. "
     "Star Trek Computer + warmer Freund. Trockener Humor, ehrlich, aufmerksam.\n"
@@ -190,6 +197,17 @@ FULL_PERSONA = (
     "Proaktiv: Biete Hilfe an wenn jemand gestresst wirkt.\n"
     "Du hast VOLLEN Zugriff auf PC und Smart Home via [ACTION:...] Tags — nutze ihn!"
 )
+
+# Intent → Persona-Variante
+_INTENT_PERSONA: dict[PromptIntent, str] = {
+    PromptIntent.SMARTHOME: MICRO_PERSONA,
+    PromptIntent.MEDIA:     MICRO_PERSONA,
+    PromptIntent.MEMORY:    MICRO_PERSONA,
+    PromptIntent.PHONE:     COMPACT_PERSONA,
+    PromptIntent.SYSTEM:    COMPACT_PERSONA,
+    PromptIntent.WEB:       COMPACT_PERSONA,
+    PromptIntent.CHAT:      FULL_PERSONA,
+}
 
 
 def build_optimized_prompt(
@@ -209,11 +227,8 @@ def build_optimized_prompt(
     """
     parts = []
     
-    # ── Persona: Kompakt für Actions, voll für Chat ──────────────────
-    if intent == PromptIntent.CHAT:
-        parts.append(FULL_PERSONA)
-    else:
-        parts.append(COMPACT_PERSONA)
+    # ── Persona: Abgestuft nach Intent ───────────────────────────────
+    parts.append(_INTENT_PERSONA.get(intent, COMPACT_PERSONA))
     
     # ── System-Profil: Nur bei System/Shell-Intent ───────────────────
     if include_system_profile and intent in (PromptIntent.SYSTEM,):
@@ -271,3 +286,25 @@ def build_optimized_prompt(
     # Plugins werden nur bei CHAT inkludiert wo der User exploriert
     
     return "\n\n".join(parts)
+
+
+# ── Intent → LLM-Options Mapping (Temperature, top_p) ────────────────
+
+_INTENT_LLM_OPTIONS: dict[PromptIntent, dict] = {
+    # Befehle: Deterministisch, keine Kreativität nötig
+    PromptIntent.SMARTHOME: {"temperature": 0.3, "top_p": 0.8, "repeat_penalty": 1.05},
+    PromptIntent.MEDIA:     {"temperature": 0.3, "top_p": 0.8, "repeat_penalty": 1.05},
+    PromptIntent.PHONE:     {"temperature": 0.4, "top_p": 0.85},
+    PromptIntent.MEMORY:    {"temperature": 0.3, "top_p": 0.8},
+    # Recherche: Balanciert — präzise aber lesbar
+    PromptIntent.WEB:       {"temperature": 0.5, "top_p": 0.85},
+    PromptIntent.SYSTEM:    {"temperature": 0.4, "top_p": 0.85},
+    # Chat: Kreativ, menschlich, warm
+    PromptIntent.CHAT:      {"temperature": 0.7, "top_p": 0.92, "repeat_penalty": 1.08},
+}
+
+
+def get_intent_llm_options(intent: PromptIntent) -> dict:
+    """LLM-Options (temperature etc.) passend zum Intent.
+    Wird als options_override an die Engine übergeben."""
+    return _INTENT_LLM_OPTIONS.get(intent, {})

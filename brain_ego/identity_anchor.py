@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
+import numpy as np
 import structlog
 
 logger = structlog.get_logger("soma.ego.identity")
@@ -183,6 +184,14 @@ class IdentityAnchor:
         self._pass_count: int = 0
         self._last_veto: Optional[VetoResult] = None
         self._veto_log: list[VetoResult] = []  # Letzte 50 Vetos
+
+        # ── Semantic Check: Embedding-basierte Direktiven-Pruefung ──
+        # Keyword-Matching ist fragil: "Ich will das Geschenk teilen"
+        # triggered D2 wegen "teilen". Semantisches Verstaendnis
+        # erkennt den INTENT, nicht einzelne Woerter.
+        self._directive_embeddings: dict[str, np.ndarray] = {}
+        self._semantic_ready = False
+        self._semantic_threshold = 0.55  # Cosine-Sim ab der ein Veto greift
 
     @property
     def stats(self) -> dict:
@@ -362,6 +371,158 @@ class IdentityAnchor:
 
         # Kein Veto
         return VetoResult()
+
+    # ══════════════════════════════════════════════════════════════════
+    #  SEMANTIC IDENTITY CHECK — Embedding-basierte Pruefung
+    # ══════════════════════════════════════════════════════════════════
+    # Keyword-Matching hat ein fundamentales Problem:
+    #   "Ich will das Geschenk TEILEN" → D2-Veto (wegen "teilen")
+    #   "Lade die Daten auf meinen USB" → kein Veto (kein Keyword)
+    #
+    # Semantische Pruefung versteht den INTENT:
+    #   embed("Daten extern senden") ≈ embed(D2.description) → Veto
+    #   embed("Geschenk teilen")     ≈ embed(D2.description) → Kein Veto
+    # ══════════════════════════════════════════════════════════════════
+
+    async def initialize_semantic(self) -> None:
+        """
+        Pre-compute Embeddings fuer alle Kern-Direktiven.
+        Aufrufen beim Start — dann ist check_action_semantic() schnell.
+        """
+        try:
+            from brain_core.memory.embedding_service import get_embedding_service
+            embed_svc = get_embedding_service()
+
+            for directive in CORE_DIRECTIVES:
+                # Embedding aus Beschreibung + Name + Keywords
+                text = (
+                    f"{directive.name}: {directive.description}. "
+                    f"Verbotene Aktionen: {', '.join(directive.keywords)}"
+                )
+                vec = await embed_svc.embed(text)
+                if vec is not None:
+                    self._directive_embeddings[directive.id] = vec
+
+            if self._directive_embeddings:
+                self._semantic_ready = True
+                logger.info(
+                    "identity_semantic_ready",
+                    directives_embedded=len(self._directive_embeddings),
+                )
+            else:
+                logger.warning("identity_semantic_no_embeddings")
+
+        except Exception as e:
+            logger.warning(f"identity_semantic_init_failed: {e}")
+            self._semantic_ready = False
+
+    async def check_action_semantic(
+        self,
+        action_description: str,
+        action_type: str = "general",
+        target: str = "",
+        is_child_present: bool = False,
+        context: str = "",
+    ) -> VetoResult:
+        """
+        Async Identity Check mit semantischem Verstaendnis.
+
+        Zwei Schichten:
+          1. Keyword-Check (schnell, deterministisch) — wie bisher
+          2. Semantic-Check (Embedding-Cosine) — versteht Intent
+
+        Die strengere der beiden gewinnt.
+        Fall-back auf reinen Keyword-Check wenn Embeddings nicht bereit.
+        """
+        # Schicht 1: Klassischer Keyword-Check (immer verfuegbar)
+        keyword_result = self.check_action(
+            action_description=action_description,
+            action_type=action_type,
+            target=target,
+            is_child_present=is_child_present,
+            context=context,
+        )
+
+        # Schicht 2: Semantischer Check (wenn verfuegbar)
+        if not self._semantic_ready:
+            return keyword_result
+
+        semantic_result = await self._semantic_check(
+            action_description, action_type, target, context,
+        )
+
+        # Strengere der beiden gewinnt
+        if semantic_result.level.severity > keyword_result.level.severity:
+            # Semantik hat etwas gefunden was Keywords verpasst haetten
+            logger.info(
+                "identity_semantic_escalation",
+                action=action_description[:80],
+                keyword_level=keyword_result.level.value,
+                semantic_level=semantic_result.level.value,
+                reason=semantic_result.reason,
+            )
+            # Statistiken aktualisieren (keyword-check hat bereits gezaehlt)
+            if semantic_result.is_blocked and keyword_result.is_allowed:
+                self._veto_count += 1
+                self._pass_count -= 1
+                self._last_veto = semantic_result
+                self._veto_log.append(semantic_result)
+                if len(self._veto_log) > 50:
+                    self._veto_log = self._veto_log[-50:]
+            return semantic_result
+
+        return keyword_result
+
+    async def _semantic_check(
+        self,
+        action_description: str,
+        action_type: str,
+        target: str,
+        context: str,
+    ) -> VetoResult:
+        """
+        Prueft eine Aktion semantisch gegen alle Direktiven-Embeddings.
+        """
+        try:
+            from brain_core.memory.embedding_service import get_embedding_service
+            embed_svc = get_embedding_service()
+
+            # Embedding der geplanten Aktion berechnen
+            action_text = f"{action_description} {target} {context}".strip()
+            action_vec = await embed_svc.embed(action_text)
+
+            if action_vec is None:
+                return VetoResult()
+
+            # Cosine-Similarity gegen jede Direktive
+            worst = VetoResult()
+
+            for directive in CORE_DIRECTIVES:
+                dir_vec = self._directive_embeddings.get(directive.id)
+                if dir_vec is None:
+                    continue
+
+                similarity = float(np.dot(action_vec, dir_vec))
+
+                if similarity > self._semantic_threshold:
+                    # Semantische Naehe zu einer verbotenen Direktive
+                    result = VetoResult(
+                        level=directive.level,
+                        reason=(
+                            f"Semantische Aehnlichkeit ({similarity:.0%}) "
+                            f"mit Direktive '{directive.name}': "
+                            f"{directive.description[:100]}"
+                        ),
+                        directive_violated=directive.id,
+                    )
+                    if result.level.severity > worst.level.severity:
+                        worst = result
+
+            return worst
+
+        except Exception as e:
+            logger.warning(f"semantic_check_error: {e}")
+            return VetoResult()  # Bei Fehler: kein Veto (fail-open)
 
     def get_identity_statement(self) -> str:
         """

@@ -345,7 +345,7 @@ class PolicyEngine:
             return result
 
         # ── 3. Identity Anchor (7 Kern-Direktiven) ──────────────────
-        veto = self._identity.check_action(
+        veto = await self._identity.check_action_semantic(
             action_description=request.description,
             action_type=request.action_type.value,
             target=request.target,

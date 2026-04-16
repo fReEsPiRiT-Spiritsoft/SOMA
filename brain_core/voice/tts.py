@@ -423,16 +423,16 @@ class TTSEngine:
     @property
     def is_speaking(self) -> bool:
         """
-        Vision #10: Watchdog von 30s auf 5s reduziert.
-        Piper-Synthese + aplay dauert bei normalen Sätzen max 2-3s.
-        30s war viel zu lang — ein Stuck-State blockierte das ganze System.
+        Watchdog: 60s Limit — lange Antworten können 10-15s Sprechzeit haben.
+        5s war zu kurz → bei langen Antworten wurde _speaking fälschlich
+        zurückgesetzt, Mikro ging auf und STT hörte Somas eigene Stimme.
         """
         if self._speaking and hasattr(self, '_speaking_since'):
             stuck_seconds = time.monotonic() - self._speaking_since
-            if stuck_seconds > 5:
+            if stuck_seconds > 60:
                 logger.warning("tts_speaking_stuck_reset",
                                stuck_s=round(stuck_seconds, 1),
-                               msg="Watchdog: 5s Limit erreicht → Reset")
+                               msg="Watchdog: 60s Limit erreicht → Reset")
                 self._speaking = False
         return self._speaking
 

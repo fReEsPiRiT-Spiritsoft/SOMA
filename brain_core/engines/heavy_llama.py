@@ -166,15 +166,20 @@ class HeavyLlamaEngine(BaseEngine):
             messages.append({"role": "user", "content": prompt})
 
         # Basis-Options + optionaler Override (z.B. temperature=0.1 für Code-Generierung)
-        # SPEED: num_ctx=8192 statt 16384 — spart ~40% VRAM, schnellerer Prompt-Eval.
-        # Voice-Konversation braucht selten mehr. Plugin-Generierung kann überschreiben.
+        # num_ctx=8192: Optimierter Prompt (~600 Tokens) + History + Thinking braucht Platz.
         ollama_options = {
             "num_ctx": 8192,
             "temperature": 0.65,     # Menschlicher! 0.4 war zu robotisch/vorhersagbar
             "top_p": 0.9,            # Breiteres Vokabular für natürliche Sprache
             "repeat_penalty": 1.08,   # Subtiler — 1.15 erzeugt unnatürliche Wortvermeidung
         }
+
+        # think-Flag: Default AN für saubere Antworten.
+        # options_override kann "_think": False setzen für schnelle Befehle.
+        use_thinking = True
         if options_override:
+            if "_think" in options_override:
+                use_thinking = options_override.pop("_think")
             ollama_options.update(options_override)
 
         # Ollama API Call
@@ -185,9 +190,8 @@ class HeavyLlamaEngine(BaseEngine):
                 "stream": False,
                 "keep_alive": settings.ollama_heavy_keep_alive,
                 "options": ollama_options,
+                "think": use_thinking,
             }
-            # Hinweis: Gemma4 Thinking wird über System-Prompt (<|think|>) gesteuert,
-            # nicht über den 'think' API-Parameter (dieser ist Qwen3-spezifisch).
             resp = await self._client.post("/api/chat", json=payload)
             resp.raise_for_status()
             data = resp.json()
@@ -256,7 +260,12 @@ class HeavyLlamaEngine(BaseEngine):
             "top_p": 0.9,            # Breiteres Vokabular für natürliche Sprache
             "repeat_penalty": 1.08,   # Subtiler — 1.15 erzeugt unnatürliche Wortvermeidung
         }
+
+        # think-Flag: Default AN für saubere Antworten.
+        use_thinking = True
         if options_override:
+            if "_think" in options_override:
+                use_thinking = options_override.pop("_think")
             ollama_options.update(options_override)
 
         payload = {
@@ -265,6 +274,7 @@ class HeavyLlamaEngine(BaseEngine):
             "stream": True,
             "keep_alive": settings.ollama_heavy_keep_alive,
             "options": ollama_options,
+            "think": use_thinking,
         }
 
         full_response = ""
@@ -272,6 +282,7 @@ class HeavyLlamaEngine(BaseEngine):
         is_user = session_id is not None
         if is_user:
             self._user_generating = True
+
         try:
             async with self._client.stream(
                 "POST", "/api/chat", json=payload, timeout=120.0
@@ -287,10 +298,14 @@ class HeavyLlamaEngine(BaseEngine):
                         continue
                     if chunk.get("done"):
                         break
+                    # Mit think:true liefert Ollama thinking-Tokens in
+                    # message.thinking (content ist leer). Wir yielden
+                    # NUR echte content-Tokens → sauberer Output.
                     token = chunk.get("message", {}).get("content", "")
-                    if token:
-                        full_response += token
-                        yield token
+                    if not token:
+                        continue
+                    full_response += token
+                    yield token
         finally:
             self._is_generating = False
             if is_user:

@@ -147,6 +147,7 @@ class STTEngine:
             word_timestamps=False,
             condition_on_previous_text=False,  # Anti-Halluzination
             without_timestamps=True,  # Keine Timestamps nötig = schneller
+            initial_prompt="SOMA ist eine KI die ein Haus bewohnt. SOMA, Soma.",
         )
 
         # Segmente sammeln
@@ -326,6 +327,7 @@ class STTEngine:
             ),
             word_timestamps=False,
             condition_on_previous_text=False,
+            initial_prompt="SOMA ist eine KI die ein Haus bewohnt. SOMA, Soma.",
         )
 
         text_parts: list[str] = []

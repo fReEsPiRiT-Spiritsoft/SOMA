@@ -189,6 +189,11 @@ class VoicePipeline:
         }
         # Evolution Lab: Pending Plugin-Test nach Generierung
         self._pending_plugin_test: Optional[str] = None
+
+        # Post-TTS Cooldown: VAD-Reset + kurze Stille nach Sprachausgabe
+        # Verhindert dass STT Somas eigene Stimme nach dem Sprechen aufnimmt
+        self._soma_was_speaking: bool = False
+        self._soma_spoke_until: float = 0.0
         
         # Conversation Memory: Eine persistente Session für Voice
         # Soma erinnert sich an alles was in dieser Session besprochen wurde
@@ -407,7 +412,20 @@ class VoicePipeline:
 
             # Self-Mute: Wenn Soma gerade spricht, nicht zuhören
             # (verhindert Feedback-Loop)
-            if self.tts.is_speaking:
+            soma_speaking_now = self.tts.is_speaking
+            if soma_speaking_now:
+                self._soma_was_speaking = True
+                continue
+
+            # Post-TTS Cooldown: Gerade aufgehört zu sprechen?
+            # → VAD-Buffer flushen + 400ms Stille abwarten damit Echo abklingt
+            if self._soma_was_speaking:
+                self._soma_was_speaking = False
+                self.vad.reset()
+                self._soma_spoke_until = time.monotonic()
+                logger.debug("tts_post_mute_start", cooldown_ms=400)
+
+            if time.monotonic() - self._soma_spoke_until < 0.4:
                 continue
 
             # VAD: Ist das Sprache?

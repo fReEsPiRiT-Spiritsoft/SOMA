@@ -40,3 +40,8 @@ brain_memory_ui/db.sqlite3
 
 
 Cloude-Code/
+.logs/
+.pids/
+.pytest_cache/
+.soma_first_run_done
+data/phone_sounds/

@@ -311,7 +311,7 @@ class LogicRouter:
         # Analysiert den User-Prompt und baut nur die nötigen Sektionen ein.
         # Spart 50-75% Tokens → proportional schnellere Prompt-Eval.
         try:
-            from brain_core.prompt_optimizer import classify_intent, build_optimized_prompt
+            from brain_core.prompt_optimizer import classify_intent, build_optimized_prompt, get_intent_llm_options
             intent = classify_intent(request.prompt)
             system_prompt = build_optimized_prompt(
                 intent=intent,
@@ -319,6 +319,8 @@ class LogicRouter:
                 is_child=request.is_child,
                 room_id=request.room_id,
             )
+            # Intent-basierte LLM-Options (Temperature etc.)
+            intent_options = get_intent_llm_options(intent)
             # Dynamic context dazu (Bewusstsein, Emotionen, Memory)
             dynamic = self._build_dynamic_context(request)
             if dynamic:
@@ -331,6 +333,7 @@ class LogicRouter:
         except Exception as opt_err:
             logger.warning("prompt_optimizer_fallback", error=str(opt_err))
             system_prompt = self._build_system_prompt(request) + plugin_context
+            intent_options = {}  # Fallback: Standard-Optionen
 
         # Wenn Nano schon den Action-Tag gefeuert hat:
         # Heavy soll NUR die menschliche Bestätigung generieren, KEINE Tags!
@@ -351,6 +354,7 @@ class LogicRouter:
                 prompt=request.prompt,
                 system_prompt=system_prompt,
                 session_id=request.session_id,
+                options_override=intent_options or None,
             )
 
             # ── Action-Tag Post-Processing ───────────────────────────
@@ -510,38 +514,44 @@ class LogicRouter:
 
         # ── Intent-basierter Prompt-Optimizer (Stream) ────────────────────
         try:
-            from brain_core.prompt_optimizer import classify_intent, build_optimized_prompt
+            from brain_core.prompt_optimizer import classify_intent, build_optimized_prompt, get_intent_llm_options
             intent = classify_intent(request.prompt)
-            optimized_prompt = build_optimized_prompt(
+            optimized_static = build_optimized_prompt(
                 intent=intent,
                 request_metadata=request.metadata,
                 is_child=request.is_child,
                 room_id=request.room_id,
             )
+            intent_options = get_intent_llm_options(intent)
             dynamic = self._build_dynamic_context(request)
-            if dynamic:
-                optimized_prompt += "\n\n" + dynamic
             if plugin_context.strip():
-                optimized_prompt += "\n\n" + plugin_context
+                optimized_static += "\n\n" + plugin_context
             logger.info("stream_prompt_optimized", intent=intent.value,
-                        prompt_chars=len(optimized_prompt))
+                        prompt_chars=len(optimized_static))
         except Exception as opt_err:
             logger.warning("stream_prompt_optimizer_fallback", error=str(opt_err))
-            optimized_prompt = self._build_system_prompt(request)
+            optimized_static = self._build_static_prompt(request)
+            dynamic = self._build_dynamic_context(request)
+            intent_options = {}  # Fallback: Standard-Optionen
             if plugin_context.strip():
-                optimized_prompt += plugin_context
+                optimized_static += plugin_context
 
         # ── KV-Cache Split Prompt (Phase E AKTIVIERT) ────────────────────
         # Statischer Prompt → KV-Cache Hit, dynamischer → separat.
+        # WICHTIG: Nutze den OPTIMIERTEN Prompt, nicht _build_static_prompt!
+        # Der Full-Prompt ist ~8000 Zeichen und frisst den Context Window.
+        # Der optimierte Prompt ist ~2000 Zeichen → mehr Platz für History + Thinking.
         if hasattr(engine, 'get_or_create_session') and request.session_id:
             session = engine.get_or_create_session(
                 request.session_id,
-                system_prompt=optimized_prompt,
+                system_prompt=optimized_static,
             )
-            self._apply_split_prompt_to_session(request, session, plugin_context)
+            session.set_split_prompt(optimized_static, dynamic or "")
             system_prompt = None
         else:
-            system_prompt = optimized_prompt
+            system_prompt = optimized_static
+            if dynamic:
+                system_prompt += "\n\n" + dynamic
 
         # Wenn Nano schon den Action-Tag gefeuert hat:
         # Heavy soll NUR die menschliche Bestätigung generieren, KEINE Tags!
@@ -571,6 +581,7 @@ class LogicRouter:
                 prompt=request.prompt,
                 system_prompt=system_prompt,
                 session_id=request.session_id,
+                options_override=intent_options or None,
             ):
                 now = time.monotonic()
                 if first_token_time is None:

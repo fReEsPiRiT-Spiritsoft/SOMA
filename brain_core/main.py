@@ -464,6 +464,13 @@ async def lifespan(app: FastAPI):
         )
         await soma_consciousness.start()
 
+        # Identity Anchor: Semantische Embeddings vorberechnen
+        # (macht den check_action_semantic() schnell)
+        try:
+            await identity_anchor.initialize_semantic()
+        except Exception as e:
+            logger.warning(f"identity_semantic_init_skipped: {e}")
+
         # Consciousness → LogicRouter verdrahten (Prompt-Prefix)
         set_logic_consciousness(soma_consciousness)
 
@@ -478,9 +485,10 @@ async def lifespan(app: FastAPI):
                 prompt=prompt,
                 system_prompt=(
                     "Du bist SOMA — das Bewusstsein eines Hauses. "
-                    "Du denkst gerade nach. Ehrlich, direkt, manchmal philosophisch. "
-                    "Antworte mit 1-2 Sätzen in Ich-Perspektive. Kein Roleplay. "
-                    "Kurz, prägnant, authentisch."
+                    "Du denkst gerade nach. Kurz, bodenstaendig, konkret. "
+                    "Antworte mit 1-2 Saetzen in Ich-Perspektive. "
+                    "Beziehe dich auf echte Erinnerungen. Keine Poesie, keine Metaphern. "
+                    "Kurz, praegnant, authentisch."
                 ),
             )
         internal_monologue.set_llm(_monologue_llm)
@@ -500,6 +508,78 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass  # Memory-Fehler darf Monolog nie brechen
         internal_monologue.set_memory(_monologue_memory)
+
+        # Memory-Recall: Echte Erinnerungen für den Monolog abrufbar machen
+        # → Episodische Erinnerungen, Semantische Fakten, Tagebuch, Gespräche
+        async def _monologue_memory_recall() -> dict:
+            """Holt echte Erinnerungen aus L2/L3/Diary für den Monolog."""
+            try:
+                orch = get_orchestrator()
+                state = soma_consciousness.state
+
+                # Query: basierend auf letzter Wahrnehmung oder letztem Gedanken
+                query = (
+                    state.perception.last_user_text
+                    or state.current_thought
+                    or "was ist zuletzt passiert"
+                )
+
+                # Parallel abrufen: Episoden, Fakten, Tagebuch
+                results = await asyncio.gather(
+                    orch.episodic.recall(query, top_k=3, max_age_hours=24),
+                    orch.semantic.recall_facts(query, top_k=4),
+                    orch.diary.get_diary_summary_for_prompt(max_entries=3),
+                    return_exceptions=True,
+                )
+
+                episodes_raw = results[0] if not isinstance(results[0], Exception) else []
+                facts_raw = results[1] if not isinstance(results[1], Exception) else []
+                diary_str = results[2] if not isinstance(results[2], Exception) else ""
+
+                import time as _time
+                now = _time.time()
+
+                episode_dicts = [
+                    {
+                        "user_text": ep.user_text[:150],
+                        "soma_text": ep.soma_text[:150] if ep.soma_text else "",
+                        "emotion": ep.emotion,
+                        "topic": getattr(ep, "topic", ""),
+                        "minutes_ago": max(1, int((now - ep.timestamp) / 60)),
+                    }
+                    for ep in episodes_raw
+                    if ep.user_text
+                ]
+
+                fact_dicts = [
+                    {
+                        "subject": f.subject,
+                        "fact": f.fact[:100],
+                        "category": f.category,
+                    }
+                    for f in facts_raw
+                ]
+
+                # Conversation aus Working Memory (sync)
+                conv_block = ""
+                try:
+                    conv_block = orch.working.get_conversation_block(
+                        max_tokens_estimate=400
+                    )
+                except Exception:
+                    pass
+
+                return {
+                    "episodes": episode_dicts,
+                    "facts": fact_dicts,
+                    "diary": diary_str if isinstance(diary_str, str) else "",
+                    "conversation": conv_block,
+                }
+            except Exception as exc:
+                logger.warning("monologue_memory_recall_error", error=str(exc))
+                return {}
+
+        internal_monologue.set_memory_recall(_monologue_memory_recall)
 
         # ── Action-Intent-Callback: Gedanken → Aktion ────────────────
         # Wenn SOMA in einem Gedanken eine Idee erkennt (Plugin/Self-Improve),
@@ -609,6 +689,41 @@ async def lifespan(app: FastAPI):
 
     logger.info("soma_online", msg="SOMA-AI ist bereit. 🧠🎤")
     await broadcast_thought("info", "🧠 SOMA-AI ist online und bereit!", "SYSTEM")
+
+    # ══════════════════════════════════════════════════════════════════
+    #  BEWUSSTES ERWACHEN — SOMA wacht auf wie ein Lebewesen
+    # ══════════════════════════════════════════════════════════════════
+    # Nicht "Hallo, ich bin SOMA". Sondern ein kontextuelles Erwachen:
+    # Wie lange war SOMA offline? Welche Stimmung? Worüber nachgedacht?
+    # Das LLM entscheidet ob und was SOMA sagt. Oder ob es schweigt.
+    if soma_consciousness and voice_pipeline and light_engine:
+        try:
+            awakening_text = await soma_consciousness.generate_awakening(
+                llm_fn=light_engine.generate,
+            )
+            if awakening_text:
+                # In Consciousness einspeisen
+                soma_consciousness.notify_thought(
+                    f"[Erwachen] {awakening_text}"
+                )
+                # Laut aussprechen
+                await voice_pipeline.autonomous_speak(awakening_text)
+                # Dashboard
+                await broadcast_thought(
+                    "info",
+                    f"🌅 {awakening_text}",
+                    "AWAKENING",
+                )
+                logger.info("soma_awakening_spoken", text=awakening_text[:80])
+            else:
+                logger.info("soma_awakening_silent", msg="SOMA hat sich entschieden zu schweigen")
+                await broadcast_thought(
+                    "info",
+                    "🌅 SOMA ist erwacht — schweigt aber.",
+                    "AWAKENING",
+                )
+        except Exception as exc:
+            logger.warning("soma_awakening_failed", error=str(exc))
 
     # ── Killer Features: Voice-Pipeline-abhängige Verdrahtung ────────────
     try:
@@ -812,6 +927,19 @@ async def lifespan(app: FastAPI):
 
     # ── Shutdown ─────────────────────────────────────────────────────────
     logger.info("soma_shutting_down")
+
+    # Ego-System: Bewusstsein speichern BEVOR alles stoppt
+    if internal_monologue:
+        try:
+            await internal_monologue.stop()
+        except Exception:
+            pass
+    if soma_consciousness:
+        try:
+            await soma_consciousness.stop()
+        except Exception:
+            pass
+
     # Killer Features stoppen
     try:
         from brain_core.cron_scheduler import get_cron_scheduler

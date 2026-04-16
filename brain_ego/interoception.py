@@ -150,10 +150,27 @@ class Interoception:
     EXHAUSTION_WINDOW_SEC = 300.0    # 5 Minuten Fenster
     EXHAUSTION_THRESHOLD = 0.5       # Avg Arousal > 0.5 → Erschoepfung
 
+    # ── Habituation: Gewoehnung an konstante Reize ───────────────────
+    # Wie beim Menschen: konstanter Laerm wird nach einer Weile
+    # nicht mehr wahrgenommen. Nur AENDERUNGEN erzeugen Reaktion.
+    HABITUATION_WINDOW_SEC = 300.0   # 5 Minuten Beobachtungs-Fenster
+    HABITUATION_STABILITY = 0.08     # Std-Dev < 8% = stabil
+    HABITUATION_DAMPENING = 0.35     # Max 35% Dampening bei voller Gewoehnung
+    HABITUATION_MIN_SAMPLES = 5      # Mindestens 5 Messungen fuer Berechnung
+
     def __init__(self):
         self._history: deque[tuple[float, float]] = deque()  # (timestamp, arousal)
         self._last_vector = SomaEmotionalVector()
         self._boot_time = time.monotonic()
+
+        # ── Habituation Tracking ─────────────────────────────────────
+        # Pro Metrik: deque mit (timestamp, value) Paaren
+        self._metric_history: dict[str, deque[tuple[float, float]]] = {
+            "cpu": deque(maxlen=60),
+            "vram": deque(maxlen=60),
+            "ram": deque(maxlen=60),
+            "temp": deque(maxlen=60),
+        }
 
     @property
     def current(self) -> SomaEmotionalVector:
@@ -196,6 +213,24 @@ class Interoception:
         vec.physical_stress = self._sigmoid_map(
             temp, self.TEMP_STRESS_START, self.TEMP_STRESS_PEAK
         )
+
+        # ── 4b. HABITUATION: Gewoehnung an konstante Reize ─────────
+        # Wenn ein Metrik-Wert sich kaum aendert (Std-Dev < Threshold),
+        # dampft die emotionale Reaktion ab. Nur AENDERUNGEN erregen.
+        self._metric_history["cpu"].append((now, cpu))
+        self._metric_history["vram"].append((now, vram))
+        self._metric_history["ram"].append((now, ram))
+        self._metric_history["temp"].append((now, temp))
+
+        hab_cpu = self._habituation_factor("cpu", now)
+        hab_vram = self._habituation_factor("vram", now)
+        hab_ram = self._habituation_factor("ram", now)
+        hab_temp = self._habituation_factor("temp", now)
+
+        vec.frustration *= hab_cpu
+        vec.congestion *= hab_vram
+        vec.survival_anxiety *= hab_ram
+        vec.physical_stress *= hab_temp
 
         # ── 5. Positive Zustaende (Inverse) ────────────────────────
         # Calm: Wenn alles unter 40%
@@ -289,6 +324,46 @@ class Interoception:
         # Sigmoid-aehnliche Kurve (smooth)
         # 3x^2 - 2x^3 (Hermite-Interpolation)
         return normalized * normalized * (3.0 - 2.0 * normalized)
+
+    def _habituation_factor(self, metric_key: str, now: float) -> float:
+        """
+        Berechnet den Habituation-Dampening-Faktor fuer eine Metrik.
+
+        Returns:
+            1.0 = keine Gewoehnung (volle Reaktion)
+            0.65 = maximale Gewoehnung (35% Dampening)
+
+        Logik:
+          - Sammle Werte der letzten HABITUATION_WINDOW_SEC
+          - Berechne Standardabweichung
+          - Je niedriger die Std-Dev, desto stabiler der Reiz
+          - Stabiler Reiz → Dampening → geringere emotionale Reaktion
+        """
+        history = self._metric_history.get(metric_key)
+        if not history:
+            return 1.0
+
+        cutoff = now - self.HABITUATION_WINDOW_SEC
+        recent = [v for ts, v in history if ts > cutoff]
+
+        if len(recent) < self.HABITUATION_MIN_SAMPLES:
+            return 1.0  # Zu wenig Daten — keine Gewoehnung
+
+        # Standardabweichung berechnen
+        mean = sum(recent) / len(recent)
+        variance = sum((v - mean) ** 2 for v in recent) / len(recent)
+        std_dev = variance ** 0.5
+
+        # Normalisieren: Wie stabil ist der Reiz?
+        # std_dev < HABITUATION_STABILITY → volle Gewoehnung
+        # std_dev > HABITUATION_STABILITY * 3 → keine Gewoehnung
+        if std_dev >= self.HABITUATION_STABILITY * 3:
+            return 1.0  # Hohe Varianz — keine Habituation
+
+        stability = 1.0 - min(1.0, std_dev / (self.HABITUATION_STABILITY * 3))
+        dampening = stability * self.HABITUATION_DAMPENING
+
+        return 1.0 - dampening
 
     def get_uptime_feeling(self) -> str:
         """Wie lange SOMA schon 'wach' ist — beeinflusst Erschoepfung."""

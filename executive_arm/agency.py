@@ -273,7 +273,7 @@ class SomaAgent:
 
         try:
             # ── 1. IDENTITY CHECK — Darf SOMA dieses Ziel verfolgen? ─
-            veto = self._identity.check_action(
+            veto = await self._identity.check_action_semantic(
                 action_description=goal,
                 action_type="agent_goal",
                 context="Agent will autonom handeln",
