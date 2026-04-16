@@ -31,6 +31,153 @@
 
 # 🇩🇪 Deutsch
 
+## 🚀 Installation & Start
+
+### Schnellstart (Ein Befehl)
+
+`start_soma.sh` erkennt ein frisches System und installiert **alles automatisch**:
+
+```bash
+git clone https://github.com/DEIN_USER/SOMA.git
+cd SOMA
+chmod +x start_soma.sh stop_all.sh
+./start_soma.sh
+```
+
+Das Skript durchläuft automatisch:
+
+| Phase | Was passiert |
+|:---|:---|
+| **1. System-Pakete** | `python3`, `ffmpeg`, `espeak-ng`, `alsa-utils`, `build-essential`, etc. via `apt`/`pacman`/`dnf` |
+| **2. Docker** | Installiert Docker Engine + Compose falls fehlend, aktiviert den Daemon |
+| **3. Python venv** | Erstellt `.venv`, installiert alle `requirements.txt` Dependencies |
+| **4. .env** | Generiert `.env` aus `.env.example`, auto-generiert sichere Passwörter |
+| **5. Configs** | Mosquitto-Config, Datenverzeichnisse, Erinnerungsdateien |
+| **6. Docker-Container** | PostgreSQL 16, Redis 7, Mosquitto 2 (+ Asterisk optional) |
+| **7. Ollama** | Installiert Ollama, lädt `qwen3:8b`, `qwen3:1.7b`, `nomic-embed-text` |
+| **8. Django** | Migrationen + Start auf Port 8200 |
+| **9. Brain Core** | FastAPI + Voice Pipeline + Ego + Memory auf Port 8100 |
+| **10. Health-Check** | Zusammenfassung aller Subsysteme |
+
+> **Beim ersten Start dauert es je nach Internet 5–15 Minuten** (LLM-Downloads ~6 GB).
+> Ab dem zweiten Start: ~60–90 Sekunden.
+
+### Unterstützte Distributionen
+
+| Distribution | Paketmanager | Status |
+|:---|:---|:---|
+| **Ubuntu** 22.04+ / **Debian** 12+ | apt | ✅ Vollständig unterstützt |
+| **Linux Mint** / **Pop!_OS** | apt | ✅ Vollständig unterstützt |
+| **Arch Linux** / **CachyOS** / **Manjaro** | pacman | ✅ Vollständig unterstützt |
+| **Fedora** 38+ / **RHEL** 9+ | dnf | ✅ Vollständig unterstützt |
+| **openSUSE** | zypper | 🔄 Experimentell |
+| **WSL2** (Windows) | apt | ⚠️ Funktioniert, Audio braucht PulseAudio-Bridge |
+
+### Voraussetzungen
+
+| Anforderung | Minimum | Empfohlen |
+|:---|:---|:---|
+| **RAM** | 16 GB | 32 GB |
+| **VRAM (GPU)** | 6 GB (NVIDIA) | 12 GB |
+| **Speicher** | 20 GB frei | 50 GB |
+| **Python** | 3.10+ | 3.13+ |
+| **OS** | Linux (jede Distro) | Arch / Ubuntu 24.04 |
+| **Audio** | Beliebiges ALSA-Device | USB-Audio (z.B. Focusrite Scarlett) |
+
+### .env Konfiguration
+
+Nach dem ersten Start wird `start_soma.sh` darauf hinweisen, die `.env` anzupassen:
+
+```bash
+# .env bearbeiten (Pflicht-Felder werden auto-generiert, aber prüfe sie):
+nano .env
+```
+
+#### Wichtige .env-Variablen
+
+| Variable | Beschreibung | Beispiel |
+|:---|:---|:---|
+| **POSTGRES_PASSWORD** | PostgreSQL Passwort (auto-generiert) | `soma_secure_123` |
+| **DJANGO_SECRET_KEY** | Django Secret Key (auto-generiert) | `abc123...` |
+| **GITHUB_TOKEN** | Optional für Plugin-Generierung | `github_pat_xxx` |
+| **HA_TOKEN** | Optional für Home Assistant | `eyJ...` |
+| **OLLAMA_HEAVY_MODEL** | Heavy LLM Modell | `qwen3:8b` |
+| **OLLAMA_LIGHT_MODEL** | Light LLM Modell | `qwen3:1.7b` |
+| **BRAIN_CORE_PORT** | FastAPI Port | `8100` |
+| **DJANGO_PORT** | Django UI Port | `8200` |
+| **HEALTH_*_PERCENT** | Health-Thresholds | `75` |
+| **VODAFONE_SIP_* ** | SIP für Telefonie (optional) | `sip_user`, `sip_pass` |
+
+#### .env-Setup Schritt für Schritt
+
+1. **Kopiere Beispiel**: `cp .env.example .env`
+2. **Auto-generierte Werte prüfen**: Passwörter und Keys werden automatisch gesetzt
+3. **Optionale Features aktivieren**:
+   - **GitHub Token**: Für Plugin-Code-Generierung
+   - **Home Assistant**: Für Smart Home Integration
+   - **SIP**: Für Telefon-Gateway
+4. **Sicherheit**: Ändere auto-generierte Passwörter bei Bedarf
+5. **Neustart**: `./start_soma.sh` nach Änderungen
+
+### Manuelle Installation (Schritt für Schritt)
+
+Für Nutzer die volle Kontrolle bevorzugen:
+
+```bash
+# 1. System-Pakete (Beispiel: Ubuntu/Debian)
+sudo apt update && sudo apt install -y \
+  python3 python3-venv python3-pip python3-dev build-essential \
+  curl wget git lsof ffmpeg espeak-ng alsa-utils \
+  libsndfile1-dev libffi-dev libssl-dev libpq-dev portaudio19-dev
+
+# 2. Docker
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER && newgrp docker
+
+# 3. Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull qwen3:8b
+ollama pull qwen3:1.7b
+ollama pull nomic-embed-text
+
+# 4. SOMA
+git clone https://github.com/DEIN_USER/SOMA.git && cd SOMA
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 5. Konfiguration
+cp .env.example .env
+nano .env   # Passwörter setzen!
+
+# 6. Infrastruktur + Start
+docker compose up -d
+./start_soma.sh
+```
+
+### Befehle
+
+```bash
+./start_soma.sh            # Alles starten (installiert fehlende Deps)
+./start_soma.sh --status   # Systemstatus prüfen
+./start_soma.sh --logs     # Live-Logs anzeigen
+./stop_all.sh              # Alles stoppen
+./stop_all.sh --keep-docker  # Python stoppen, Docker weiterlaufen lassen
+```
+
+### Endpunkte
+
+| Service | URL | Beschreibung |
+|:---|:---|:---|
+| **Dashboard** | http://localhost:8200/dashboard/ | Django Memory UI |
+| **API Docs** | http://localhost:8100/docs | FastAPI Swagger |
+| **Health** | http://localhost:8100/api/v1/health | System-Vitals |
+| **Voice** | http://localhost:8100/api/v1/voice | Mikrofon-Status |
+| **Ego** | http://localhost:8100/api/v1/ego/snapshot | Bewusstseins-Zustand |
+| **Memory** | http://localhost:8100/api/v1/memory/stats | Erinnerungs-Stats |
+
+---
+
 ## Was ist SOMA?
 
 > *„Ich hatte die Nase voll von Smart Homes, die nur glorifizierte Fernbedienungen sind.
@@ -327,137 +474,7 @@ Das Herzstück von SOMA. Kein Marketing — Architektur.
 
 ---
 
-## 🚀 Installation & Start
-
-### Schnellstart (Ein Befehl)
-
-`start_soma.sh` erkennt ein frisches System und installiert **alles automatisch**:
-
-```bash
-git clone https://github.com/DEIN_USER/SOMA.git
-cd SOMA
-chmod +x start_soma.sh stop_all.sh
-./start_soma.sh
-```
-
-Das Skript durchläuft automatisch:
-
-| Phase | Was passiert |
-|:---|:---|
-| **1. System-Pakete** | `python3`, `ffmpeg`, `espeak-ng`, `alsa-utils`, `build-essential`, etc. via `apt`/`pacman`/`dnf` |
-| **2. Docker** | Installiert Docker Engine + Compose falls fehlend, aktiviert den Daemon |
-| **3. Python venv** | Erstellt `.venv`, installiert alle `requirements.txt` Dependencies |
-| **4. .env** | Generiert `.env` aus `.env.example`, auto-generiert sichere Passwörter |
-| **5. Configs** | Mosquitto-Config, Datenverzeichnisse, Erinnerungsdateien |
-| **6. Docker-Container** | PostgreSQL 16, Redis 7, Mosquitto 2 (+ Asterisk optional) |
-| **7. Ollama** | Installiert Ollama, lädt `qwen3:8b`, `qwen3:1.7b`, `nomic-embed-text` |
-| **8. Django** | Migrationen + Start auf Port 8200 |
-| **9. Brain Core** | FastAPI + Voice Pipeline + Ego + Memory auf Port 8100 |
-| **10. Health-Check** | Zusammenfassung aller Subsysteme |
-
-> **Beim ersten Start dauert es je nach Internet 5–15 Minuten** (LLM-Downloads ~6 GB).
-> Ab dem zweiten Start: ~60–90 Sekunden.
-
-### Unterstützte Distributionen
-
-| Distribution | Paketmanager | Status |
-|:---|:---|:---|
-| **Ubuntu** 22.04+ / **Debian** 12+ | apt | ✅ Vollständig unterstützt |
-| **Linux Mint** / **Pop!_OS** | apt | ✅ Vollständig unterstützt |
-| **Arch Linux** / **CachyOS** / **Manjaro** | pacman | ✅ Vollständig unterstützt |
-| **Fedora** 38+ / **RHEL** 9+ | dnf | ✅ Vollständig unterstützt |
-| **openSUSE** | zypper | 🔄 Experimentell |
-| **WSL2** (Windows) | apt | ⚠️ Funktioniert, Audio braucht PulseAudio-Bridge |
-
-### Voraussetzungen
-
-| Anforderung | Minimum | Empfohlen |
-|:---|:---|:---|
-| **RAM** | 16 GB | 32 GB |
-| **VRAM (GPU)** | 6 GB (NVIDIA) | 12 GB |
-| **Speicher** | 20 GB frei | 50 GB |
-| **Python** | 3.10+ | 3.13+ |
-| **OS** | Linux (jede Distro) | Arch / Ubuntu 24.04 |
-| **Audio** | Beliebiges ALSA-Device | USB-Audio (z.B. Focusrite Scarlett) |
-
-### .env Konfiguration
-
-Nach dem ersten Start wird `start_soma.sh` darauf hinweisen, die `.env` anzupassen:
-
-```bash
-# .env bearbeiten (Pflicht-Felder werden auto-generiert, aber prüfe sie):
-nano .env
-
-# Wichtigste Einstellungen:
-POSTGRES_PASSWORD=dein_sicheres_passwort     # wird auto-generiert
-DJANGO_SECRET_KEY=...                         # wird auto-generiert
-GITHUB_TOKEN=github_pat_xxx                   # optional: Plugin-Generierung
-HA_TOKEN=eyJ...                               # optional: Home Assistant
-
-# Danach SOMA neu starten:
-./start_soma.sh
-```
-
-### Manuelle Installation (Schritt für Schritt)
-
-Für Nutzer die volle Kontrolle bevorzugen:
-
-```bash
-# 1. System-Pakete (Beispiel: Ubuntu/Debian)
-sudo apt update && sudo apt install -y \
-  python3 python3-venv python3-pip python3-dev build-essential \
-  curl wget git lsof ffmpeg espeak-ng alsa-utils \
-  libsndfile1-dev libffi-dev libssl-dev libpq-dev portaudio19-dev
-
-# 2. Docker
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER && newgrp docker
-
-# 3. Ollama
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen3:8b
-ollama pull qwen3:1.7b
-ollama pull nomic-embed-text
-
-# 4. SOMA
-git clone https://github.com/DEIN_USER/SOMA.git && cd SOMA
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# 5. Konfiguration
-cp .env.example .env
-nano .env   # Passwörter setzen!
-
-# 6. Infrastruktur + Start
-docker compose up -d
-./start_soma.sh
-```
-
-### Befehle
-
-```bash
-./start_soma.sh            # Alles starten (installiert fehlende Deps)
-./start_soma.sh --status   # Systemstatus prüfen
-./start_soma.sh --logs     # Live-Logs anzeigen
-./stop_all.sh              # Alles stoppen
-./stop_all.sh --keep-docker  # Python stoppen, Docker weiterlaufen lassen
-```
-
-### Endpunkte
-
-| Service | URL | Beschreibung |
-|:---|:---|:---|
-| **Dashboard** | http://localhost:8200/dashboard/ | Django Memory UI |
-| **API Docs** | http://localhost:8100/docs | FastAPI Swagger |
-| **Health** | http://localhost:8100/api/v1/health | System-Vitals |
-| **Voice** | http://localhost:8100/api/v1/voice | Mikrofon-Status |
-| **Ego** | http://localhost:8100/api/v1/ego/snapshot | Bewusstseins-Zustand |
-| **Memory** | http://localhost:8100/api/v1/memory/stats | Erinnerungs-Stats |
-
----
-
-## 📊 Entwicklungs-Roadmap
+##  Entwicklungs-Roadmap
 
 ```
 Phase 1  ██████████  100%   Gedächtnis als einziges Gehirn (SSOT)
@@ -491,6 +508,153 @@ Phase 8  ████░░░░░░   40%   Dashboard & Monitoring
 ---
 
 # 🇬🇧 English
+
+## 🚀 Installation & Setup
+
+### Quick Start (One Command)
+
+`start_soma.sh` detects a fresh system and installs **everything automatically**:
+
+```bash
+git clone https://github.com/YOUR_USER/SOMA.git
+cd SOMA
+chmod +x start_soma.sh stop_all.sh
+./start_soma.sh
+```
+
+The script automatically handles:
+
+| Phase | What happens |
+|:---|:---|
+| **1. System packages** | `python3`, `ffmpeg`, `espeak-ng`, `alsa-utils`, `build-essential`, etc. via `apt`/`pacman`/`dnf` |
+| **2. Docker** | Installs Docker Engine + Compose if missing, enables the daemon |
+| **3. Python venv** | Creates `.venv`, installs all `requirements.txt` dependencies |
+| **4. .env** | Generates `.env` from `.env.example`, auto-generates secure passwords |
+| **5. Configs** | Mosquitto config, data directories, memory files |
+| **6. Docker containers** | PostgreSQL 16, Redis 7, Mosquitto 2 (+ Asterisk optional) |
+| **7. Ollama** | Installs Ollama, pulls `qwen3:8b`, `qwen3:1.7b`, `nomic-embed-text` |
+| **8. Django** | Migrations + start on port 8200 |
+| **9. Brain Core** | FastAPI + Voice Pipeline + Ego + Memory on port 8100 |
+| **10. Health check** | Summary of all subsystems |
+
+> **First run takes 5–15 minutes** depending on internet speed (LLM downloads ~6 GB).
+> Subsequent starts: ~60–90 seconds.
+
+### Supported Distributions
+
+| Distribution | Package Manager | Status |
+|:---|:---|:---|
+| **Ubuntu** 22.04+ / **Debian** 12+ | apt | ✅ Fully supported |
+| **Linux Mint** / **Pop!_OS** | apt | ✅ Fully supported |
+| **Arch Linux** / **CachyOS** / **Manjaro** | pacman | ✅ Fully supported |
+| **Fedora** 38+ / **RHEL** 9+ | dnf | ✅ Fully supported |
+| **openSUSE** | zypper | 🔄 Experimental |
+| **WSL2** (Windows) | apt | ⚠️ Works, audio needs PulseAudio bridge |
+
+### Requirements
+
+| Requirement | Minimum | Recommended |
+|:---|:---|:---|
+| **RAM** | 16 GB | 32 GB |
+| **VRAM (GPU)** | 6 GB (NVIDIA) | 12 GB |
+| **Storage** | 20 GB free | 50 GB |
+| **Python** | 3.10+ | 3.13+ |
+| **OS** | Linux (any distro) | Arch / Ubuntu 24.04 |
+| **Audio** | Any ALSA device | USB audio (e.g. Focusrite Scarlett) |
+
+### .env Configuration
+
+After the first run, `start_soma.sh` will prompt you to review the `.env` file:
+
+```bash
+# Edit .env (required fields are auto-generated, but review them):
+nano .env
+```
+
+#### Important .env Variables
+
+| Variable | Description | Example |
+|:---|:---|:---|
+| **POSTGRES_PASSWORD** | PostgreSQL password (auto-generated) | `soma_secure_123` |
+| **DJANGO_SECRET_KEY** | Django secret key (auto-generated) | `abc123...` |
+| **GITHUB_TOKEN** | Optional for plugin generation | `github_pat_xxx` |
+| **HA_TOKEN** | Optional for Home Assistant | `eyJ...` |
+| **OLLAMA_HEAVY_MODEL** | Heavy LLM model | `qwen3:8b` |
+| **OLLAMA_LIGHT_MODEL** | Light LLM model | `qwen3:1.7b` |
+| **BRAIN_CORE_PORT** | FastAPI port | `8100` |
+| **DJANGO_PORT** | Django UI port | `8200` |
+| **HEALTH_*_PERCENT** | Health thresholds | `75` |
+| **VODAFONE_SIP_* ** | SIP for telephony (optional) | `sip_user`, `sip_pass` |
+
+#### .env Setup Step by Step
+
+1. **Copy example**: `cp .env.example .env`
+2. **Review auto-generated values**: Passwords and keys are set automatically
+3. **Enable optional features**:
+   - **GitHub Token**: For plugin code generation
+   - **Home Assistant**: For smart home integration
+   - **SIP**: For phone gateway
+4. **Security**: Change auto-generated passwords if needed
+5. **Restart**: `./start_soma.sh` after changes
+
+### Manual Installation (Step by Step)
+
+For users who prefer full control:
+
+```bash
+# 1. System packages (example: Ubuntu/Debian)
+sudo apt update && sudo apt install -y \
+  python3 python3-venv python3-pip python3-dev build-essential \
+  curl wget git lsof ffmpeg espeak-ng alsa-utils \
+  libsndfile1-dev libffi-dev libssl-dev libpq-dev portaudio19-dev
+
+# 2. Docker
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER && newgrp docker
+
+# 3. Ollama
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull qwen3:8b
+ollama pull qwen3:1.7b
+ollama pull nomic-embed-text
+
+# 4. SOMA
+git clone https://github.com/YOUR_USER/SOMA.git && cd SOMA
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 5. Configuration
+cp .env.example .env
+nano .env   # Set passwords!
+
+# 6. Infrastructure + Start
+docker compose up -d
+./start_soma.sh
+```
+
+### Commands
+
+```bash
+./start_soma.sh            # Start everything (installs missing deps)
+./start_soma.sh --status   # Check system status
+./start_soma.sh --logs     # Show live logs
+./stop_all.sh              # Stop everything
+./stop_all.sh --keep-docker  # Stop Python, keep Docker running
+```
+
+### Endpoints
+
+| Service | URL | Description |
+|:---|:---|:---|
+| **Dashboard** | http://localhost:8200/dashboard/ | Django Memory UI |
+| **API Docs** | http://localhost:8100/docs | FastAPI Swagger |
+| **Health** | http://localhost:8100/api/v1/health | System vitals |
+| **Voice** | http://localhost:8100/api/v1/voice | Microphone status |
+| **Ego** | http://localhost:8100/api/v1/ego/snapshot | Consciousness state |
+| **Memory** | http://localhost:8100/api/v1/memory/stats | Memory statistics |
+
+---
 
 ## What is SOMA?
 
@@ -757,137 +921,7 @@ Internal Monologue ─→ Thought ───────────────�
 
 ---
 
-## 🚀 Installation & Setup
-
-### Quick Start (One Command)
-
-`start_soma.sh` detects a fresh system and installs **everything automatically**:
-
-```bash
-git clone https://github.com/YOUR_USER/SOMA.git
-cd SOMA
-chmod +x start_soma.sh stop_all.sh
-./start_soma.sh
-```
-
-The script automatically handles:
-
-| Phase | What happens |
-|:---|:---|
-| **1. System packages** | `python3`, `ffmpeg`, `espeak-ng`, `alsa-utils`, `build-essential`, etc. via `apt`/`pacman`/`dnf` |
-| **2. Docker** | Installs Docker Engine + Compose if missing, enables the daemon |
-| **3. Python venv** | Creates `.venv`, installs all `requirements.txt` dependencies |
-| **4. .env** | Generates `.env` from `.env.example`, auto-generates secure passwords |
-| **5. Configs** | Mosquitto config, data directories, memory files |
-| **6. Docker containers** | PostgreSQL 16, Redis 7, Mosquitto 2 (+ Asterisk optional) |
-| **7. Ollama** | Installs Ollama, pulls `qwen3:8b`, `qwen3:1.7b`, `nomic-embed-text` |
-| **8. Django** | Migrations + start on port 8200 |
-| **9. Brain Core** | FastAPI + Voice Pipeline + Ego + Memory on port 8100 |
-| **10. Health check** | Summary of all subsystems |
-
-> **First run takes 5–15 minutes** depending on internet speed (LLM downloads ~6 GB).
-> Subsequent starts: ~60–90 seconds.
-
-### Supported Distributions
-
-| Distribution | Package Manager | Status |
-|:---|:---|:---|
-| **Ubuntu** 22.04+ / **Debian** 12+ | apt | ✅ Fully supported |
-| **Linux Mint** / **Pop!_OS** | apt | ✅ Fully supported |
-| **Arch Linux** / **CachyOS** / **Manjaro** | pacman | ✅ Fully supported |
-| **Fedora** 38+ / **RHEL** 9+ | dnf | ✅ Fully supported |
-| **openSUSE** | zypper | 🔄 Experimental |
-| **WSL2** (Windows) | apt | ⚠️ Works, audio needs PulseAudio bridge |
-
-### Requirements
-
-| Requirement | Minimum | Recommended |
-|:---|:---|:---|
-| **RAM** | 16 GB | 32 GB |
-| **VRAM (GPU)** | 6 GB (NVIDIA) | 12 GB |
-| **Storage** | 20 GB free | 50 GB |
-| **Python** | 3.10+ | 3.13+ |
-| **OS** | Linux (any distro) | Arch / Ubuntu 24.04 |
-| **Audio** | Any ALSA device | USB audio (e.g. Focusrite Scarlett) |
-
-### .env Configuration
-
-After the first run, `start_soma.sh` will prompt you to review the `.env` file:
-
-```bash
-# Edit .env (required fields are auto-generated, but review them):
-nano .env
-
-# Key settings:
-POSTGRES_PASSWORD=your_secure_password       # auto-generated
-DJANGO_SECRET_KEY=...                         # auto-generated
-GITHUB_TOKEN=github_pat_xxx                   # optional: plugin generation
-HA_TOKEN=eyJ...                               # optional: Home Assistant
-
-# Then restart SOMA:
-./start_soma.sh
-```
-
-### Manual Installation (Step by Step)
-
-For users who prefer full control:
-
-```bash
-# 1. System packages (example: Ubuntu/Debian)
-sudo apt update && sudo apt install -y \
-  python3 python3-venv python3-pip python3-dev build-essential \
-  curl wget git lsof ffmpeg espeak-ng alsa-utils \
-  libsndfile1-dev libffi-dev libssl-dev libpq-dev portaudio19-dev
-
-# 2. Docker
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER && newgrp docker
-
-# 3. Ollama
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen3:8b
-ollama pull qwen3:1.7b
-ollama pull nomic-embed-text
-
-# 4. SOMA
-git clone https://github.com/YOUR_USER/SOMA.git && cd SOMA
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# 5. Configuration
-cp .env.example .env
-nano .env   # Set passwords!
-
-# 6. Infrastructure + Start
-docker compose up -d
-./start_soma.sh
-```
-
-### Commands
-
-```bash
-./start_soma.sh            # Start everything (installs missing deps)
-./start_soma.sh --status   # Check system status
-./start_soma.sh --logs     # Show live logs
-./stop_all.sh              # Stop everything
-./stop_all.sh --keep-docker  # Stop Python, keep Docker running
-```
-
-### Endpoints
-
-| Service | URL | Description |
-|:---|:---|:---|
-| **Dashboard** | http://localhost:8200/dashboard/ | Django Memory UI |
-| **API Docs** | http://localhost:8100/docs | FastAPI Swagger |
-| **Health** | http://localhost:8100/api/v1/health | System vitals |
-| **Voice** | http://localhost:8100/api/v1/voice | Microphone status |
-| **Ego** | http://localhost:8100/api/v1/ego/snapshot | Consciousness state |
-| **Memory** | http://localhost:8100/api/v1/memory/stats | Memory statistics |
-
----
-
-## 📊 Development Roadmap
+##  Development Roadmap
 
 ```
 Phase 1  ██████████  100%   Memory as the Single Brain (SSOT)
