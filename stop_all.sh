@@ -123,6 +123,27 @@ fi
 
 [ $STOPPED -eq 0 ] && warn "Django war nicht aktiv"
 
+# ── 2b. Cloudflare Tunnel ───────────────────────────────────────────────
+hdr "2b/6 Cloudflare Tunnel"
+
+STOPPED=0
+if [ -f "$PIDDIR/cloudflared.pid" ]; then
+    PID=$(cat "$PIDDIR/cloudflared.pid")
+    if kill -0 "$PID" 2>/dev/null; then
+        kill -SIGTERM "$PID" 2>/dev/null || true
+        sleep 1
+        kill -9 "$PID" 2>/dev/null || true
+        ok "Cloudflare Tunnel gestoppt (PID $PID)"
+        STOPPED=1
+    fi
+    rm -f "$PIDDIR/cloudflared.pid"
+fi
+if kill_by_pattern "cloudflared tunnel"; then
+    ok "Cloudflare Tunnel-Prozesse beendet"
+    STOPPED=1
+fi
+[ $STOPPED -eq 0 ] && warn "Cloudflare Tunnel war nicht aktiv"
+
 # ── 3. Audio Capture (arecord + SOMA-Audio-Threads) ─────────────────────
 hdr "3/6 Audio Capture"
 

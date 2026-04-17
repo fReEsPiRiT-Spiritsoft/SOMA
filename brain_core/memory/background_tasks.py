@@ -260,7 +260,7 @@ class BackgroundConsolidator:
                             ):
                                 logger.warning(
                                     "consolidation_fact_REJECTED",
-                                    fact=fact[:60],
+                                    rejected_fact=fact[:60],
                                     reason="failed validation",
                                 )
                                 continue
@@ -275,7 +275,7 @@ class BackgroundConsolidator:
                             logger.info(
                                 "wisdom_node_created",
                                 subject=subject,
-                                fact=fact[:60],
+                                learned_fact=fact[:60],
                             )
 
                 # Diary: Insight schreiben
@@ -742,11 +742,12 @@ class BackgroundConsolidator:
                 e for e in recent
                 if e.event_type == "conversation" and e.user_text.strip()
             ]
+            recent_ids = {id(e) for e in recent_convs}
             older_convs = [
                 e for e in older
                 if e.event_type == "conversation"
                 and e.user_text.strip()
-                and e not in recent_convs
+                and id(e) not in recent_ids
             ]
 
             if len(recent_convs) < 1 or len(older_convs) < 1:
@@ -770,7 +771,7 @@ class BackgroundConsolidator:
                     for alt in older_convs:
                         if (
                             alt.embedding is not None
-                            and alt != ep_b
+                            and id(alt) != id(ep_b)
                         ):
                             alt_sim = float(
                                 np.dot(ep_a.embedding, alt.embedding)

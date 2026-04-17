@@ -98,6 +98,10 @@ class SomaConfig(BaseSettings):
     # SOMA's reachable URL for Home Assistant to fetch TTS audio
     soma_local_url: str = "http://192.168.0.100:8100"  # CHANGE to your machine's LAN IP
 
+    # ── Remote API (Mobile Access) ───────────────────────────────────────
+    # API key for remote mobile access. Generate with: python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+    remote_api_key: str = ""  # Set in .env to enable remote access
+
     # ── Sudo Mode ────────────────────────────────────────────────────────
     # If True at boot, SOMA starts with sudo enabled (can be toggled via API)
     sudo_mode_enabled: bool = False

@@ -220,8 +220,16 @@ class LogicRouter:
         away_prefix = ""
         try:
             from brain_core.away_summary import get_away_summary
+            from brain_core.side_query import get_side_query
+            from brain_core.memory.integration import get_orchestrator
             away = get_away_summary()
-            away_text = await away.get_welcome_back_text()
+            sq = get_side_query()
+            orch_away = get_orchestrator()
+            wm = orch_away.working if orch_away else None
+            away_text = await away.get_welcome_back_text(
+                working_memory=wm,
+                side_query_engine=sq,
+            )
             if away_text:
                 away_prefix = away_text
                 await _broadcast_thought("info", f"Willkommen zurück: {away_text[:60]}", "AWAY")

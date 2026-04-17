@@ -291,16 +291,16 @@ def build_optimized_prompt(
 # ── Intent → LLM-Options Mapping (Temperature, top_p) ────────────────
 
 _INTENT_LLM_OPTIONS: dict[PromptIntent, dict] = {
-    # Befehle: Deterministisch, keine Kreativität nötig
-    PromptIntent.SMARTHOME: {"temperature": 0.3, "top_p": 0.8, "repeat_penalty": 1.05},
-    PromptIntent.MEDIA:     {"temperature": 0.3, "top_p": 0.8, "repeat_penalty": 1.05},
-    PromptIntent.PHONE:     {"temperature": 0.4, "top_p": 0.85},
-    PromptIntent.MEMORY:    {"temperature": 0.3, "top_p": 0.8},
-    # Recherche: Balanciert — präzise aber lesbar
-    PromptIntent.WEB:       {"temperature": 0.5, "top_p": 0.85},
-    PromptIntent.SYSTEM:    {"temperature": 0.4, "top_p": 0.85},
-    # Chat: Kreativ, menschlich, warm
-    PromptIntent.CHAT:      {"temperature": 0.7, "top_p": 0.92, "repeat_penalty": 1.08},
+    # Befehle: Deterministisch, Thinking AUS → ~1s statt ~15s (Ollama 0.20.7 fixt think:false für gemma4:e4b)
+    PromptIntent.SMARTHOME: {"temperature": 0.3, "top_p": 0.8, "repeat_penalty": 1.05, "_think": False},
+    PromptIntent.MEDIA:     {"temperature": 0.3, "top_p": 0.8, "repeat_penalty": 1.05, "_think": False},
+    PromptIntent.PHONE:     {"temperature": 0.4, "top_p": 0.85, "_think": False},
+    PromptIntent.MEMORY:    {"temperature": 0.3, "top_p": 0.8, "_think": False},
+    # Recherche: Thinking AUS — Fakten brauchen kein Reasoning
+    PromptIntent.WEB:       {"temperature": 0.5, "top_p": 0.85, "_think": False},
+    PromptIntent.SYSTEM:    {"temperature": 0.4, "top_p": 0.85, "_think": False},
+    # Chat: Thinking AUS — Ollama 0.20.7 fixt think:false, ~1s statt ~55s
+    PromptIntent.CHAT:      {"temperature": 0.7, "top_p": 0.92, "repeat_penalty": 1.08, "_think": False},
 }
 
 

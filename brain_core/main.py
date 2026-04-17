@@ -885,7 +885,7 @@ async def lifespan(app: FastAPI):
         soma_toolset = Toolset(
             policy_engine=policy_engine,
             terminal=secure_terminal,
-            filesystem_map=filesystem_map,
+            filesystem=filesystem_map,
         )
 
         # Agent: State-Machine mit LLM-Planung
@@ -922,6 +922,9 @@ async def lifespan(app: FastAPI):
         await broadcast_thought(
             "warn", f"Executive Arm Fehler: {exc}", "BOOT",
         )
+
+    # Remote API Auth initialisieren
+    init_remote_auth()
 
     yield  # ── App läuft ──
 
@@ -983,6 +986,15 @@ app.add_middleware(
 
 # Statische Dateien für das Tablet-Face
 app.mount("/face", StaticFiles(directory="soma_face_tablet", html=True), name="face")
+
+# Remote Mobile API (authentifizierter Fernzugriff)
+from brain_core.remote_api import router as remote_router, init_remote_auth
+app.include_router(remote_router)
+
+# Statische Dateien für SOMA Mobile App
+_soma_remote_dir = Path("soma_remote")
+if _soma_remote_dir.exists():
+    app.mount("/mobile", StaticFiles(directory="soma_remote", html=True), name="mobile")
 
 
 # ── REST Endpoints ───────────────────────────────────────────────────────

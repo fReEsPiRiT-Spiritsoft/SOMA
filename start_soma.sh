@@ -1253,6 +1253,40 @@ else
 fi
 
 # ============================================================================
+# Phase 9b: Cloudflare Tunnel (optional – Remote-Zugriff)
+# ============================================================================
+CLOUDFLARED_URL=""
+if command -v cloudflared >/dev/null 2>&1; then
+    hdr "Cloudflare Tunnel (Remote-Zugriff)"
+    # Alten Tunnel-Prozess beenden falls noch einer läuft
+    pkill -f "cloudflared tunnel" 2>/dev/null || true
+    sleep 0.5
+
+    CF_LOG="$LOGDIR/cloudflared.log"
+    nohup cloudflared tunnel --url "http://localhost:$BRAIN_PORT" \
+        > "$CF_LOG" 2>&1 &
+    CF_PID=$!
+    echo "$CF_PID" > "$PIDDIR/cloudflared.pid"
+
+    # Warte auf URL (max 20s)
+    for i in $(seq 1 20); do
+        CLOUDFLARED_URL=$(grep -o 'https://[a-zA-Z0-9.-]*\.trycloudflare\.com' "$CF_LOG" 2>/dev/null | head -1 || true)
+        [ -n "$CLOUDFLARED_URL" ] && break
+        sleep 1
+    done
+
+    if [ -n "$CLOUDFLARED_URL" ]; then
+        ok "Cloudflare Tunnel aktiv"
+        echo -e "  ${C}URL: $CLOUDFLARED_URL${NC}"
+    else
+        warn "Cloudflare Tunnel gestartet, URL noch nicht bekannt"
+        echo -e "  ${C}Prüfe: tail -f $CF_LOG${NC}"
+    fi
+else
+    true  # cloudflared nicht installiert – überspringen
+fi
+
+# ============================================================================
 # Phase 10: First-Run Marker setzen & Zusammenfassung
 # ============================================================================
 hdr "Phase 10/10: Zusammenfassung"
@@ -1307,6 +1341,9 @@ import sys,json; d=json.load(sys.stdin); print(len(d.get('plugins',[])))" 2>/dev
     echo -e "${G}║${NC}    Dashboard:   ${C}http://localhost:$DJANGO_PORT_NUM/dashboard/${NC}        ${G}║${NC}"
     echo -e "${G}║${NC}    API Docs:    ${C}http://localhost:$BRAIN_PORT/docs${NC}                ${G}║${NC}"
     echo -e "${G}║${NC}    Health:      ${C}http://localhost:$BRAIN_PORT/api/v1/health${NC}       ${G}║${NC}"
+    if [ -n "$CLOUDFLARED_URL" ]; then
+    echo -e "${G}║${NC}    Mobile:      ${C}${CLOUDFLARED_URL}${NC}  ${G}║${NC}"
+    fi
     echo -e "${G}║${NC}                                                              ${G}║${NC}"
     echo -e "${G}║${NC}  ${Y}Soma hoert jetzt dauerhaft zu!${NC}                              ${G}║${NC}"
     echo -e "${G}║${NC}  ${Y}Sage \"Soma, ...\" um zu sprechen.${NC}                          ${G}║${NC}"

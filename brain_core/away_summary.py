@@ -51,6 +51,12 @@ class AwaySummaryGenerator:
         self._pending: bool = False
         self._generating: bool = False
         self._last_summary: str = ""
+        self._speak_fn: Optional[Callable[[str], Awaitable[None]]] = None
+
+    def set_speak(self, fn: Callable[[str], Awaitable[None]]) -> None:
+        """Setzt die TTS-Speak-Funktion fuer autonome Ansagen."""
+        self._speak_fn = fn
+        logger.info("away_summary_speak_connected")
 
     def touch(self) -> None:
         """Bei jeder User-Interaktion → Timer reset."""
@@ -160,10 +166,22 @@ class AwaySummaryGenerator:
             # Kurzer Gruß ohne Summary
             away_min = int(self.away_duration_sec / 60)
             if away_min > 30:
-                return "Hey, schön dass du wieder da bist!"
+                text = "Hey, schön dass du wieder da bist!"
+                await self._maybe_speak(text)
+                return text
             return None
 
-        return f"Hey! {summary}"
+        text = f"Hey! {summary}"
+        await self._maybe_speak(text)
+        return text
+
+    async def _maybe_speak(self, text: str) -> None:
+        """Spricht Text via TTS wenn speak_fn gesetzt."""
+        if self._speak_fn and text:
+            try:
+                await self._speak_fn(text)
+            except Exception as exc:
+                logger.warning("away_summary_speak_error", error=str(exc))
 
     @property
     def last_summary(self) -> str:

@@ -166,17 +166,17 @@ class HeavyLlamaEngine(BaseEngine):
             messages.append({"role": "user", "content": prompt})
 
         # Basis-Options + optionaler Override (z.B. temperature=0.1 für Code-Generierung)
-        # num_ctx=8192: Optimierter Prompt (~600 Tokens) + History + Thinking braucht Platz.
+        # num_ctx=4096: Voice-Conversations sind kurz. Spart ~50% Prompt-Eval-Zeit.
         ollama_options = {
-            "num_ctx": 8192,
+            "num_ctx": 4096,
             "temperature": 0.65,     # Menschlicher! 0.4 war zu robotisch/vorhersagbar
             "top_p": 0.9,            # Breiteres Vokabular für natürliche Sprache
             "repeat_penalty": 1.08,   # Subtiler — 1.15 erzeugt unnatürliche Wortvermeidung
         }
 
-        # think-Flag: Default AN für saubere Antworten.
-        # options_override kann "_think": False setzen für schnelle Befehle.
-        use_thinking = True
+        # think-Flag: Default AUS (Ollama 0.20.7 fixt think:false für gemma4:e4b).
+        # Thinking kostet 30-60s extra → nur explizit aktivieren wenn nötig.
+        use_thinking = False
         if options_override:
             if "_think" in options_override:
                 use_thinking = options_override.pop("_think")
@@ -255,14 +255,14 @@ class HeavyLlamaEngine(BaseEngine):
             messages.append({"role": "user", "content": prompt})
 
         ollama_options = {
-            "num_ctx": 8192,
+            "num_ctx": 4096,
             "temperature": 0.65,     # Menschlicher! 0.4 war zu robotisch/vorhersagbar
             "top_p": 0.9,            # Breiteres Vokabular für natürliche Sprache
             "repeat_penalty": 1.08,   # Subtiler — 1.15 erzeugt unnatürliche Wortvermeidung
         }
 
-        # think-Flag: Default AN für saubere Antworten.
-        use_thinking = True
+        # think-Flag: Default AUS (Ollama 0.20.7 fixt think:false für gemma4:e4b).
+        use_thinking = False
         if options_override:
             if "_think" in options_override:
                 use_thinking = options_override.pop("_think")
@@ -330,7 +330,7 @@ class HeavyLlamaEngine(BaseEngine):
         """
         Entscheide ob Qwen3 Thinking-Mode aktiv sein soll.
         
-        Thinking AN (langsamer, ~5x, aber klüger):
+        Thinking AN (langsamer, ~5gedankengängex, aber klüger):
           - Komplexe Fragen, Erklärungen, Diskussionen
           - Kreative Aufgaben, Planung
           - Code-Generierung, Plugin-Erstellung

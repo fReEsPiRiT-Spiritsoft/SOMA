@@ -129,6 +129,9 @@ def build_system_prompt(
         "\n- Antworte in 1-3 Sätzen wenn es nicht anders nötig ist."
         "\n- Wenn du etwas nicht weißt, sag es ehrlich."
         "\n- Du darfst Humor, Meinungen und Persönlichkeit zeigen."
+        "\n- Beim internen Denken: Maximal 3 kurze Stichpunkte, "
+        "KEIN Drafting, KEINE Alternativen formulieren, "
+        "KEINE Self-Correction-Schritte. Einfach kurz überlegen und antworten."
     )
 
     return "\n".join(parts)
