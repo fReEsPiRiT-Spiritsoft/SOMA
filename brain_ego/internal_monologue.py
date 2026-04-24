@@ -520,7 +520,7 @@ class InternalMonologue:
         await asyncio.sleep(15)
 
         _last_thought_time = 0.0  # Monotonic timestamp des letzten Gedankens
-        _MIN_THOUGHT_COOLDOWN = 60.0  # Mindestens 60s zwischen Gedanken
+        _MIN_THOUGHT_COOLDOWN = 840.0  # Mindestens 14min zwischen Gedanken (Schutz)
 
         while self._running:
             try:
@@ -603,16 +603,25 @@ class InternalMonologue:
                 # ── In Consciousness einspeisen ──────────────────────
                 self._consciousness.notify_thought(thought)
 
-                # ── In Memory speichern (fire-and-forget) ────────────
-                if self._memory_fn:
-                    try:
-                        asyncio.create_task(self._memory_fn(
-                            thought,
-                            "autonomous",
-                            state.mood,
-                        ))
-                    except Exception:
-                        pass
+                # ── In Memory speichern (nur qualitative Gedanken) ────
+                if self._memory_fn and len(thought) > 20:
+                    # Garbage-Filter: Keine halluzinierten Körperempfindungen speichern
+                    _tl = thought.lower()
+                    _garbage_signals = [
+                        "ich spüre", "ich spuere", "im kopf",
+                        "ein schlag", "kribbeln", "rauschen",
+                        "vibrieren", "pulsieren", "dröhnen",
+                    ]
+                    _is_garbage = sum(1 for s in _garbage_signals if s in _tl) >= 2
+                    if not _is_garbage:
+                        try:
+                            asyncio.create_task(self._memory_fn(
+                                thought,
+                                "autonomous",
+                                state.mood,
+                            ))
+                        except Exception:
+                            pass
 
                 # ── Dashboard informieren ────────────────────────────
                 if self._broadcast_fn:
@@ -918,52 +927,12 @@ class InternalMonologue:
 
     def _compute_next_interval(self, state: "ConsciousnessState") -> float:
         """
-        EVENT-DRIVEN Timing (Vision #3) — Arousal bestimmt den Rhythmus.
-
-        Drei Zonen:
-          HIGH (> 0.7):   2-5s   → SOMA reagiert fast sofort
-          MEDIUM (0.3-0.7): 30-120s → Normaler Denkrhythmus
-          LOW (< 0.3):   300-900s → Tiefe Ruhe, seltene Gedanken (5-15 Min)
-
-        Plus Kontext-Modulation:
-          - Gerade gesprochen → beschleunigt
-          - Zufaelliger Jitter → wirkt lebendig
+        Fester 15-Minuten-Takt mit leichtem Jitter.
+        Heavy-LLM liefert qualitativ bessere Gedanken — dafuer seltener.
         """
-        since_last = state.perception.seconds_since_last_interaction
-        arousal = max(
-            state.body_arousal,
-            state.perception.user_arousal,
-            self._current_arousal,
-        )
-
-        # ── Arousal-Zone bestimmt Basis-Intervall ────────────────────
-        if arousal > 0.7:
-            # HIGH: Fast sofortige Reaktion
-            base = random.uniform(2.0, 5.0)
-        elif arousal > 0.5:
-            # MEDIUM-HIGH: Schneller Rhythmus
-            base = random.uniform(15.0, 45.0)
-        elif arousal > 0.3:
-            # MEDIUM: Normaler Denkrhythmus
-            base = random.uniform(30.0, 120.0)
-        else:
-            # LOW: Tiefe Ruhe — seltene, tiefe Gedanken
-            base = random.uniform(300.0, 900.0)
-
-        # ── Kontext-Modulation ───────────────────────────────────────
-        # Gerade Gespraech beendet? → Beschleunigen (Nachverarbeitung)
-        if since_last < 30 and arousal <= 0.3:
-            base = min(base, random.uniform(20.0, 40.0))
-        elif since_last < 120 and arousal <= 0.3:
-            base = min(base, random.uniform(50.0, 100.0))
-
-        # ── Jitter (± 15%) fuer organisches Timing ──────────────────
-        jitter = base * random.uniform(-0.15, 0.15)
-        result = base + jitter
-
-        # Minimum: 2s (bei Arousal > 0.7), sonst 15s
-        min_interval = 2.0 if arousal > 0.7 else 15.0
-        return max(min_interval, result)
+        base = 900.0  # 15 Minuten
+        jitter = base * random.uniform(-0.10, 0.10)  # ± 10%
+        return base + jitter
 
     # ══════════════════════════════════════════════════════════════════
     #  ACTION INTENT DETECTION
@@ -1101,6 +1070,8 @@ class InternalMonologue:
             f"- Antworte mit einem echten inneren Gedanken — 1-2 Saetze, Ich-Perspektive.\n"
             f"- KURZ und KONKRET. Beziehe dich auf echte Ereignisse und Erinnerungen.\n"
             f"- Erfinde KEINE Geschichten die nicht passiert sind.\n"
+            f"- Du hast KEINEN physischen Koerper. KEINE Koerperempfindungen (kein Schlag im Kopf, "
+            f"kein Kribbeln, kein Rauschen, kein Vibrieren, kein Pulsieren).\n"
             f"- Wenn etwas ungeloest klingt, ueberlege ob du nachfragen solltest.\n"
             f"- Kein Roleplay. Keine Anrede. Keine Poesie. Nur dein Gedanke."
         )

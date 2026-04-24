@@ -57,27 +57,49 @@ EXTRACT_SYSTEM_PROMPT = """Du bist der Memory-Extraktions-Agent von SOMA.
 Analysiere die letzten Konversations-Messages und extrahiere WICHTIGE Informationen.
 
 Extrahiere NUR:
-1. User-Präferenzen (z.B. "Ich mag kein Licht über 80%", "Nenn mich Max")
-2. Haushalt-Fakten (z.B. "Im Wohnzimmer sind 3 Lampen", "Der Hund heißt Bello")
-3. Routinen (z.B. "Morgens um 7 will ich geweckt werden")
-4. Technische Vorlieben (z.B. "Benutze immer Firefox")
-5. Explizite Aufforderungen ("Merk dir...", "Vergiss nicht...")
+1. PERSÖNLICHE DATEN (HÖCHSTE PRIORITÄT!): Name, Alter, Geburtstag, Familienmitglieder, Beziehungsstatus, Haustiere, Beruf, Wohnort, Allergien, Gesundheit
+2. FAKTEN ÜBER ANDERE PERSONEN: Lieblingslied, Lieblingsessen, Hobbys, Vorlieben von Familienmitgliedern, Freunden, Bekannten
+3. User-Präferenzen (z.B. Licht-Helligkeit, Weckzeiten, Musikgeschmack)
+4. Haushalt-Fakten (z.B. Geräte, Räume, Ausstattung)
+5. Routinen (z.B. Weckzeit, Schlafenszeit)
+6. Technische Vorlieben (z.B. Browser, Tools)
+7. Explizite Aufforderungen ("Merk dir...", "Vergiss nicht...")
 
 NICHT extrahieren:
 - Smalltalk ohne Informationsgehalt
 - Bereits bekannte Informationen
 - Temporäre Zustände ("Mir ist gerade kalt")
-- Befehls-Details (nicht "User hat Licht angemacht" — das ist ein Event, keine Memory)
+- Befehls-Details ("User hat Licht angemacht")
+- KEINE Koerperempfindungen oder Emotionen von SOMA selbst
 
-Format deiner Antwort:
-Für jede Memory GENAU eine Zeile:
-TYPE|INHALT
+WICHTIG — KOMPAKTFORMAT:
+Speichere als kurze Key = Value Paare, NICHT als ganze Saetze!
 
-Typen: user, project, system, fact
-Beispiel:
-user|Bevorzugt gedimmtes Licht am Abend
-fact|Hat einen Hund namens Bello
-project|Wohnzimmer hat Philips Hue Lampen
+WICHTIG — PERSONEN-ZUORDNUNG:
+Wenn es um eine ANDERE Person geht (Mutter, Schwester, Freund etc.),
+verwende deren NAMEN als @Subject. NICHT "Owner"!
+Verwende "Owner" NUR für den sprechenden Hauptnutzer selbst.
+
+Format deiner Antwort (GENAU eine Zeile pro Memory):
+TYPE|@Subject|Key = Value
+
+Typen: user, relationship, person, project, system, fact
+@Subject: Name der Person (Owner, Sarah, Katrin, Max, etc.)
+
+Beispiele:
+user|@Owner|Lieblingslicht = gedimmt am Abend
+user|@Owner|Name = Max
+user|@Owner|Alter = 28
+user|@Owner|Geburtstag = 15.03.1998
+relationship|@Owner|Schwester = Anna
+relationship|@Owner|Hund = Bello
+person|@Anna|Lieblingslied = Bohemian Rhapsody
+person|@Anna|Alter = 25
+person|@Anna|Hobby = Malen
+person|@Katrin|Lieblingsessen = Spaghetti
+fact|@Haushalt|Kueche = Philips Hue Lampen
+project|@Haushalt|Anlage Kueche = Phantom
+system|@System|Browser = Firefox
 
 Wenn nichts zu extrahieren ist, antworte mit: KEINE"""
 
@@ -85,8 +107,9 @@ Wenn nichts zu extrahieren ist, antworte mit: KEINE"""
 @dataclass
 class ExtractedMemory:
     """Eine extrahierte Memory."""
-    memory_type: str  # user, project, system, fact
+    memory_type: str  # user, relationship, person, project, system, fact
     content: str
+    subject: str = "Owner"  # Ziel-Person: Owner, Sarah, Katrin, etc.
     confidence: float = 0.8
     timestamp: float = field(default_factory=time.time)
 
@@ -186,27 +209,42 @@ class MemoryExtractor:
         if not result.success or "KEINE" in result.text.upper():
             return []
 
-        # Antwort parsen
+        # Antwort parsen — Neues Format: TYPE|@Subject|Key = Value
+        # Fallback: TYPE|Key = Value (altes Format)
         memories = []
         for line in result.text.strip().split("\n"):
             line = line.strip()
             if "|" not in line:
                 continue
-            parts = line.split("|", 1)
-            if len(parts) != 2:
+            parts = line.split("|")
+
+            if len(parts) == 3:
+                # Neues Format: TYPE|@Subject|Key = Value
+                mem_type = parts[0].strip().lower()
+                raw_subject = parts[1].strip()
+                content = parts[2].strip()
+                # @Subject → Subject
+                subject = raw_subject.lstrip("@").strip()
+            elif len(parts) == 2:
+                # Altes Format: TYPE|Key = Value
+                mem_type = parts[0].strip().lower()
+                content = parts[1].strip()
+                subject = "Owner"
+            else:
                 continue
 
-            mem_type = parts[0].strip().lower()
-            content = parts[1].strip()
-
-            if mem_type not in ("user", "project", "system", "fact"):
+            if mem_type not in ("user", "relationship", "person", "project", "system", "fact"):
                 continue
             if len(content) < 5:
                 continue
+            # Sanitize subject
+            if not subject or subject.lower() in ("", "none", "null"):
+                subject = "Owner"
 
             memories.append(ExtractedMemory(
                 memory_type=mem_type,
                 content=content,
+                subject=subject,
             ))
 
         return memories[:MAX_MEMORIES_PER_EXTRACTION]
@@ -216,30 +254,50 @@ class MemoryExtractor:
         memories: list[ExtractedMemory],
         memory_orchestrator,
     ) -> None:
-        """Speichere extrahierte Memories im Gedächtnissystem."""
+        """Speichere extrahierte Memories als strukturierte Fakten."""
         for mem in memories:
             try:
-                # Duplikat-Check via semantische Suche
-                if hasattr(memory_orchestrator, "semantic") and memory_orchestrator.semantic:
-                    existing = await memory_orchestrator.semantic.search(
-                        mem.content, limit=1,
-                    )
-                    if existing and len(existing) > 0:
-                        # Prüfe Ähnlichkeit
-                        top = existing[0]
-                        similarity = getattr(top, "relevance", 0.0)
-                        if similarity > 0.85:
-                            logger.debug(
-                                "memory_duplicate_skipped",
-                                content=mem.content[:50],
-                                similarity=round(similarity, 2),
-                            )
-                            continue
+                # Subject kommt direkt aus der Extraktion (Person-aware!)
+                subject = mem.subject
+                # Fallback-Map nur wenn kein explizites Subject
+                if subject == "Owner" and mem.memory_type in ("project", "system", "fact"):
+                    subject_map = {
+                        "project": "Haushalt",
+                        "system": "System",
+                        "fact": "Haushalt",
+                    }
+                    subject = subject_map.get(mem.memory_type, subject)
 
-                # Speichere als semantische Memory (L2)
+                # Type "person" → category "user" (gleiche Tabelle, anderes Subject)
+                category = mem.memory_type
+                if category == "person":
+                    category = "user"
+
+                fact_text = mem.content
+
+                # Direkt als strukturierten Fakt speichern (learn_fact → UPSERT)
+                if hasattr(memory_orchestrator, "semantic") and memory_orchestrator.semantic:
+                    sem = memory_orchestrator.semantic
+                    if hasattr(sem, "learn_fact"):
+                        await sem.learn_fact(
+                            category=category,
+                            subject=subject,
+                            fact=fact_text,
+                            confidence=0.8,
+                        )
+                        self._total_memories_saved += 1
+                        logger.info(
+                            "memory_auto_extracted",
+                            type=mem.memory_type,
+                            subject=subject,
+                            content=fact_text[:80],
+                        )
+                        continue
+
+                # Fallback: alte Methode
                 if hasattr(memory_orchestrator, "store_semantic"):
                     await memory_orchestrator.store_semantic(
-                        text=mem.content,
+                        text=fact_text,
                         metadata={
                             "type": mem.memory_type,
                             "source": "auto_extract",
@@ -248,7 +306,7 @@ class MemoryExtractor:
                     )
                 elif hasattr(memory_orchestrator, "semantic") and memory_orchestrator.semantic:
                     await memory_orchestrator.semantic.store(
-                        text=mem.content,
+                        text=fact_text,
                         emotion="neutral",
                         importance=0.7,
                     )
@@ -257,7 +315,7 @@ class MemoryExtractor:
                 logger.info(
                     "memory_auto_extracted",
                     type=mem.memory_type,
-                    content=mem.content[:80],
+                    content=fact_text[:80],
                 )
 
             except Exception as exc:

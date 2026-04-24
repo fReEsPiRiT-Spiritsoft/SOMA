@@ -469,6 +469,47 @@ class VoicePipeline:
                 if pitch_result.is_child:
                     self._child_mode = True
 
+                # ── Speaker Recognition ─────────────────────────────
+                try:
+                    from brain_core.voice.speaker_id import get_speaker_recognition
+                    sr = get_speaker_recognition()
+                    speaker_name, speaker_conf = sr.identify_speaker(
+                        pitch_hz=pitch_result.fundamental_freq_hz,
+                        energy=pitch_result.energy_rms,
+                    )
+                    if speaker_name and speaker_conf > 0.6:
+                        sr.current_speaker = speaker_name
+                        # Profil mit neuen Samples verstärken
+                        sr.enroll_sample(
+                            speaker_name,
+                            pitch_hz=pitch_result.fundamental_freq_hz,
+                            energy=pitch_result.energy_rms,
+                            spectral_centroid=pitch_result.spectral_centroid,
+                        )
+                    elif not sr.is_available:
+                        # Kein Profil existiert → Auto-Enroll als Owner
+                        from brain_core.memory.user_identity import get_user_name_sync
+                        owner_name = get_user_name_sync()
+                        if owner_name and owner_name != "du":
+                            sr.enroll_sample(
+                                owner_name,
+                                pitch_hz=pitch_result.fundamental_freq_hz,
+                                energy=pitch_result.energy_rms,
+                                spectral_centroid=pitch_result.spectral_centroid,
+                            )
+                    # In Working Memory setzen
+                    if sr.current_speaker:
+                        try:
+                            from brain_core.memory.integration import get_orchestrator
+                            orch = get_orchestrator()
+                            orch.working.set_context(
+                                "current_speaker", sr.current_speaker,
+                            )
+                        except Exception:
+                            pass
+                except Exception:
+                    pass  # Speaker-ID optional
+
                 # Emotion-Vector ans Dashboard + Shader senden
                 if voice_emotion.is_detected:
                     await self._emit(
@@ -1499,8 +1540,8 @@ class VoicePipeline:
                     from brain_core.memory.integration import get_orchestrator
                     from brain_core.memory.user_identity import get_user_name_sync
                     orch = get_orchestrator()
-                    # Bestimme Subject: Nutzername für User-Daten, "SOMA" für SOMA-Regeln
-                    subject = get_user_name_sync() or "Nutzer"
+                    # Subject: Owner fuer User-Daten, SOMA fuer SOMA-Regeln
+                    subject = "Owner"
                     content_lower = content.lower()
                     if any(w in content_lower for w in ["soma", "du sollst", "du musst", "schreibe", "antworte"]):
                         subject = "SOMA"

@@ -139,6 +139,7 @@ def _query_name_facts(semantic) -> list:
         """SELECT id, category, subject, fact, confidence 
            FROM facts 
            WHERE (
+               fact LIKE 'Name =%' OR fact LIKE 'Name=%' OR
                fact LIKE '%heißt%' OR fact LIKE '%heiße%' OR 
                fact LIKE '%Name ist%' OR fact LIKE '%name ist%' OR
                fact LIKE '%ich bin%' OR
@@ -154,8 +155,9 @@ def _extract_name_from_fact(fact_text: str) -> Optional[str]:
     """Extrahiert einen Namen aus einem Fakt-String."""
     import re
     
-    # Muster: "Der Nutzer heißt Max", "Ich heiße Lisa", "Name ist Patrick"
+    # Muster: "Name = Patrick", "Der Nutzer heißt Max", "Name ist Patrick"
     patterns = [
+        r'Name\s*=\s*(\w+)',
         r'(?:heißt|heiße|heisst|heisse)\s+(\w+)',
         r'(?:Name ist|name ist)\s+(\w+)',
         r'(?:Ich bin|ich bin)\s+(\w+)',

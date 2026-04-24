@@ -1,0 +1,15 @@
+{
+  "profiles": [
+    {
+      "name": "Patrick",
+      "pitch_mean": 321.5396666666667,
+      "pitch_std": 36.17276521393162,
+      "energy_mean": 0.0,
+      "spectral_centroid_mean": 2562.745001140227,
+      "sample_count": 30,
+      "created_at": 1776452292.2965431,
+      "last_seen": 1776455477.0158799
+    }
+  ],
+  "saved_at": 1776455477.0159252
+}

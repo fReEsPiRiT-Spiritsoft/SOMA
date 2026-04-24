@@ -178,19 +178,86 @@ async def after_response(
     try:
         extractor = get_memory_extractor()
         if extractor and _orchestrator:
-            extractor.set_memory(_orchestrator)
+            # Working Memory hat die vollständige Gesprächshistorie
+            messages = []
+            try:
+                wm = _orchestrator.working
+                for turn in wm._turns:
+                    role = "assistant" if turn.role == "soma" else turn.role
+                    messages.append({"role": role, "text": turn.text})
+            except Exception:
+                # Fallback: Nur aktuellen Turn
+                messages = [
+                    {"role": "user", "text": user_text},
+                    {"role": "assistant", "text": soma_text},
+                ]
+
+            # Prüfe ob User explizit "merk dir" sagt → force
+            force = extractor.check_explicit_remember(user_text)
+
+            # Prüfe ob User eine Anweisung gibt → sofort als preference speichern
+            if _is_user_instruction(user_text):
+                asyncio.create_task(
+                    _store_user_instruction(user_text, _orchestrator)
+                )
+
             asyncio.create_task(
-                _safe_auto_extract(user_text, soma_text)
+                _safe_auto_extract(messages, _orchestrator, force=force)
             )
     except Exception:
         pass  # Extractor nicht verfügbar → kein Problem
 
 
-async def _safe_auto_extract(user_text: str, soma_text: str):
-    """Fire-and-forget: Auto Memory Extraction."""
+def _is_user_instruction(text: str) -> bool:
+    """Erkennt ob der User SOMA eine Verhaltensanweisung gibt."""
+    lower = text.lower()
+    instruction_signals = [
+        "nächstes mal", "naechstes mal", "in zukunft",
+        "ab jetzt", "ab sofort", "immer wenn",
+        "du sollst", "du musst", "du brauchst nicht",
+        "sag einfach", "sag mir einfach", "reicht wenn",
+        "nicht so ausführlich", "kürzer", "knapper",
+        "du darfst", "du kannst dir sparen",
+        "mach das nicht mehr", "lass das",
+        "vergiss nicht", "denk dran",
+    ]
+    return any(sig in lower for sig in instruction_signals)
+
+
+async def _store_user_instruction(user_text: str, orchestrator) -> None:
+    """Speichert eine User-Anweisung sofort als preference-Fakt."""
+    try:
+        if hasattr(orchestrator, "semantic") and orchestrator.semantic:
+            await orchestrator.semantic.learn_fact(
+                category="preference",
+                subject="Owner",
+                fact=user_text[:200],
+                confidence=0.8,
+            )
+            logger.info("user_instruction_saved", instruction=user_text[:80])
+    except Exception as e:
+        logger.debug(f"user_instruction_save_error: {e}")
+
+
+async def _safe_auto_extract(messages: list, orchestrator, force: bool = False):
+    """Fire-and-forget: Auto Memory Extraction mit korrekter Signatur."""
     try:
         extractor = get_memory_extractor()
-        await extractor.maybe_extract(user_text, soma_text)
+        # Side Query Engine holen
+        side_query = None
+        try:
+            from brain_core.side_query import get_side_query
+            side_query = get_side_query()
+            if not side_query._client:          # ← NEU
+                await side_query.initialize()   # ← NEU
+        except Exception:
+            pass
+        await extractor.maybe_extract(
+            messages=messages,
+            side_query_engine=side_query,
+            memory_orchestrator=orchestrator,
+            force=force,
+        )
     except Exception as e:
         logger.debug(f"auto_extract_error: {e}")
 

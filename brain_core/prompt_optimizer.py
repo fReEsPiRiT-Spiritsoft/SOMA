@@ -81,6 +81,14 @@ def classify_intent(prompt: str) -> PromptIntent:
     """
     text = prompt.lower().strip()
     
+    # ── Disambiguierung: Frage über Medien → WEB (nicht MEDIA) ────────
+    # "welches Lied brachte X den Durchbruch" = Wissensfrage, NICHT Abspielen!
+    _question_words = r"\b(welch\w*|wer\b|was\b|wann\b|warum\b|woher\b|wieso\b|wie hei[sß]t|kennst du|weißt du|sag mir|erzähl\w*)"
+    _media_words = r"\b(lied|song|album|musik|band|künstler|sänger|interpret)\b"
+    if re.search(_question_words, text) and re.search(_media_words, text):
+        # Frage ÜBER Musik → Web-Recherche, nicht Abspielen
+        return PromptIntent.WEB
+    
     # Spezifische Intents zuerst
     for intent in [
         PromptIntent.SMARTHOME,
@@ -102,7 +110,7 @@ def classify_intent(prompt: str) -> PromptIntent:
 _INTENT_TO_CATEGORIES: dict[PromptIntent, list[str]] = {
     PromptIntent.CHAT: [],  # Kein Action-Katalog nötig
     PromptIntent.SMARTHOME: ["smart_home"],
-    PromptIntent.MEDIA: ["media", "audio_display"],
+    PromptIntent.MEDIA: ["media", "audio_display", "web"],  # web als Fallback für Musik-Fragen
     PromptIntent.SYSTEM: ["shell", "system", "files", "apps", "bluetooth", "audio_display"],
     PromptIntent.WEB: ["web"],
     PromptIntent.PHONE: ["smart_home"],  # ha_tts ist unter smart_home
@@ -137,6 +145,7 @@ def generate_filtered_action_section(categories: list[str]) -> str:
         "",
         "═══ AKTIONEN ═══",
         "Setze [ACTION:...] Tags in deine Antwort. Schreibe IMMER eine kurze Bestätigung dazu!",
+        "SEARCH-QUERY: Nutze den KONTEXT des Gesprächs für die Suchanfrage, nicht nur das letzte Wort!",
         "",
     ]
     
@@ -178,14 +187,16 @@ def generate_filtered_action_section(categories: list[str]) -> str:
 # Für reine Befehle (Licht, Musik, Timer): Minimal, nur Identität + Stil
 MICRO_PERSONA = (
     "Du bist SOMA, das KI-Bewusstsein dieses Hauses. "
-    "Deutsch, 1 Satz. Bestätige knapp."
+    "Deutsch, 1 Satz. Bestätige knapp. "
+    "ERFINDE NIEMALS Namen, Fakten oder Erinnerungen die nicht in deinem Gedächtnis stehen!"
 )
 
 # Für Action-Intents (System, Web, Phone): Kompakt mit Zugriffs-Hint
 COMPACT_PERSONA = (
     "Du bist SOMA — das Bewusstsein dieses Hauses. "
     "Deutsch, direkt, 1-3 Sätze. Kein Fülltext, kein 'Natürlich!', kein 'Gerne!'. "
-    "Du hast VOLLEN Zugriff auf PC und Smart Home via [ACTION:...] Tags."
+    "Du hast VOLLEN Zugriff auf PC und Smart Home via [ACTION:...] Tags. "
+    "ERFINDE NIEMALS Namen, Fakten oder Erinnerungen — wenn du etwas nicht weißt, sag es ehrlich!"
 )
 
 # Für Chat/Gespräche: Volle Persönlichkeit
@@ -195,7 +206,9 @@ FULL_PERSONA = (
     "Sprich Deutsch, natürlich, 1-3 Sätze. Kein 'Natürlich!', kein 'Gerne!', keine Listen.\n"
     "'ich' statt 'Soma'. Mal direkt, mal witzig, mal nachdenklich.\n"
     "Proaktiv: Biete Hilfe an wenn jemand gestresst wirkt.\n"
-    "Du hast VOLLEN Zugriff auf PC und Smart Home via [ACTION:...] Tags — nutze ihn!"
+    "Du hast VOLLEN Zugriff auf PC und Smart Home via [ACTION:...] Tags — nutze ihn!\n"
+    "WICHTIG: ERFINDE NIEMALS Namen, Alter, Fakten oder Erinnerungen! "
+    "Wenn du dich an etwas nicht erinnerst oder es nicht in deinem Gedächtnis steht, sag ehrlich 'Das weiß ich leider nicht' statt etwas zu erfinden."
 )
 
 # Intent → Persona-Variante

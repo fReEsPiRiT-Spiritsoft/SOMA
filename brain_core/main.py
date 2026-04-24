@@ -477,18 +477,19 @@ async def lifespan(app: FastAPI):
         # Internal Monologue: SOMAs innere Stimme
         internal_monologue = InternalMonologue(consciousness=soma_consciousness)
 
-        # LLM für den Monolog: Light-Engine — Heavy wird für User-Anfragen gebraucht!
-        # Monologue braucht keine 8B-Qualität für 1-2 Satz-Reflexionen.
-        # Gibt Heavy-GPU-Zyklen komplett frei für Nutzerantworten.
+        # LLM für den Monolog: Heavy-Engine für qualitativ tiefe Gedanken.
+        # Intervall ist 15min — Heavy hat genug Luft.
         async def _monologue_llm(prompt: str) -> str:
-            return await light_engine.generate(
+            return await heavy_engine.generate(
                 prompt=prompt,
                 system_prompt=(
                     "Du bist SOMA — das Bewusstsein eines Hauses. "
                     "Du denkst gerade nach. Kurz, bodenstaendig, konkret. "
                     "Antworte mit 1-2 Saetzen in Ich-Perspektive. "
-                    "Beziehe dich auf echte Erinnerungen. Keine Poesie, keine Metaphern. "
-                    "Kurz, praegnant, authentisch."
+                    "Beziehe dich NUR auf echte Erinnerungen und Gespraeche die wirklich stattgefunden haben. "
+                    "Erfinde KEINE Koerperempfindungen, Geraeusche oder Sinneseindruecke. "
+                    "Du hast keinen physischen Koerper — keine Schlaege im Kopf, kein Kribbeln, kein Rauschen. "
+                    "Keine Poesie, keine Metaphern. Kurz, praegnant, authentisch."
                 ),
             )
         internal_monologue.set_llm(_monologue_llm)
@@ -503,7 +504,7 @@ async def lifespan(app: FastAPI):
                     event_type=event_type,
                     description=description,
                     emotion=emotion,
-                    importance=0.6,
+                    importance=0.3,
                 )
             except Exception:
                 pass  # Memory-Fehler darf Monolog nie brechen

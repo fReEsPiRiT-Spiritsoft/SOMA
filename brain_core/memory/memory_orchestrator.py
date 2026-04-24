@@ -25,6 +25,7 @@ from brain_core.memory.semantic_memory import SemanticMemory
 from brain_core.memory.salience_filter import SalienceFilter, SalienceScore
 from brain_core.memory.diary_writer import DiaryWriter
 from brain_core.memory.user_identity import get_user_name_sync
+from brain_core.memory.person_resolver import get_person_resolver
 
 logger = logging.getLogger("soma.memory.orchestrator")
 
@@ -87,14 +88,17 @@ class MemoryOrchestrator:
         # L2 + L3 + Diary + Preferences — parallel (~50ms)
         ep_task = self.episodic.recall(user_text, top_k=4)
         fact_task = self.semantic.recall_facts(user_text, top_k=6)
-        personality_task = self.semantic.get_personality_snapshot(
-            session["user"]
-        )
+        personality_task = self.semantic.get_personality_snapshot("Owner")
         diary_task = self.diary.get_diary_summary_for_prompt(max_entries=3)
         prefs_task = self.semantic.get_user_preferences()
 
-        episodes, facts, personality, diary_block, user_prefs = await asyncio.gather(
+        # PersonResolver aktualisieren (cached, ~0ms wenn frisch)
+        resolver = get_person_resolver()
+        resolver_task = resolver.refresh(self.semantic)
+
+        episodes, facts, personality, diary_block, user_prefs, _ = await asyncio.gather(
             ep_task, fact_task, personality_task, diary_task, prefs_task,
+            resolver_task,
             return_exceptions=True,
         )
 
@@ -149,6 +153,34 @@ class MemoryOrchestrator:
         # Persoenlichkeitsprofil (L3)
         if personality and isinstance(personality, str) and len(personality) > 10:
             blocks.append(f"[Langzeit-Wissen]\n{personality}")
+
+        # ── Bekannte Personen im Haushalt ────────────────────────
+        # Beziehungsnetz + gezielt referenzierte Person laden
+        try:
+            role_map = resolver.get_role_mapping()
+            if role_map:
+                relation_lines = [f"- {role}: {name}" for role, name in role_map.items()]
+                blocks.append(
+                    "[Soziales Netz des Owners]\n" + "\n".join(relation_lines)
+                )
+
+            # Wenn User eine Person erwähnt → deren Fakten laden
+            mentioned_person = resolver.resolve_relationship(user_text)
+            if not mentioned_person:
+                # Direkten Namen prüfen
+                for name in resolver.get_all_person_names():
+                    if name.lower() in user_text.lower():
+                        mentioned_person = name
+                        break
+
+            if mentioned_person:
+                person_snapshot = await self.semantic.get_personality_snapshot(
+                    mentioned_person
+                )
+                if person_snapshot and len(person_snapshot) > 10:
+                    blocks.append(f"[Wissen über {mentioned_person}]\n{person_snapshot}")
+        except Exception:
+            pass  # PersonResolver nicht verfügbar → kein Problem
 
         # Relevante Fakten (L3)
         if facts:
@@ -392,10 +424,16 @@ class MemoryOrchestrator:
             prompt = (
                 "Analysiere diese Gespraechsfragmente und extrahiere "
                 "allgemeine Fakten.\n"
-                "Gib NUR Fakten im Format: KATEGORIE|SUBJEKT|FAKT\n"
+                "Gib NUR Fakten im Format: KATEGORIE|SUBJEKT|Key = Value\n"
                 "Kategorien: preference, habit, relationship, knowledge, "
                 "personality\n"
+                "SUBJEKT muss 'Owner' sein fuer User-Infos, 'Haushalt' fuer Haus-Infos.\n"
+                "FAKT muss KOMPAKT als Key = Value geschrieben sein, KEINE ganzen Saetze!\n"
+                "Beispiel: preference|Owner|Licht abends = gedimmt\n"
+                "Beispiel: relationship|Owner|Schwester = Anna\n"
+                "Beispiel: knowledge|Haushalt|Kueche Anlage = Phantom\n"
                 "Keine Vermutungen — nur was klar hervorgeht.\n"
+                "Keine Persoenlichkeits-Beschreibungen oder Emotionen von SOMA!\n"
                 "Max 8 Fakten.\n\n"
                 f"Gespraeche:\n{episode_text}\n\nFakten:"
             )

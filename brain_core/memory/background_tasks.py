@@ -162,13 +162,13 @@ class BackgroundConsolidator:
                     await self._run_desensitization()
                     self._last_desensitization = now
 
-                # Phase 7: Kreative Rekombination
-                # Unverbundene Erinnerungen zu neuen Einsichten verknuepfen
-                if (now - self._last_recombination
-                        > RECOMBINATION_COOLDOWN_SEC):
-                    logger.info("dream_phase_recombination")
-                    await self._run_recombination()
-                    self._last_recombination = now
+                # Phase 7: Kreative Rekombination — DEAKTIVIERT
+                # Erzeugt halluzinierte "creative_insight" Fakten die den
+                # Prompt verschmutzen. Deaktiviert bis Quality-Filter existiert.
+                # if (now - self._last_recombination
+                #         > RECOMBINATION_COOLDOWN_SEC):
+                #     await self._run_recombination()
+                #     self._last_recombination = now
 
             except asyncio.CancelledError:
                 break
@@ -218,10 +218,15 @@ class BackgroundConsolidator:
                 prompt = (
                     "Analysiere diese zusammengehoerenden Gespraechsfragmente "
                     "und extrahiere allgemeine Fakten.\n"
-                    "Gib NUR Fakten im Format: KATEGORIE|SUBJEKT|FAKT\n"
+                    "Gib NUR Fakten im Format: KATEGORIE|SUBJEKT|Key = Value\n"
                     "Kategorien: preference, habit, relationship, knowledge, "
                     "personality\n"
+                    "SUBJEKT muss 'Owner' sein fuer User-Infos, 'Haushalt' fuer Haus-Infos.\n"
+                    "FAKT muss KOMPAKT als Key = Value geschrieben sein, KEINE ganzen Saetze!\n"
+                    "Beispiel: preference|Owner|Licht abends = gedimmt\n"
+                    "Beispiel: knowledge|Haushalt|Kueche Anlage = Phantom\n"
                     "Keine Vermutungen — nur was klar hervorgeht.\n"
+                    "Keine Persoenlichkeits-Beschreibungen oder Emotionen von SOMA!\n"
                     "Max 5 Fakten.\n\n"
                     f"Gespraeche (thematisch zusammengehoerend):\n"
                     f"{episode_text}\n\nFakten:"

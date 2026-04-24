@@ -60,6 +60,31 @@ class SemanticMemory:
         loop = asyncio.get_event_loop()
         self._conn = await loop.run_in_executor(None, self._open_db)
         logger.info("Semantic memory ready")
+        # Embeddings für Fakten ohne Embedding nachgenerieren
+        asyncio.create_task(self._backfill_embeddings())
+
+    async def _backfill_embeddings(self):
+        """Generiert Embeddings für Fakten die noch keine haben."""
+        if not self._conn:
+            return
+        try:
+            rows = self._conn.execute(
+                "SELECT id, subject, fact FROM facts WHERE embedding IS NULL"
+            ).fetchall()
+            if not rows:
+                return
+            logger.info(f"backfill_embeddings: {len(rows)} Fakten ohne Embedding")
+            for row_id, subject, fact in rows:
+                emb = await self._embed(f"{subject}: {fact}")
+                if emb is not None:
+                    self._conn.execute(
+                        "UPDATE facts SET embedding = ? WHERE id = ?",
+                        (emb.tobytes(), row_id),
+                    )
+            self._conn.commit()
+            logger.info(f"backfill_embeddings: {len(rows)} Embeddings generiert")
+        except Exception as e:
+            logger.warning(f"backfill_embeddings_error: {e}")
 
     def _open_db(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._db_path), check_same_thread=False)

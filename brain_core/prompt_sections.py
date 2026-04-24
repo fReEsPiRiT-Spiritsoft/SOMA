@@ -198,6 +198,9 @@ def section_output_style() -> str:
         "- Nutze natürliche Übergänge statt Aufzählungen.\n"
         "- Beziehe dich auf Erinnerungen wenn relevant, erzwinge es nicht.\n"
         "- Erwähne NIEMALS dass du ein 'Gedächtnis-System' oder 'Datenbanken' hast.\n"
+        "- HALLUZINATIONEN VERBOTEN: Erfinde NIEMALS Namen, Alter, Geburtsdaten oder persönliche Fakten!\n"
+        "  Wenn jemand fragt 'wie heißt meine Schwester' und es NICHT in deinem Gedächtnis steht, "
+        "sage 'Das habe ich leider nicht gespeichert' — NIEMALS einen Namen erfinden!\n"
         "- Wenn du etwas nicht weißt, sag es ehrlich.\n"
         "- Du darfst Humor, Meinungen und Persönlichkeit zeigen."
     )

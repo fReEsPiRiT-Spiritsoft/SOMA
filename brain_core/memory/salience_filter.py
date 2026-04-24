@@ -41,6 +41,19 @@ TRIVIAL_PATTERNS = [
     r"^soma[\.\!\?]?$",
 ]
 
+# Muster die persönliche/familiäre Informationen erkennen → IMMER speichern
+PERSONAL_INFO_PATTERNS = [
+    r"\b(ich hei[sß]e|mein name ist|ich bin der|ich bin die)\b",
+    r"\b(mein[e]?\s+(schwester|bruder|mutter|vater|mama|papa|frau|mann|sohn|tochter|oma|opa|freund|freundin|partner|partnerin))\b",
+    r"\b(schwester|bruder|mutter|vater|frau|mann|sohn|tochter)\s+hei[sß]t\b",
+    r"\b(ich bin|ich werde)\s+\d+\s*(jahre)?\s*(alt)?\b",
+    r"\b(geburtstag|geboren)\b",
+    r"\b(wohn[et]?\s+in|leb[et]?\s+in|komm[et]?\s+aus)\b",
+    r"\b(arbeite\s+(als|bei|für)|beruf|job)\b",
+    r"\b(mein[e]?\s+(hund|katze|haustier|tier))\s+hei[sß]t\b",
+    r"\b(allergi|unverträglich|vegetari|vegan)\b",
+]
+
 
 @dataclass
 class SalienceScore:
@@ -106,6 +119,25 @@ class SalienceFilter:
             if re.match(pattern, text_lower):
                 score.total = 0.05
                 score.reason = "trivial_response"
+                return score
+
+        # ── 0b. Persönliche Info → IMMER speichern (Override) ───────
+        for pattern in PERSONAL_INFO_PATTERNS:
+            match = re.search(pattern, text_lower)
+            if match:
+                score.total = 0.90
+                score.explicit_importance = 1.0
+                score.is_salient = True
+                score.is_highly_salient = True
+                score.reason = f"personal_info:{match.group()}"
+                # Topic-Tracking aktualisieren
+                self._recent_topics.append(user_text[:60])
+                if len(self._recent_topics) > 20:
+                    self._recent_topics.pop(0)
+                logger.info(
+                    "salience: personal_info detected → forced high salience: %s",
+                    match.group(),
+                )
                 return score
 
         # ── 1. Emotionaler Arousal (Gewicht: 30%) ───────────────────

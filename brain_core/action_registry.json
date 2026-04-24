@@ -128,6 +128,10 @@
     "web": {
       "icon": "🌐",
       "label": "WEB & RECHERCHE",
+      "rules": [
+        "Search-Query MUSS das eigentliche Thema enthalten — wenn der User sagt 'such im Internet', nutze den KONTEXT des Gesprächs für die Query!",
+        "Fragen ÜBER Musik/Lieder/Künstler → [ACTION:search] (NICHT youtube!)"
+      ],
       "tags": {
         "search": {
           "description": "Web-Suche (DuckDuckGo) — Ergebnisse werden dir zurückgegeben, fasse sie zusammen!",

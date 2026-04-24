@@ -950,6 +950,14 @@ class LogicRouter:
         """
         parts = []
 
+        # ── DATUM & UHRZEIT (IMMER — SOMA weiss immer wann es ist) ─────
+        from datetime import datetime as _dt
+        _now = _dt.now()
+        parts.append(
+            f"AKTUELLES DATUM UND UHRZEIT: {_now.strftime('%A, %d. %B %Y, %H:%M Uhr')}\n"
+            f"Du WEISST das Datum und die Uhrzeit immer — frage NIEMALS den Nutzer danach."
+        )
+
         # ── BEWUSSTSEINSZUSTAND (Phase 2 Ego) ─────────────────────────────
         if _consciousness_ref is not None:
             try:
